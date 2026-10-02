@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Astrocontroller</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23111827' stroke='%2393c5fd' stroke-width='2'/><circle cx='16' cy='16' r='5' fill='%2393c5fd'/></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/marked.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo"></span>Astrocontroller</div>
+    <div class="chips" id="chips">
+      <span class="chip" id="chip-conn"><i class="dot"></i><span>connecting…</span></span>
+      <span class="chip" id="chip-battery" title="Battery">🔋 –</span>
+      <span class="chip" id="chip-temp" title="Body / sensor temperature">🌡 –</span>
+      <span class="chip" id="chip-mode" title="Shooting mode">mode –</span>
+      <span class="chip" id="chip-mount" title="Mount mode and motor angles">mount –</span>
+      <span class="chip" id="chip-sd" title="SD card free">SD –</span>
+      <span class="chip" id="chip-wx" title="Weather now / tonight">☁ –</span>
+    </div>
+    <div class="top-actions">
+      <button class="ghost" id="btn-night" title="Red night-vision mode">Night</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ========== Left: live views + controls ========== -->
+    <section class="col-views">
+      <div class="views">
+        <figure class="view view-main" id="view-main" data-src="tele">
+          <img alt="" id="img-main">
+          <figcaption><span class="view-name">Tele</span><span class="view-meta" id="meta-main"></span></figcaption>
+          <div class="view-empty" id="empty-main">waiting for stream…</div>
+          <div class="view-buttons">
+            <button class="mini" data-swap="tele">Tele</button>
+            <button class="mini" data-swap="wide">Wide</button>
+            <button class="mini" data-swap="stack">Stack</button>
+            <button class="mini" id="btn-fullscreen" title="Fullscreen">⛶</button>
+          </div>
+        </figure>
+        <div class="view-side">
+          <figure class="view view-small" id="view-a" data-src="wide">
+            <img alt="" id="img-a">
+            <figcaption><span class="view-name">Wide</span></figcaption>
+          </figure>
+          <figure class="view view-small" id="view-b" data-src="stack">
+            <img alt="" id="img-b">
+            <figcaption><span class="view-name">Stack</span><span class="view-meta" id="meta-stack"></span></figcaption>
+          </figure>
+        </div>
+      </div>
+
+      <div class="stackbar" id="stackbar" hidden>
+        <div class="stackbar-head"><strong id="stack-target">Live stacking</strong><span id="stack-text"></span></div>
+        <div class="progress"><div id="stack-progress"></div></div>
+        <div class="stack-stats" id="stack-stats"></div>
+      </div>
+
+      <div class="controls card">
+        <div class="pad">
+          <button data-nudge="315">↖</button><button data-nudge="0">↑</button><button data-nudge="45">↗</button>
+          <button data-nudge="270">←</button><button class="stop" id="btn-stop" title="Stop all motion">■</button><button data-nudge="90">→</button>
+          <button data-nudge="225">↙</button><button data-nudge="180">↓</button><button data-nudge="135">↘</button>
+        </div>
+        <div class="ctl-groups">
+          <div class="ctl-row">
+            <label>Speed <input type="range" id="speed" min="0.05" max="1" step="0.05" value="0.4"></label>
+            <button data-act="home" title="Home both axes (needed after power-on)">Home</button>
+            <button data-act="level" title="Point level with the horizon">Level</button>
+            <button data-act="park" title="Park pointing down">Park</button>
+          </div>
+          <div class="ctl-row capture-row">
+            <strong class="row-label">Capture</strong>
+            <select id="cap-cam" title="Camera"><option value="tele">tele</option><option value="wide">wide</option></select>
+            <button class="primary" id="btn-photo">📷 Photo</button>
+            <span class="burst"><button id="btn-burst">Burst ×</button><input id="inp-burst" type="number" min="3" max="999" value="10" title="frames"></span>
+            <button id="btn-record">● Record</button>
+            <button id="btn-stack" title="Start deep-sky live stacking (DSO mode; run GoTo first)">▶ Stack</button>
+          </div>
+          <div class="ctl-row">
+            <strong class="row-label">Focus</strong>
+            <button data-act="autofocus">AF</button>
+            <button data-act="autofocus-astro" title="Star-based autofocus">AF ★</button>
+            <button data-focus="near" title="Focus nearer">F−</button>
+            <button data-focus="far" title="Focus farther">F+</button>
+          </div>
+          <div class="ctl-row">
+            <select id="sel-mode" title="Shooting mode">
+              <option>Normal</option><option>DSO</option><option>Sun</option><option>Moon</option><option>Planet</option>
+              <option>Milky Way</option><option>Star Trail</option><option>Auto Tracking</option><option>Panorama</option>
+            </select>
+            <select id="sel-cam"><option value="tele">tele</option><option value="wide">wide</option></select>
+            <input id="inp-exp" placeholder="exp e.g. 1/250 / auto" size="10">
+            <input id="inp-gain" placeholder="gain" size="4">
+            <button id="btn-apply">Apply</button>
+          </div>
+          <div class="ctl-row">
+            <button data-act="stack_stop" class="warn">Stop stacking</button>
+            <button data-act="goto_stop" class="warn">Stop GoTo</button>
+            <button data-act="sync" title="Push time & location">Sync time/loc</button>
+            <button data-act="liveview" title="Wake RTSP previews">Wake view</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="status-grid card" id="status-grid"></div>
+    </section>
+
+    <!-- ========== Right: chat + tabs ========== -->
+    <section class="col-side">
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="chat">Agent</button>
+        <button class="tab" data-tab="tonight">Tonight</button>
+        <button class="tab" data-tab="album">Album</button>
+        <button class="tab" data-tab="library">Library</button>
+        <button class="tab" data-tab="skills">Skills</button>
+        <button class="tab" data-tab="log">Log</button>
+      </nav>
+
+      <div class="panel active" id="panel-chat">
+        <div class="agent-bar">
+          <span id="agent-status" class="agent-status">agent: –</span>
+          <label class="think">thinking
+            <select id="sel-thinking">
+              <option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option>
+            </select>
+          </label>
+          <button class="ghost" id="btn-new" title="Start a new conversation">New</button>
+        </div>
+        <div class="chat" id="chat"></div>
+        <form class="composer" id="composer">
+          <div class="attach-list" id="attach-list"></div>
+          <textarea id="prompt" rows="2" placeholder="Ask the agent… e.g. “What should I image tonight?” or “Raise the scope and show me the wide view”"></textarea>
+          <div class="composer-actions">
+            <label class="ghost file">📎<input type="file" id="file" accept="image/*" multiple hidden></label>
+            <button type="button" class="ghost" id="btn-snap" title="Attach the current main view">＋view</button>
+            <span class="spacer"></span>
+            <button type="button" class="warn" id="btn-abort" hidden>Stop</button>
+            <button type="submit" class="primary" id="btn-send">Send</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel" id="panel-tonight">
+        <div class="card" id="conditions">loading…</div>
+        <div class="card" id="weather">weather loading…</div>
+        <div class="row-head">
+          <h3>Best targets tonight</h3>
+          <select id="sel-plan-type"><option value="">all types</option><option value="galaxy">galaxies</option><option value="emission">emission nebulae</option><option value="nebula">nebulae</option><option value="cluster">clusters</option><option value="planetary">planetary</option></select>
+        </div>
+        <div id="plan">–</div>
+      </div>
+
+      <div class="panel" id="panel-album">
+        <div class="row-head">
+          <select id="sel-album"><option value="0">all</option><option value="4">astro</option><option value="1">photos</option><option value="2">videos</option><option value="3">burst</option><option value="5">panorama</option></select>
+          <span id="album-counts" class="muted"></span>
+          <span class="spacer"></span>
+          <button class="ghost" id="album-prev">‹</button><span id="album-page">1</span><button class="ghost" id="album-next">›</button>
+        </div>
+        <div class="grid" id="album"></div>
+      </div>
+
+      <div class="panel" id="panel-library">
+        <div class="card"><h3>Transfers</h3><div id="jobs" class="muted">no jobs</div></div>
+        <div class="card">
+          <div class="row-head"><h3>Sessions on the telescope</h3><button class="ghost" id="btn-sessions">Refresh</button></div>
+          <div id="sessions" class="muted">press Refresh</div>
+        </div>
+        <div class="card"><h3>Library <span class="muted" id="lib-root"></span></h3><div id="library" class="muted">–</div></div>
+        <div class="card"><h3>Agent captures</h3><div class="grid" id="captures"></div></div>
+      </div>
+
+      <div class="panel" id="panel-skills">
+        <p class="muted small">Skills are the agent's playbooks. It reads them before tasks and refines them as it learns. You can edit them here too.</p>
+        <div class="skills-layout">
+          <ul id="skills" class="skill-list"></ul>
+          <div class="skill-editor">
+            <div class="row-head"><strong id="skill-name">select a skill</strong><span class="spacer"></span><button id="btn-skill-save" class="primary" disabled>Save</button></div>
+            <textarea id="skill-content" spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-log"><div id="log" class="log"></div></div>
+    </section>
+  </main>
+
+  <div class="lightbox" id="lightbox" hidden><img alt=""><div class="lb-caption"></div></div>
+  <div class="toast" id="toast" hidden></div>
+</body>
+</html>

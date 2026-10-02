@@ -1,0 +1,37 @@
+{
+  "name": "astrocontroller",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-driven control of a DWARFLAB Dwarf 3 smart telescope: MCP server, live web UI, and an Oh My Pi agent.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsc -p tsconfig.json && node --env-file-if-exists=.env dist/index.js",
+    "catalog": "node scripts/fetch-catalog.mjs",
+    "smoke": "node --env-file-if-exists=.env dist/tools/smoke.js"
+  },
+  "dependencies": {
+    "@alikh/dwarflab-sdk": "^0.1.1",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "astronomy-engine": "^2.1.19",
+    "basic-ftp": "^6.2.1",
+    "express": "^5.2.1",
+    "long": "^5.3.2",
+    "marked": "^16.4.2",
+    "protobufjs": "^7.4.0",
+    "sharp": "^0.35.5",
+    "ws": "^8.22.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.15.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  }
+}

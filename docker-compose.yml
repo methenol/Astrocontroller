@@ -1,0 +1,21 @@
+services:
+  astrocontroller:
+    build: .
+    image: astrocontroller:latest
+    container_name: astrocontroller
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Fixed inside the container; the host side comes from .env.
+      DATA_DIR: /data
+      LIBRARY_DIR: /library
+      WEB_PORT: "8080"
+      TZ: ${OBSERVER_TIMEZONE:-UTC}
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    volumes:
+      # Agent home, sessions, skills, notes, captures.
+      - ./data:/data
+      # Your imagery library (FITS lights, stacks, calibration frames).
+      - ${LIBRARY_PATH:-./library}:/library

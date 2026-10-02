@@ -1,0 +1,30 @@
+---
+name: cloud-gap-imaging
+description: Imaging on partly cloudy nights — watching the forecast and the wide camera for clear gaps, starting and pausing stacking as clouds come and go.
+---
+# Cloud-gap imaging
+
+Goal: collect clean subs in the clear gaps without filling the stack with cloudy frames or losing pointing.
+
+## Before starting
+- `weather_forecast` → hours with the best scores and cloud layers. **High** cloud (thin cirrus) still lets bright targets through; **low/mid** cloud blocks everything.
+- Pick a target that is high (> 45°) during the hoped-for gaps, and bright. Emission nebulae with Duo-Band tolerate haze better than galaxies.
+- Waiting for gaps leaves the scope idle, and the Dwarf may **auto-power-off** when idle. `autoShutdown` is a device-wide setting (shown under `deviceSettings` in `get_camera_settings`). With the user's OK: `set_camera_setting camera=tele setting=autoShutdown value=false`; the tool reads it back and reports "verified on device". Restore it (`value=true`) at the end if the user wants.
+
+## Is the sky clear right now?
+- `analyze_image source=wide` on a night frame: star count is the clear-sky meter. Note the count on a known-clear moment in `NOTES.md` to calibrate ("clear ≈ N stars").
+  - Many stars, roundness fine → clear. Stars dropping toward 0 with a brighter, flatter background → cloud. Few stars everywhere with a dark background → dew on the lens or wrong exposure.
+- `view_camera source=wide stretch=true` to see cloud structure and which way it's moving.
+
+## Loop
+1. When clear: `goto_target` (calibration needs stars, so only attempt in a gap), `focus_position action=infinity`, then astro autofocus if time allows, then `live_stacking action=start`.
+2. Every 2–5 min: `stacking_status`. If `rejected` rises quickly or the stack stops growing, check the wide view.
+3. Cloud arriving: `live_stacking action=stop` (normal stop keeps the stack so far). Don't move the scope. The pointing stays valid if the mount isn't disturbed.
+4. Waiting: `wait seconds=300` + a wide-camera star check. Stay within the user's session window.
+5. Gap returns: start stacking again. If stars look shifted or the target isn't centred, re-run `goto_target` first. Each start creates a new session folder on the SD card. That's fine: the user can stack them together later from the library.
+6. End of window: stop, summarise (clear minutes, frames stacked/rejected per segment), and offer `transfer_session` for each segment.
+
+Record what worked in "Learned" below (e.g. the clear-sky star count, how long gaps lasted, reject rates).
+
+## Learned
+- *nothing yet*
