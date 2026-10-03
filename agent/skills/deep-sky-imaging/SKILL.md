@@ -21,30 +21,23 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 ## 3. Focus
 - Start from the stored infinity position: `focus_position action=infinity` (seconds, no stars needed).
 - Then `autofocus mode=astro` once per night, and again if the temperature drops > 5 °C.
-- Check it: `analyze_image source=tele` → median HFR. Good: ≲ 2.5 px at 1280-px preview width. If it's soft, run astro AF again.
+- Check it: `analyze_image source=tele` → median HFR. Good: ≲ 2.5 px at 1280-px preview width. If it's soft, run astro AF again. Once subs arrive, `analyze_subs` gives the real numbers.
 
-## 4. Exposure & gain (starting points)
-| Mount | Sub length | Gain | Notes |
-|---|---|---|---|
-| Alt-Az, target alt < 70° | 15 s | 60 | default; field rotation limits longer subs |
-| Alt-Az, near pole (Dec > 70°) | 30 s | 60 | less field rotation |
-| Alt-Az, target alt > 75° | 10 s | 80 | fast azimuth tracking near zenith, many rejects |
-| EQ mode (polar aligned) | 60 s | 60 | longer subs fine once aligned |
-- The device already holds **dark masters for 15 s / 30 s / 60 s at gain 60** (`/Astronomy/CALI_FRAME/dark`). Prefer those combinations so darks get applied.
-- Set via `live_stacking action=start exposure=15 gain=60 filter=Duo-Band frames=999` (frames 999 = until stopped).
+## 4. Exposure, gain and filter: read **acquisition-profiles**
+- Choose a qualified profile: Alt-Az → **ALTAZ-15** (15 s, gain 60); EQ → **EQ-30**, or **EQ-60** for faint Duo-Band emission. The firmware requires EQ mode for ≥ 30 s.
+- Never change exposure or gain mid-session to "brighten" a target; every pair needs its own dark (**dark-library**).
+- Start: `live_stacking action=start exposure=15 gain=60 filter=Duo-Band frames=999` (frames 999 = until stopped).
 
-## 5. Monitor (every 5–10 min)
-- `stacking_status` → watch `rejected` (taken − stacked). A rising reject rate means clouds, wind, dew, or field rotation. Shorten subs or check the sky.
-- `view_camera source=stack stretch=true` to see progress. `analyze_image source=stack` for star roundness < 0.7 = trailing.
-- `wait seconds=300` between checks. Report integration time to the user periodically.
-- Stop if: target below ~20° altitude, dawn within 20 min, battery < 10%, or the stack stops growing.
+## 5. Monitor: follow **session-qc**
+- After the first cohort (12 subs; 20 at 60 s) take the baseline with `analyze_subs`, then check every 5–10 min (`wait seconds=300` between checks).
+- Refocus on sustained HFR growth or ≥ 5 °C cooling. EQ-60 → EQ-30 on trailing. Pause for clouds without touching settings.
+- Stop if: target below ~25° altitude, dawn within 20 min, battery < 10%, SD < 2 GB, or the stack stops growing.
 - With a multi-target plan, check the time against the plan at every check, and move on when a target's slot ends (or its altitude window closes), not only when something goes wrong.
-- Clouds: if the reject rate jumps and `weather_forecast` shows cloud arriving, pause (stop stacking) rather than collect junk; resume when the forecast clears and the wide view shows stars.
-- Dew: a dew-point spread < 2 °C means dew forming on the lens is likely. Warn the user (a dew heater helps); falling star counts at constant cloud cover usually mean dew.
+- Dew: a dew-point spread < 2 °C means dew on the lens is likely. Warn the user (a dew heater helps); falling star counts at constant cloud cover usually mean dew.
 
 ## 6. Finish
 - `live_stacking action=stop` (normal stop finalises the stack; `fast_stop` skips final processing).
 - `list_album type=astro` → newest entry. `view_image source=device:<stacked.jpg path>` and assess it.
 - `transfer_session session=latest` copies the subs, stacks and CALI_FRAME masters to the library (NAS) and, with auto-processing on, queues the session in AstroPhoto Studio. `pool=true` stacks it together with earlier nights of the same target. In an unattended plan, do this for every target without asking. The transfer runs in the background while you slew to the next target. If FTP during stacking turns out to cause problems, record it here and transfer between targets or at the end instead.
 - `processing_status` lists the outbox and the server queue. Tell the user which profile ran and when results are expected.
-- Update this skill or `NOTES.md` with anything learned (good settings, reject causes, timings).
+- Append the target's line to `session-log.jsonl` (session-qc). Update this skill or `NOTES.md` with anything learned (reject causes, timings).

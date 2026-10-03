@@ -11,7 +11,7 @@ Use both your eyes (`view_camera`, `view_image`) and the numbers (`analyze_image
 | `stars.medianHfrPx` | star size (focus/seeing) | ≲ 2.5 (1280 preview), ≲ 3.5 (full-res FITS superpixel) | rising over the night → refocus |
 | `stars.medianRoundness` | minor/major axis | > 0.8 | < 0.7 → trailing (wind, field rotation, polar alignment) |
 | `stars.count` | detection | dozens–hundreds | near 0 in a sky frame → clouds, dew, wrong pointing |
-| `saturatedPercent` | clipping | < 0.5% (astro), ~0 (Moon/planets) | high → shorter exposure / lower gain |
+| `saturatedPercent` | clipping | < 0.5% (astro), ~0 (Moon/planets) | Moon/planets/daytime: shorter exposure. Deep-sky subs: keep the profile (bright star cores clip harmlessly; see acquisition-profiles) |
 | `stats.median` (non-linear JPEG) | background brightness | 0.05–0.25 at night | > 0.4 → twilight, Moon glow, light pollution |
 | `sharpness` | Laplacian variance | compare relative between shots | for manual/daytime focus, maximise it |
 | `colorMeans` | channel balance | — | strong cast → white balance (daytime) |

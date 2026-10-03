@@ -1053,6 +1053,33 @@ export class Dwarf extends EventEmitter {
   }
 
   /** Escape hatch: send any command with an explicit proto type. */
+  /** The tele camera's dark masters as the firmware lists them (11023): its own index codes plus readable names. */
+  async darkFrameList(): Promise<Array<{ expIndex: number; gainIndex: number; binIndex: number; exposure: string; gain: string; bin: string; temperatureC?: number }>> {
+    const r = await this.request(11023, {}, { timeout: 15000 });
+    return ((r?.results ?? []) as Array<Record<string, any>>).map((d) => ({
+      expIndex: Number(d.expIndex ?? 0),
+      gainIndex: Number(d.gainIndex ?? 0),
+      binIndex: Number(d.binIndex ?? 0),
+      exposure: String(d.expName ?? ''),
+      gain: String(d.gainName ?? ''),
+      bin: String(d.binName ?? ''),
+      temperatureC: d.temperature ?? undefined,
+    }));
+  }
+
+  /** Capture a tele dark master (11021) with the firmware's index codes; progress arrives in state.darkCapture. */
+  async captureDarks(expIndex: number, gainIndex: number, binIndex: number, frames: number): Promise<void> {
+    const r = await this.request(11021, { expIndex, gainIndex, binIndex, capSize: frames }, { timeout: 30000, allowError: true });
+    const code = Number(r?.code ?? 0);
+    if (code < 0) throw new DwarfCommandError(11021, code, r ?? {});
+    this.state.darkCapture = { state: 'running', progress: 0 };
+    this.changed();
+  }
+
+  async stopDarks(): Promise<void> {
+    await this.request(11022, {}, { bestEffort: true, timeout: 10000 });
+  }
+
   async raw(cmd: number, params: Record<string, unknown>, reqType?: string, resType?: string, timeoutMs = 15000) {
     return this.request(cmd, params, {
       reqType: reqType ? protoTypeByName(reqType) : undefined,

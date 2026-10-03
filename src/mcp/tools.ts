@@ -15,6 +15,7 @@ import { planNight } from '../astro/planner.js';
 import * as sky from '../astro/sky.js';
 import * as weather from '../astro/weather.js';
 import * as library from '../library/transfer.js';
+import { listDir } from '../dwarf/ftp.js';
 import * as processing from '../processing/queue.js';
 import * as studio from '../processing/studio.js';
 
@@ -814,6 +815,95 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!it) throw new Error(`no processing item ${id}`);
       const server = it.studioJobId ? await studio.job(it.studioJobId).catch((e) => ({ error: errMsg(e) })) : undefined;
       return text({ ...it, server });
+    },
+  );
+
+  tool(
+    'analyze_subs',
+    'Quality check of the newest RAW subframes (FITS) of an imaging session on the SD card, while it runs: per sub the star count, HFR/FWHM (focus), roundness (tracking / field rotation), background, saturation, sensor temperature and whether the scope rejected it (failed_). Use during live stacking to judge focus drift, trailing, dew or cloud from real subs rather than the stretched stack preview. Each sub is ~16 MB over Wi-Fi.',
+    {
+      count: z.number().int().min(1).max(6).optional().describe('newest N subs (default 3)'),
+      session: z.string().optional().describe('DWARF_RAW_… folder; default the newest session'),
+    },
+    async ({ count, session }) => {
+      const folder = session ?? (await library.listDeviceSessions(false)).sessions[0]?.folder;
+      if (!folder) throw new Error('no astronomy sessions on the SD card');
+      const files = (await listDir(`/Astronomy/${folder}`)).filter((f) => !f.isDir && /\.fits$/i.test(f.name) && !/^stacked/i.test(f.name));
+      const stamp = (n: string) => n.match(/(\d{8}-\d{9})/)?.[1] ?? n;
+      files.sort((a, b) => stamp(a.name).localeCompare(stamp(b.name)));
+      const pick = files.slice(-(count ?? 3));
+      const subs = [];
+      for (const f of pick) {
+        const { img } = await loadImage(`device:/DWARF3/Astronomy/${folder}/${f.name}`, hub);
+        const a = analyze(img, 'tele');
+        subs.push({
+          file: f.name,
+          rejectedByScope: f.name.startsWith('failed_'),
+          sensorC: Number(f.name.match(/_(-?\d+)C\.fits$/i)?.[1]) || undefined,
+          stars: a.stars.count,
+          hfrPx: a.stars.medianHfrPx,
+          fwhmArcsec: a.stars.medianFwhmArcsec,
+          roundness: a.stars.medianRoundness,
+          background: a.stats.median,
+          saturatedPct: a.saturatedPercent,
+          notes: a.assessment.length ? a.assessment : undefined,
+        });
+      }
+      const med = (xs: Array<number | undefined>) => {
+        const v = xs.filter((x): x is number => typeof x === 'number').sort((p, q) => p - q);
+        return v.length ? v[Math.floor(v.length / 2)] : undefined;
+      };
+      return text({
+        session: folder,
+        subsOnCard: files.length,
+        rejectedOnCard: files.filter((f) => f.name.startsWith('failed_')).length,
+        median: { stars: med(subs.map((s) => s.stars)), hfrPx: med(subs.map((s) => s.hfrPx)), roundness: med(subs.map((s) => s.roundness)), background: med(subs.map((s) => s.background)) },
+        subs,
+      });
+    },
+  );
+
+  tool(
+    'dark_frames',
+    'Dark-frame library on the telescope (tele camera). list: the masters the firmware has (exposure, gain, bin, temperature) and the files in CALI_FRAME/dark with their stack counts, plus the current sensor temperature. capture: record a new master (the firmware stacks up to 20 frames) — ONLY after the operator has fitted the ND filter, retracted the lens and confirmed it (nd_filter_confirmed=true); a light leak ruins the master. Batch every needed combination into one ND session. stop: abort a capture. Progress shows in telescope_status.darkCapture.',
+    {
+      action: z.enum(['list', 'capture', 'stop']),
+      exposure_s: z.number().positive().optional(),
+      gain: z.number().optional(),
+      frames: z.number().int().min(5).max(20).optional().describe('frames stacked into the master (default 20, the firmware maximum)'),
+      nd_filter_confirmed: z.boolean().optional().describe('the operator confirmed the ND filter is on and the lens retracted'),
+    },
+    async ({ action, exposure_s, gain, frames, nd_filter_confirmed }) => {
+      if (action === 'stop') {
+        await dwarf.stopDarks();
+        return text('dark capture stopped');
+      }
+      if (action === 'capture' && nd_filter_confirmed !== true) throw new Error('Ask the operator to fit the ND filter and retract the lens cylinder, wait for their confirmation, then call again with nd_filter_confirmed=true. Nothing was captured.');
+      const listed = await dwarf.darkFrameList().catch((e) => ({ error: errMsg(e) }));
+      if (action === 'list') {
+        const files = await listDir('/Astronomy/CALI_FRAME/dark/cam_0').catch(() => []);
+        const masters = files.filter((f) => /\.fits$/i.test(f.name)).map((f) => ({
+          file: f.name,
+          exposureS: Number(f.name.match(/exp_([\d.]+)/)?.[1]),
+          gain: Number(f.name.match(/gain_(\d+)/)?.[1]),
+          tempC: Number(f.name.match(/_(-?\d+)C(?:_|\.)/)?.[1]),
+          stack: Number(f.name.match(/stack_(\d+)/)?.[1] ?? 1),
+        }));
+        return text({ sensorNowC: dwarf.state.cmosTempC.tele, capture: dwarf.state.darkCapture, firmwareList: listed, masterFiles: masters });
+      }
+      if (exposure_s === undefined || gain === undefined) throw new Error('exposure_s and gain are required');
+      const busy = dwarf.isBusy();
+      if (busy) throw new Error(`the telescope is busy (${busy}); stop it first`);
+      if (!Array.isArray(listed)) throw new Error(`cannot read the firmware's dark list (${listed.error}), which supplies the exposure/gain codes`);
+      // The firmware addresses exposure and gain by its own index codes; its dark list pairs them with names.
+      const expHit = listed.find((d) => Math.abs(parseFloat(d.exposure) - exposure_s) < 0.01);
+      const gainHit = listed.find((d) => Math.abs(parseFloat(d.gain) - gain) < 0.01);
+      if (!gainHit) throw new Error(`no known gain code for gain ${gain}: the firmware's dark list only covers gains ${[...new Set(listed.map((d) => d.gain))].join(', ') || 'none'}. Capture a dark at that gain once with the DWARFLAB app, then this tool can repeat it.`);
+      if (!expHit) throw new Error(`no known exposure code for ${exposure_s} s: the firmware's dark list covers ${[...new Set(listed.map((d) => d.exposure))].join(', ') || 'none'}. Capture that exposure once with the DWARFLAB app, then this tool can repeat it.`);
+      const n = frames ?? 20;
+      await dwarf.ensureMode('DSO');
+      await dwarf.captureDarks(expHit.expIndex, gainHit.gainIndex, expHit.binIndex, n);
+      return text(`dark capture started: ${exposure_s} s, gain ${gain}, ${expHit.bin || 'bin1'}, ${n} frames (≈${Math.ceil((n * exposure_s) / 60) + 1} min) at sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. Follow telescope_status.darkCapture; when every needed master is done, ask the operator to remove the ND filter before any light frame.`);
     },
   );
 
