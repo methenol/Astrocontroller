@@ -8,7 +8,9 @@ import { StreamHub } from './media/streams.js';
 import { mountMcp } from './mcp/server.js';
 import { mountWeb } from './web/server.js';
 import { AgentBridge } from './agent/omp.js';
+import { watchCharging } from './agent/charge-watch.js';
 import { catalog } from './astro/catalog.js';
+import { startProcessing, stopProcessing } from './processing/queue.js';
 
 const log = logger('main');
 
@@ -33,14 +35,17 @@ server.listen(config.web.port, () => {
   if (!config.observer.latitude || !config.observer.longitude) log.warn('OBSERVER_LATITUDE / OBSERVER_LONGITUDE not set — planning, calibration and GoTo need them');
   dwarf.start();
   catalog();
+  startProcessing();
   if (config.agent.enabled) {
     agent.start(`http://127.0.0.1:${config.web.port}/mcp`).catch((e) => log.error(`agent failed to start: ${errMsg(e)}`));
+    watchCharging(dwarf, agent);
   }
 });
 
 const shutdown = () => {
   log.info('shutting down');
   hub.shutdown();
+  stopProcessing();
   agent.stop();
   dwarf.stop();
   server.close();

@@ -27,7 +27,19 @@ function bool(name: string, fallback: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase());
 }
 
-const dataDir = path.resolve(str('DATA_DIR', './data'));
+function json(name: string): Record<string, unknown> {
+  const v = process.env[name];
+  if (v === undefined || v.trim() === '') return {};
+  try {
+    const o = JSON.parse(v);
+    if (o && typeof o === 'object' && !Array.isArray(o)) return o;
+  } catch {
+    /* reported below */
+  }
+  throw new Error(`${name} must be a JSON object (got "${v}")`);
+}
+
+const dataDir =path.resolve(str('DATA_DIR', './data'));
 
 export const config = {
   dwarf: {
@@ -71,8 +83,32 @@ export const config = {
     agentTemplate: path.resolve(str('AGENT_TEMPLATE_DIR', './agent')),
     public: path.resolve(str('PUBLIC_DIR', './public')),
   },
+  studio: {
+    /** AstroPhoto Studio server, e.g. http://gpu-box.tailnet:8000 (empty = processing off). */
+    url: str('ASTROPHOTO_URL', '').replace(/\/+$/, ''),
+    /** Restoration profile name from the server's /api/v1/profiles ("default" = the server's defaults). */
+    profile: str('ASTROPHOTO_PROFILE', 'default'),
+    /** Processing preset of the Studio UI (optional). */
+    preset: str('ASTROPHOTO_PRESET', ''),
+    /** JSON overrides passed through as stack_params / params (optional). */
+    stackParams: json('ASTROPHOTO_STACK_PARAMS'),
+    params: json('ASTROPHOTO_PARAMS'),
+    /** Queue processing automatically after every session transfer. */
+    autoProcess: bool('ASTROPHOTO_AUTO_PROCESS', true),
+    /** Auto-processing pools the new session with every earlier library session of the same target (multi-night stack). */
+    poolSessions: bool('ASTROPHOTO_POOL_SESSIONS', false),
+    /** auto: use the server's own copy of the library when it has the session, else upload. shared | upload force one. */
+    dataAccess: str('ASTROPHOTO_DATA_ACCESS', 'auto') as 'auto' | 'shared' | 'upload',
+    /** Where the library is as the server sees it: relative to its images folder ("" = the same folder), or absolute. */
+    libraryPath: str('ASTROPHOTO_LIBRARY_PATH', ''),
+    /** Copy the finished JPEG/TIFF back into the session folder of the library. */
+    fetchOutputs: bool('ASTROPHOTO_FETCH_OUTPUTS', true),
+    pollS: num('ASTROPHOTO_POLL_S', 60),
+  },
   agent: {
     enabled: bool('AGENT_ENABLED', true),
+    /** Wake the agent to park, transfer and shut down when the telescope is plugged in to charge with sessions still on its SD card. */
+    promptOnCharge: bool('PROMPT_TRANSFER_ON_CHARGE', false),
     command: str('OMP_COMMAND', 'omp'),
     mcpUrl: str('MCP_URL', ''),
   },

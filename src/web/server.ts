@@ -12,6 +12,8 @@ import type { StreamHub } from '../media/streams.js';
 import type { AgentBridge } from '../agent/omp.js';
 import { toolEvents } from '../mcp/tools.js';
 import * as library from '../library/transfer.js';
+import * as processing from '../processing/queue.js';
+import * as studio from '../processing/studio.js';
 import * as sky from '../astro/sky.js';
 import { planNight } from '../astro/planner.js';
 import * as weather from '../astro/weather.js';
@@ -115,11 +117,32 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
   api.get('/library', route(async () => ({ root: config.paths.library, targets: library.listLibrary() })));
   api.post('/transfer', route(async (req) => {
     const b = req.body ?? {};
-    if (b.session) return library.transferSession(String(b.session), { includeSubframes: b.subframes !== false, includeCalibration: b.calibration !== false });
+    if (b.session) return library.transferSession(String(b.session), { includeSubframes: b.subframes !== false, includeCalibration: b.calibration !== false, process: typeof b.process === 'boolean' ? b.process : undefined });
     if (Array.isArray(b.paths)) return library.transferFiles(b.paths.map(String));
     throw new Error('give session or paths');
   }));
   api.post('/jobs/:id/cancel', route(async (req) => ({ cancelled: library.cancelJob(String(req.params.id)) })));
+
+  // AstroPhoto Studio processing: local outbox + the server's queue.
+  api.get('/processing', route(async () => {
+    const out: Record<string, unknown> = { server: processing.reachability(), profile: config.studio.profile, dataAccess: config.studio.dataAccess, autoProcess: config.studio.autoProcess, items: processing.listItems(50) };
+    if (config.studio.url) out.queue = await studio.queue().catch((e) => ({ error: errMsg(e) }));
+    return out;
+  }));
+  api.get('/processing/profiles', route(async () => {
+    const i = await studio.info();
+    return { profiles: i.profiles, default: i.default_profile, configured: config.studio.profile, devices: i.devices, version: i.version };
+  }));
+  api.post('/processing', route(async (req) => {
+    const b = req.body ?? {};
+    const sessions: string[] = (Array.isArray(b.sessions) ? b.sessions : [b.session]).filter(Boolean).map(String);
+    if (b.target) sessions.push(...library.librarySessionsFor(String(b.target)).filter((s) => !sessions.includes(s)));
+    if (!sessions.length) throw new Error('give session(s) or a target with sessions in the library');
+    const target = b.target ? String(b.target) : (library.parseSessionFolder(sessions[0])?.target ?? sessions[0]);
+    return processing.enqueueProcessing({ sessions, target, profile: b.profile ? String(b.profile) : undefined, origin: 'ui' });
+  }));
+  api.post('/processing/:id/cancel', route(async (req) => processing.cancelItem(String(req.params.id))));
+  api.post('/processing/:id/retry', route(async (req) => processing.retryItem(String(req.params.id))));
 
   app.use('/captures', express.static(config.paths.captures, { maxAge: '1h' }));
   api.get('/captures', route(async () => {
@@ -285,7 +308,7 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
   };
   wss.on('connection', (ws) => {
     clients.add(ws);
-    ws.send(JSON.stringify({ type: 'hello', telescope: dwarf.state, agent: agent.status(), history: agent.history, jobs: library.listJobs(), logs: recentLogs(150), config: publicConfig(dwarf) }));
+    ws.send(JSON.stringify({ type: 'hello', telescope: dwarf.state, agent: agent.status(), history: agent.history, jobs: library.listJobs(), processing: processing.listItems(30), logs: recentLogs(150), config: publicConfig(dwarf) }));
     ws.on('close', () => clients.delete(ws));
     ws.on('message', async (raw) => {
       try {
@@ -311,6 +334,7 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
   agent.on('status', (s) => broadcast({ type: 'agentStatus', status: s }));
   logBus.on('log', (l) => broadcast({ type: 'log', entry: l }));
   library.jobBus.on('job', (j) => broadcast({ type: 'job', job: j }));
+  processing.processingBus.on('item', (it) => broadcast({ type: 'processing', item: it }));
   toolEvents.on('image', (i) => broadcast({ type: 'capture', ...i }));
   log.debug('web routes mounted');
 }

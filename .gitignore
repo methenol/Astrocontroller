@@ -1,7 +1,7 @@
 node_modules/
-dist/
-data/
-library/
+/dist/
+/data/
+/library/
 .env
 .venv/
 *.log

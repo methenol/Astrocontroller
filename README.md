@@ -2,7 +2,7 @@
 
 An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Docker and has three parts:
 
-- **An MCP server** with 44 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
+- **An MCP server** with 48 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
 - **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs.
 
@@ -34,26 +34,48 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `LLM_CONTEXT_WINDOW` / `LLM_MAX_TOKENS` | Model limits. |
 | `LLM_THINKING_FORMAT` | Optional request shape for thinking (`qwen-chat-template`, `openai`, …). Leave empty for auto. |
 | `LLM_VISION` | Send camera and FITS images to the model (default `true`). |
+| `PROMPT_TRANSFER_ON_CHARGE` | When the scope is plugged in to charge with sessions still on its SD card, the agent is woken to park, transfer (processing queues itself) and shut the telescope down once the transfers are done. Never while imaging. Default `false`. |
 | `LIBRARY_PATH` | Host folder for your imagery library (mounted at `/library`). |
 | `WEB_PORT` | Host port for the UI and MCP endpoint. |
 | `LIVE_STREAM_FPS` / `LIVE_STREAM_WIDTH` | Browser live-view rate and size. |
 | `PUID` / `PGID` | (Linux) uid/gid that owns files written to `./data` and the library. Default 1000. |
+| `ASTROPHOTO_URL` | AstroPhoto Studio server (e.g. `http://gpu-box:8000` over Tailscale). Empty = processing off. |
+| `ASTROPHOTO_PROFILE` | Restoration profile, by name, from the server's `/api/v1/profiles`: `default` (the server's default, ImageMM), `n2n-network` (fast), `n2n-imagemm`, `n2n-rl`. |
+| `ASTROPHOTO_AUTO_PROCESS` / `ASTROPHOTO_POOL_SESSIONS` | Queue processing after each transfer / stack each new night with the earlier nights of its target. |
+| `ASTROPHOTO_DATA_ACCESS` / `ASTROPHOTO_LIBRARY_PATH` | `auto` \| `shared` \| `upload`, and where the library is as the server sees it (see below). |
+| `ASTROPHOTO_FETCH_OUTPUTS`, `ASTROPHOTO_PRESET`, `ASTROPHOTO_STACK_PARAMS`, `ASTROPHOTO_PARAMS`, `ASTROPHOTO_POLL_S` | Copy results back; optional preset and JSON overrides; poll interval. |
 
 Generated agent config (`models.yml`, `config.yml`, `mcp.json`) is rewritten from `.env` on every start under `data/home/.omp/agent/`.
 
 ## Imagery library
 
-`transfer_session` (and the Album/Library tabs) copy sessions from the SD card over FTP. On this network that measured about 20 MB/s.
+`transfer_session` (and the Album/Library tabs) copy sessions from the SD card over FTP. On this network that measured about 20 MB/s. The library mirrors the telescope's own `Astronomy` folder, which is the layout AstroPhoto Studio reads:
 
 ```
 <LIBRARY_PATH>/
-  <Target>/<date>_<DWARF_RAW_… folder>/
-      lights/*.fits             raw 16-bit Bayer subframes (RGGB)
-      lights/rejected/*.fits    subs the scope's stacker rejected
-      stacked.jpg, stacked-16_*.png/.fits, img_reference.png, shotsInfo.json, session.json
-  _calibration/<tele|wide>/<dark|flat|bias>/*.fits    the device's calibration masters
-  _photos/<date>/…              daytime photos/videos
+  DWARF_RAW_TELE_<target>_EXP_15_GAIN_60_<time>/
+      *.fits                     raw 16-bit Bayer subs (RGGB); failed_*.fits = subs the scope's stacker rejected
+      stacked.jpg, stacked-16_*.png/.fits, shotsInfo.json, session.json
+      processed/                 finished JPEG/TIFF/JSON from AstroPhoto Studio
+  CALI_FRAME/<dark|flat|bias>/<cam_0|cam_1>/*.fits    the device's calibration masters
+  _photos/<date>/…               daytime photos/videos
 ```
+
+The scope names the session folder after the GoTo target. The controller picks the name the way the DWARF app does (Messier, then Caldwell, then catalog id), so nights captured with either one stack together.
+
+## Processing in AstroPhoto Studio
+
+When a transfer finishes, the session is queued for processing on an [AstroPhoto Studio](../AstroPhoto-Studio) server (`ASTROPHOTO_URL`, normally a GPU machine on Tailscale), using its `/api/v1` job API. The queue is a local **outbox** (`data/processing.json`) that survives restarts:
+
+1. **Getting the data to the server.** With `ASTROPHOTO_DATA_ACCESS=auto`, the outbox asks the server whether it already sees the session at `ASTROPHOTO_LIBRARY_PATH`/`<session>` with every sub. This is the case when both read the NAS: set the Studio's `--images` to the same Dwarf folder, or point `ASTROPHOTO_LIBRARY_PATH` at it. If the server doesn't see the session, the subs, `shotsInfo.json` and the camera's `CALI_FRAME` masters are uploaded to its uploads folder first. Uploads are resumable and skip files already there.
+2. **Submitting.** Each item is submitted with the configured profile. Submission is idempotent, so a lost reply never queues a job twice.
+3. **Waiting and collecting.** The outbox polls the job and copies the outputs to `<session>/processed/`.
+
+**Field sessions** need nothing special. While the server is out of reach, items wait in the outbox. They go out once it answers, uploading when the server can't see the data.
+
+**Multi-night stacks.** One job is one image. `process_session target="C 33"` pools every library session of that target, and `ASTROPHOTO_POOL_SESSIONS=true` does this automatically after each transfer.
+
+The profile names, presets and job kinds come from the server, so new profiles in Studio work without code changes here. The agent tools are `processing_status`, `process_session` and `processing_job`; the Library tab has a Processing card.
 
 ## Data and the agent workspace (`./data`)
 
@@ -78,6 +100,7 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 | Astro | `calibrate`, `goto_target`, `stop_goto`, `live_stacking`, `stacking_status`, `wait`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
 | Images & data | `list_album`, `view_image`, `analyze_image`, `delete_album_items`, `list_device_sessions`, `transfer_session`, `transfer_files`, `jobs`, `list_library` |
+| Processing | `processing_status`, `process_session`, `processing_job` |
 
 For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `node dist/tools/smoke.js <tool> '<json-args>'` calls one.
 

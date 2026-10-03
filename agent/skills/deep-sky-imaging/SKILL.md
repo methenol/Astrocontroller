@@ -38,11 +38,13 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 - `view_camera source=stack stretch=true` to see progress. `analyze_image source=stack` for star roundness < 0.7 = trailing.
 - `wait seconds=300` between checks. Report integration time to the user periodically.
 - Stop if: target below ~20° altitude, dawn within 20 min, battery < 10%, or the stack stops growing.
+- With a multi-target plan, check the time against the plan at every check, and move on when a target's slot ends (or its altitude window closes), not only when something goes wrong.
 - Clouds: if the reject rate jumps and `weather_forecast` shows cloud arriving, pause (stop stacking) rather than collect junk; resume when the forecast clears and the wide view shows stars.
 - Dew: a dew-point spread < 2 °C means dew forming on the lens is likely. Warn the user (a dew heater helps); falling star counts at constant cloud cover usually mean dew.
 
 ## 6. Finish
 - `live_stacking action=stop` (normal stop finalises the stack; `fast_stop` skips final processing).
 - `list_album type=astro` → newest entry. `view_image source=device:<stacked.jpg path>` and assess it.
-- Offer `transfer_session session=latest` to copy FITS lights, stacks and calibration frames to the library.
+- `transfer_session session=latest` copies the subs, stacks and CALI_FRAME masters to the library (NAS) and, with auto-processing on, queues the session in AstroPhoto Studio. `pool=true` stacks it together with earlier nights of the same target. In an unattended plan, do this for every target without asking. The transfer runs in the background while you slew to the next target. If FTP during stacking turns out to cause problems, record it here and transfer between targets or at the end instead.
+- `processing_status` lists the outbox and the server queue. Tell the user which profile ran and when results are expected.
 - Update this skill or `NOTES.md` with anything learned (good settings, reject causes, timings).

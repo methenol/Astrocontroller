@@ -4,7 +4,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fmtDur = (s) => (s == null ? '–' : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.round(s)}s`);
 
-const state = { telescope: null, agent: null, history: [], jobs: new Map(), config: null, attachments: [], mainSrc: 'tele', albumPage: 0 };
+const state = { telescope: null, agent: null, history: [], jobs: new Map(), config: null, attachments: [], mainSrc: 'tele', albumPage: 0, proc: new Map(), procInfo: null };
 
 // ------------------------------------------------------------------ helpers
 async function api(path, body, method) {
@@ -78,6 +78,8 @@ function handle(m) {
       renderAgentStatus(m.agent);
       renderChat();
       renderJobs();
+      (m.processing ?? []).forEach((i) => state.proc.set(i.id, i));
+      renderProcessing();
       $('#log').innerHTML = '';
       (m.logs ?? []).forEach(addLog);
       break;
@@ -96,6 +98,10 @@ function handle(m) {
     case 'job':
       state.jobs.set(m.job.id, m.job);
       renderJobs();
+      break;
+    case 'processing':
+      if (m.item) state.proc.set(m.item.id, m.item);
+      renderProcessing();
       break;
     case 'capture':
       addCapture(m.path, m.label);
@@ -435,7 +441,10 @@ $$('.tab').forEach((t) =>
       loadWeather();
     }
     if (tab === 'album') loadAlbum();
-    if (tab === 'library') loadLibrary();
+    if (tab === 'library') {
+      loadLibrary();
+      loadProcessing();
+    }
     if (tab === 'skills') loadSkills();
   }),
 );
@@ -746,12 +755,90 @@ $('#jobs').addEventListener('click', (e) => {
   if (id) api(`jobs/${id}/cancel`, {}).catch((err) => toast(err.message, true));
 });
 
+$('#library').addEventListener('click', async (e) => {
+  const s = e.target.dataset.process;
+  const t = e.target.dataset.processTarget;
+  if (!s && !t) return;
+  try {
+    await api('processing', t ? { target: t } : { session: s });
+    toast('processing queued');
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+// ------------------------------------------------------------------ processing
+let procTimer;
+function renderProcHead() {
+  const p = state.procInfo;
+  if (!p) return;
+  const sv = p.server ?? {};
+  const dot = `<i class="dot" style="background:var(--${sv.ok ? 'ok' : 'err'})" title="${esc(sv.ok ? `v${sv.version ?? '?'}` : sv.error ?? 'unreachable')}"></i>`;
+  $('#proc-head').innerHTML = `${dot}${esc(sv.url ?? 'no server')} · profile ${esc(p.profile ?? '–')} · data ${esc(p.dataAccess ?? '–')} · auto-process ${p.autoProcess ? 'on' : 'off'}${sv.ok ? '' : ` · ${esc(sv.error ?? 'unreachable')}`}`;
+}
+function renderProcQueue() {
+  const q = state.procInfo?.queue;
+  const el = $('#proc-queue');
+  if (!q) return (el.textContent = '–');
+  if (q.error) return (el.textContent = q.error);
+  const jobs = [...(q.running ?? []), ...(q.queued ?? [])];
+  el.innerHTML = jobs.length
+    ? jobs.map((j) => `<div>${esc(j.label ?? j.id)} — ${esc(j.state)} ${Math.round(100 * (j.progress ?? 0))}%${j.position != null ? ` · #${esc(j.position)}` : ''}${j.message ? ` · ${esc(j.message)}` : ''}</div>`).join('') + (q.drains_in != null ? `<div>drains in ~${fmtDur(q.drains_in)}</div>` : '')
+    : 'queue empty';
+}
+function renderProcessing() {
+  const items = [...state.proc.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 20);
+  $('#proc-items').innerHTML = items.length
+    ? items
+        .map((i) => {
+          let pct = null;
+          if (i.state === 'uploading' && i.upload?.bytesTotal) pct = (100 * i.upload.bytesDone) / i.upload.bytesTotal;
+          else if (i.state === 'submitted' && i.studio?.progress != null) pct = 100 * i.studio.progress;
+          const eta = i.state === 'submitted' && i.studio?.etaS != null ? ` · ETA ${Math.max(1, Math.round(i.studio.etaS / 60))} min` : '';
+          const msg = i.lastError ?? i.studio?.message ?? i.message ?? '';
+          const outs = i.state === 'done' && i.outputs?.length ? `<div class="muted small">${i.outputs.map((p) => esc(String(p).split('/').pop())).join(', ')}</div>` : '';
+          const btn = ['waiting', 'uploading', 'submitted'].includes(i.state) ? `<button class="ghost" data-proc-cancel="${esc(i.id)}">Cancel</button>` : ['failed', 'cancelled'].includes(i.state) ? `<button class="ghost" data-proc-retry="${esc(i.id)}">Retry</button>` : '';
+          return `<div class="proc-item"><b>${esc(i.target)}</b> <span class="muted small">${esc(i.profile ?? '')}</span> <span class="badge ${esc(i.state)}">${esc(i.state)}</span>${btn}
+            <div class="muted small">${esc(msg)}${eta}</div>${pct != null ? `<div class="progress"><div style="width:${Math.round(pct)}%"></div></div>` : ''}${outs}</div>`;
+        })
+        .join('')
+    : 'no processing items';
+}
+async function loadProcessing() {
+  clearTimeout(procTimer);
+  try {
+    const d = await api('processing');
+    state.procInfo = d;
+    (d.items ?? []).forEach((i) => state.proc.set(i.id, i));
+    renderProcHead();
+    renderProcessing();
+    renderProcQueue();
+  } catch (e) {
+    $('#proc-head').textContent = e.message;
+  }
+  if ($('#panel-library').classList.contains('active') && !document.hidden) procTimer = setTimeout(loadProcessing, 30000);
+}
+$('#btn-proc-refresh').onclick = loadProcessing;
+$('#proc-items').addEventListener('click', async (e) => {
+  const c = e.target.dataset.procCancel;
+  const r = e.target.dataset.procRetry;
+  const id = c || r;
+  if (!id) return;
+  try {
+    const item = await api(`processing/${id}/${c ? 'cancel' : 'retry'}`, {});
+    if (item?.id) state.proc.set(item.id, item);
+    renderProcessing();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
 async function loadLibrary() {
   try {
     const lib = await api('library');
     $('#lib-root').textContent = lib.root;
     $('#library').innerHTML = lib.targets.length
-      ? lib.targets.map((t) => `<div class="lib-target"><b>${esc(t.target)}</b> ${t.sessions.map((s) => `<div class="muted small">${esc(s.name)} — ${s.lights} lights</div>`).join('')}</div>`).join('')
+      ? lib.targets.map((t) => `<div class="lib-target"><b>${esc(t.target)}</b>${t.sessions.length > 1 ? ` <button class="ghost" data-process-target="${esc(t.target)}" title="stack every session of this target as one image">Process all ${t.sessions.length} nights</button>` : ''} ${t.sessions.map((s) => `<div class="muted small">${esc(s.name)} — ${esc(s.camera ?? '')} ${s.lights} lights${s.rejected ? ` (${s.rejected} rejected)` : ''} ${esc(s.startedAt ?? '')} <button class="ghost" data-process="${esc(s.name)}">Process</button></div>`).join('')}</div>`).join('')
       : 'empty';
   } catch (e) {
     $('#library').textContent = e.message;
