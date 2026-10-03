@@ -457,111 +457,319 @@ try {
 } catch {}
 
 // ------------------------------------------------------------------ agent chat
+//
+// The chat is rendered incrementally: every entry keeps its DOM element, and a streaming
+// message only appends to its reasoning block and re-renders its own answer text, so an open
+// reasoning block keeps its state and its scroll position. Whether the view follows new output
+// is decided by the user's own scrolling (at the bottom = follow), and a ResizeObserver keeps it
+// pinned while content grows (streaming text, tool results, images that load later).
+const chatUI = {
+  stick: true, // follow new output
+  unseen: 0, // entries added while scrolled up
+  thinkOpen: new Map(), // entry id -> the user's choice for its reasoning block
+  toolOpen: new Map(), // entry id -> the user's choice for a tool block
+  dirty: new Set(), // assistant entries with deltas not yet drawn
+  frame: 0,
+  lastPrompt: '',
+};
+const chatBox = $('#chat');
+const chatInner = $('#chat-inner');
+const fmtClock = (t) => (t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
+const fmtSecs = (ms) => (ms < 60000 ? `${Math.max(0, Math.round(ms / 1000))}s` : `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`);
+const nearBottom = (el, slack = 40) => el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
+
+function toBottom() {
+  chatBox.scrollTop = chatBox.scrollHeight;
+  lastTop = chatBox.scrollTop;
+  chatUI.unseen = 0;
+  updateJump();
+}
+function updateJump() {
+  const b = $('#btn-jump');
+  b.hidden = chatUI.stick;
+  b.textContent = chatUI.unseen ? `↓ ${chatUI.unseen} new` : '↓ Latest';
+}
+// Any move up (wheel, touch, keys, scrollbar) stops following at once, before the next frame can
+// pull the view down again; reaching the bottom resumes it.
+let lastTop = 0;
+const release = () => {
+  if (!chatUI.stick) return;
+  chatUI.stick = false;
+  updateJump();
+};
+chatBox.addEventListener('wheel', (e) => {
+  if (e.deltaY < 0) release();
+}, { passive: true });
+chatBox.addEventListener('touchmove', release, { passive: true });
+chatBox.addEventListener('keydown', (e) => {
+  if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) release();
+});
+chatBox.addEventListener('scroll', () => {
+  const top = chatBox.scrollTop;
+  if (top < lastTop - 2) chatUI.stick = nearBottom(chatBox, 4);
+  else if (nearBottom(chatBox)) chatUI.stick = true;
+  lastTop = top;
+  if (chatUI.stick) chatUI.unseen = 0;
+  updateJump();
+}, { passive: true });
+new ResizeObserver(() => {
+  if (chatUI.stick) toBottom();
+}).observe(chatInner);
+$('#btn-jump').onclick = () => {
+  chatUI.stick = true;
+  toBottom();
+};
+
+// ---- status line, context, queue, todos
+let statusTimer = 0;
 function renderAgentStatus(s) {
   if (!s) return;
   state.agent = s;
   const el = $('#agent-status');
   el.className = `agent-status${s.busy ? ' busy' : ''}${!s.ready ? ' down' : ''}`;
-  el.textContent = !s.ready ? `agent offline${s.error ? ` — ${s.error}` : ' (starting…)'}` : `${s.busy ? 'working… · ' : ''}${s.model}`;
+  el.textContent = !s.ready ? `agent offline${s.error ? ` — ${s.error}` : ' (starting…)'}` : s.model;
   el.title = `${s.model} @ ${s.baseUrl}`;
   $('#sel-thinking').value = s.thinking;
   $('#btn-abort').hidden = !s.busy;
-  if (!s.busy) $$('.typing').forEach((x) => x.classList.remove('typing'));
+  $('#btn-queue').hidden = !s.busy;
+  $('#btn-send').textContent = s.busy ? 'Steer' : 'Send';
+  $('#btn-send').title = s.busy ? 'Enter: deliver now, at the agent\'s next step' : 'Enter';
+  $('#prompt').placeholder = s.busy
+    ? 'Steer the agent (Enter: now) or queue a follow-up (Alt+Enter: when it finishes)…'
+    : 'Ask the agent… e.g. “What should I image tonight?” or “Raise the scope and show me the wide view”';
+  const c = s.context;
+  const ctx = $('#ctx');
+  ctx.hidden = !c;
+  if (c) {
+    const pct = Math.round(c.percent);
+    ctx.querySelector('i').style.width = `${Math.min(100, pct)}%`;
+    ctx.className = `ctx${pct >= 80 ? ' high' : pct >= 60 ? ' mid' : ''}`;
+    $('#ctx-text').textContent = `${pct}%`;
+    ctx.title = `context ${c.tokens.toLocaleString()} of ${c.contextWindow.toLocaleString()} tokens${s.tokensPerSecond ? ` · ${s.tokensPerSecond.toFixed(1)} tok/s` : ''} — Compact summarises older history to free space`;
+  }
+  renderQueue(s.queue);
+  renderTodos(s.todos ?? []);
+  renderActivity();
+  clearInterval(statusTimer);
+  if (s.busy) statusTimer = setInterval(renderActivity, 1000);
+  if (!s.busy) for (const id of [...chatUI.dirty]) flushAssistant(id);
 }
 
+function renderActivity() {
+  const s = state.agent;
+  const el = $('#activity');
+  if (!s?.busy) {
+    el.hidden = true;
+    return;
+  }
+  const a = s.activity ?? { kind: 'thinking', since: Date.now() };
+  const what = { thinking: 'Thinking', writing: 'Writing', tool: `Running ${a.tool ?? 'a tool'}`, compacting: 'Compacting context', retrying: 'Retrying the model request', idle: 'Working' }[a.kind] ?? 'Working';
+  el.hidden = false;
+  $('#activity-text').textContent = `${what} · ${fmtSecs(Date.now() - a.since)}${s.turnStartedAt ? ` (turn ${fmtSecs(Date.now() - s.turnStartedAt)})` : ''}`;
+  for (const t of $$('.tool .tstate.running', chatInner)) {
+    const at = Number(t.dataset.at);
+    if (at) t.textContent = fmtSecs(Date.now() - at);
+  }
+}
+
+function renderQueue(q) {
+  const items = [...(q?.steering ?? []).map((m) => ['steering', m]), ...(q?.followUp ?? []).map((m) => ['followUp', m])];
+  $('#queue-list').hidden = !items.length;
+  $('#queue-list').innerHTML = items
+    .map(([kind, m], i) => `<span class="qchip ${kind}" title="${esc(m)}">${kind === 'steering' ? 'steer' : 'queued'}: ${esc(m.length > 60 ? `${m.slice(0, 60)}…` : m)}<button type="button" data-q="${i}" title="remove">×</button></span>`)
+    .join('');
+  $('#queue-list').onclick = (e) => {
+    const i = e.target.dataset?.q;
+    if (i === undefined) return;
+    const [queue, message] = items[Number(i)];
+    api('agent/queue/remove', { message, queue }).catch((err) => toast(err.message, true));
+  };
+}
+
+function renderTodos(phases) {
+  const card = $('#todo-card');
+  const tasks = phases.flatMap((p) => p.tasks ?? []);
+  card.hidden = !tasks.length;
+  if (!tasks.length) return;
+  const done = tasks.filter((t) => t.status === 'completed').length;
+  const now = tasks.find((t) => t.status === 'in_progress');
+  $('#todo-summary').textContent = `Plan · ${done}/${tasks.length} done${now ? ` · now: ${now.content}` : ''}`;
+  const icon = { completed: '✓', in_progress: '▸', blocked: '⏸', abandoned: '✗', pending: '○' };
+  $('#todo-list').innerHTML = phases
+    .map((p) => `<div class="todo-phase">${phases.length > 1 ? `<b>${esc(p.name)}</b>` : ''}${(p.tasks ?? []).map((t) => `<div class="todo ${t.status}"><span>${icon[t.status] ?? '○'}</span>${esc(t.content)}${t.blocker ? ` <span class="muted">(${esc(t.blocker)})</span>` : ''}</div>`).join('')}</div>`)
+    .join('');
+}
+
+// ---- entries
+const domId = (id) => `e-${String(id).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
 function entryEl(e) {
-  const id = `e-${e.id}`.replace(/[^a-zA-Z0-9_-]/g, '_');
-  let el = document.getElementById(id);
+  let el = document.getElementById(domId(e.id));
   if (!el) {
     el = document.createElement('div');
-    el.id = id;
-    $('#chat').appendChild(el);
+    el.id = domId(e.id);
+    chatInner.appendChild(el);
+    if (!chatUI.stick && e.kind !== 'notice') {
+      chatUI.unseen++;
+      updateJump();
+    }
   }
   return el;
 }
 
 function renderEntry(e) {
+  if (e.kind === 'assistant') return renderAssistant(e);
   const el = entryEl(e);
   if (e.kind === 'user') {
     el.className = 'msg user';
+    el.title = fmtClock(e.at);
     el.textContent = e.text + (e.images ? `  📎×${e.images}` : '');
-  } else if (e.kind === 'assistant') {
-    el.className = `msg assistant${e.streaming ? ' typing' : ''}`;
-    const think = e.thinking ? `<details class="thinking"${e.streaming && !e.text ? ' open' : ''}><summary>thinking</summary><div>${esc(e.thinking)}</div></details>` : '';
-    el.innerHTML = think + (e.text ? md(e.text) : '');
   } else if (e.kind === 'tool') {
-    el.className = '';
-    // Oh My Pi adds an "i" (intent) field to tool calls; show it as the caption.
-    const { i: intent, ...rest } = e.args ?? {};
-    const args = Object.keys(rest).length ? JSON.stringify(rest) : '';
-    const wasOpen = $('details', el)?.open;
-    el.innerHTML = `<details class="tool"${wasOpen ? ' open' : ''}><summary><span class="tname">${esc(e.name)}</span><span class="targs">${esc(intent ?? args)}</span><span class="tstate ${e.status}">${e.status === 'running' ? '…' : e.status === 'ok' ? `✓ ${e.ms ? (e.ms / 1000).toFixed(1) + 's' : ''}` : '✗'}</span></summary>${args ? `<pre>${esc(JSON.stringify(rest, null, 1))}</pre>` : ''}${e.result ? `<pre>${esc(e.result)}</pre>` : ''}</details>${(e.images ?? []).length ? `<div class="tool-images">${e.images.map((p) => `<img src="captures/${esc(p)}" data-cap="${esc(p)}">`).join('')}</div>` : ''}`;
+    renderTool(el, e);
   } else if (e.kind === 'notice') {
     el.className = `msg notice ${e.level}`;
     el.textContent = e.text;
   }
 }
 
-function renderChat() {
-  $('#chat').innerHTML = '';
-  if (!state.history.length) {
-    $('#chat').innerHTML = `<div class="msg notice">Ask the agent to plan tonight's imaging, point at something, or check the sky. It can see both cameras and the live stack.</div>`;
+function renderTool(el, e) {
+  el.className = 'tool-entry';
+  const { i: argIntent, ...rest } = e.args ?? {};
+  const intent = e.intent ?? argIntent;
+  const args = Object.keys(rest).length ? JSON.stringify(rest) : '';
+  const user = chatUI.toolOpen.get(e.id);
+  const open = user ?? $('details', el)?.open ?? false;
+  const state_ = e.status === 'running' ? `<span class="tstate running" data-at="${e.at}">${fmtSecs(Date.now() - e.at)}</span>` : e.status === 'ok' ? `<span class="tstate ok">✓ ${e.ms ? fmtSecs(e.ms) : ''}</span>` : '<span class="tstate error">✗ failed</span>';
+  const errLine = e.status === 'error' && e.result ? `<div class="tool-err">${esc(e.result.split('\n')[0].slice(0, 200))}</div>` : '';
+  el.innerHTML = `<details class="tool ${e.status}"${open ? ' open' : ''}><summary><span class="tname">${esc(e.name)}</span><span class="targs">${esc(intent ?? args)}</span>${state_}</summary>${args ? `<pre>${esc(JSON.stringify(rest, null, 1))}</pre>` : ''}${e.result ? `<pre class="tres">${esc(e.result)}</pre>` : ''}</details>${errLine}${(e.images ?? []).length ? `<div class="tool-images">${e.images.map((p) => `<img src="captures/${esc(p)}" data-cap="${esc(p)}" loading="lazy">`).join('')}</div>` : ''}`;
+  $('summary', el).addEventListener('click', () => chatUI.toolOpen.set(e.id, !$('details', el).open));
+}
+
+function renderAssistant(e) {
+  const el = entryEl(e);
+  if (!el.dataset.built) {
+    el.dataset.built = '1';
+    el.innerHTML = `<details class="thinking" hidden><summary></summary><pre class="t-body"></pre></details><div class="content"></div><div class="msg-meta"><time></time><button type="button" class="copy" title="copy the answer">copy</button></div>`;
+    const det = $('details', el);
+    $('summary', el).addEventListener('click', () => chatUI.thinkOpen.set(e.id, !det.open));
+    $('.copy', el).addEventListener('click', () => {
+      const cur = state.history.find((h) => h.id === e.id);
+      navigator.clipboard?.writeText(cur?.text ?? '').then(() => toast('copied'), () => toast('copy failed', true));
+    });
+    el._thinkLen = 0;
+    el._text = null;
   }
+  el.className = `msg assistant${e.streaming ? ' typing' : ''}`;
+  $('time', el).textContent = fmtClock(e.at);
+  // reasoning: append what is new (no re-render: keeps the block's state and scroll)
+  const det = $('details', el);
+  const body = $('.t-body', el);
+  if (e.thinking) {
+    det.hidden = false;
+    if (e.thinking.length < el._thinkLen) {
+      body.textContent = '';
+      el._thinkLen = 0;
+    }
+    if (e.thinking.length > el._thinkLen) {
+      const follow = nearBottom(body, 24);
+      body.append(e.thinking.slice(el._thinkLen));
+      el._thinkLen = e.thinking.length;
+      if (follow) body.scrollTop = body.scrollHeight;
+    }
+    const auto = !!e.streaming && !e.text; // open while it thinks, folded once it answers
+    const open = chatUI.thinkOpen.get(e.id) ?? auto;
+    if (det.open !== open) det.open = open;
+    const thinkingNow = e.streaming && !e.text;
+    if (thinkingNow && !el._thinkT0) el._thinkT0 = Date.now();
+    const ms = e.thinkingMs ?? (el._thinkT0 ? (thinkingNow ? Date.now() : el._thinkEnd ?? (el._thinkEnd = Date.now())) - el._thinkT0 : null);
+    $('summary', el).textContent = thinkingNow ? `Thinking… ${ms != null ? fmtSecs(ms) : ''}` : ms != null ? `Thought for ${fmtSecs(ms)}` : 'Reasoning';
+  }
+  // answer: re-render only when its text changed
+  if (e.text !== el._text) {
+    el._text = e.text;
+    $('.content', el).innerHTML = e.text ? md(e.text) : '';
+  }
+  $('.msg-meta', el).hidden = !!e.streaming || !e.text;
+}
+
+function flushAssistant(id) {
+  chatUI.dirty.delete(id);
+  const e = state.history.find((h) => h.id === id);
+  if (e) renderAssistant(e);
+}
+
+function scheduleFlush(id) {
+  chatUI.dirty.add(id);
+  if (chatUI.frame) return;
+  chatUI.frame = requestAnimationFrame(() => {
+    chatUI.frame = 0;
+    for (const d of [...chatUI.dirty]) flushAssistant(d);
+  });
+}
+
+function renderChat() {
+  // keep elements of entries that still exist (a reconnect resends the same history)
+  const ids = new Set(state.history.map((h) => domId(h.id)));
+  for (const el of [...chatInner.children]) if (!ids.has(el.id)) el.remove();
+  const order = [...chatInner.children].map((c) => c.id);
+  const same = order.every((id, i) => domId(state.history[i]?.id) === id);
+  if (!same) chatInner.innerHTML = '';
+  const stick = chatUI.stick;
+  chatUI.stick = true; // a (re)load is not "new while scrolled up"
   state.history.forEach(renderEntry);
-  scrollChat(true);
+  chatUI.stick = stick;
+  $('#chat-empty').hidden = state.history.length > 0;
+  if (chatUI.stick) toBottom();
 }
 
-function scrollChat(force) {
-  const c = $('#chat');
-  if (force || c.scrollHeight - c.scrollTop - c.clientHeight < 160) c.scrollTop = c.scrollHeight;
-}
-
-const pendingRender = new Map();
 function onAgentEvent(ev) {
   if (ev.kind === 'reset') {
     state.history = ev.history;
+    if (!ev.history.length) {
+      chatInner.innerHTML = '';
+      chatUI.thinkOpen.clear();
+      chatUI.toolOpen.clear();
+    }
     renderChat();
   } else if (ev.kind === 'entry') {
     const i = state.history.findIndex((h) => h.id === ev.entry.id);
     if (i >= 0) state.history[i] = ev.entry;
     else state.history.push(ev.entry);
-    if (state.history.length === 1) $('#chat').innerHTML = '';
+    $('#chat-empty').hidden = true;
     renderEntry(ev.entry);
-    scrollChat();
   } else if (ev.kind === 'delta') {
     let e = state.history.find((h) => h.id === ev.id);
     if (!e) {
-      e = { kind: 'assistant', id: ev.id, text: '', thinking: '', streaming: true };
+      e = { kind: 'assistant', id: ev.id, text: '', thinking: '', streaming: true, at: Date.now() };
       state.history.push(e);
+      $('#chat-empty').hidden = true;
     }
     if (ev.channel === 'text') e.text += ev.delta;
     else e.thinking += ev.delta;
     e.streaming = true;
-    if (!pendingRender.has(e.id)) {
-      pendingRender.set(e.id, setTimeout(() => {
-        pendingRender.delete(e.id);
-        renderEntry(e);
-        scrollChat();
-      }, 80));
-    }
+    scheduleFlush(e.id);
   }
 }
 
-$('#chat').addEventListener('click', (e) => {
+chatInner.addEventListener('click', (e) => {
   const img = e.target.closest('img[data-cap]');
   if (img) lightbox(img.src, img.dataset.cap);
 });
 
-async function sendPrompt() {
+// ---- composer
+async function sendPrompt(mode = 'auto') {
   const text = $('#prompt').value.trim();
   if (!text) return;
   const images = state.attachments.map((a) => ({ data: a.data, mimeType: a.mimeType }));
   $('#btn-send').disabled = true;
   try {
-    await api('agent/prompt', { text, images });
+    await api('agent/prompt', { text, images, mode });
+    chatUI.lastPrompt = text;
     $('#prompt').value = '';
     state.attachments = [];
     renderAttachments();
+    chatUI.stick = true; // sending a message jumps to the conversation's end
+    toBottom();
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -570,15 +778,25 @@ async function sendPrompt() {
 }
 $('#composer').onsubmit = (e) => {
   e.preventDefault();
-  sendPrompt();
+  sendPrompt('steer');
 };
+$('#btn-queue').onclick = () => sendPrompt('followUp');
 $('#prompt').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    sendPrompt();
+    sendPrompt(e.altKey || e.ctrlKey || e.metaKey ? 'followUp' : 'steer');
+  } else if (e.key === 'ArrowUp' && !$('#prompt').value && chatUI.lastPrompt) {
+    e.preventDefault();
+    $('#prompt').value = chatUI.lastPrompt;
+  } else if (e.key === 'Escape' && state.agent?.busy) {
+    api('agent/abort', {}).catch((err) => toast(err.message, true));
   }
 });
 $('#btn-abort').onclick = () => api('agent/abort', {}).catch((e) => toast(e.message, true));
+$('#btn-compact').onclick = async () => {
+  if (!confirm('Summarise the older conversation to free context space? (The agent keeps a summary; recent messages stay.)')) return;
+  await api('agent/compact', {}).catch((e) => toast(e.message, true));
+};
 $('#btn-new').onclick = async () => {
   if (!confirm('Start a new conversation? (Skills and notes are kept.)')) return;
   await api('agent/new', {}).catch((e) => toast(e.message, true));

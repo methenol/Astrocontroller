@@ -19,11 +19,18 @@ const log = logger('agent');
 
 export type ChatEntry =
   | { kind: 'user'; id: string; text: string; images?: number; at: number }
-  | { kind: 'assistant'; id: string; text: string; thinking: string; at: number; streaming?: boolean }
-  | { kind: 'tool'; id: string; name: string; args: unknown; status: 'running' | 'ok' | 'error'; result?: string; images?: string[]; at: number; ms?: number }
+  | { kind: 'assistant'; id: string; text: string; thinking: string; at: number; streaming?: boolean; thinkingMs?: number }
+  | { kind: 'tool'; id: string; name: string; args: unknown; intent?: string; status: 'running' | 'ok' | 'error'; result?: string; images?: string[]; at: number; ms?: number }
   | { kind: 'notice'; id: string; level: 'info' | 'warn' | 'error'; text: string; at: number };
 
 const yamlStr = (s: string) => JSON.stringify(s);
+
+/** What the agent is doing right now (for the status line). */
+export type Activity = { kind: 'idle' | 'thinking' | 'writing' | 'tool' | 'compacting' | 'retrying'; tool?: string; since: number };
+export interface TodoPhase {
+  name: string;
+  tasks: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'; blocker?: string }>;
+}
 
 function copyDirIfMissing(src: string, dest: string): void {
   if (!fs.existsSync(src)) return;
@@ -51,6 +58,15 @@ export class AgentBridge extends EventEmitter {
   model = '';
   thinking = config.llm.reasoningEffort;
   lastError: string | null = null;
+  activity: Activity = { kind: 'idle', since: Date.now() };
+  turnStartedAt: number | null = null;
+  queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
+  todos: TodoPhase[] = [];
+  context: { tokens: number; contextWindow: number; percent: number } | null = null;
+  tokensPerSecond: number | null = null;
+  /** first thinking delta of each streaming message, to time the reasoning */
+  private thinkStart = new Map<string, number>();
+  private toolEmitAt = new Map<string, number>();
 
   get skillsDir(): string {
     return path.join(config.paths.workspace, '.omp', 'skills');
@@ -265,16 +281,40 @@ export class AgentBridge extends EventEmitter {
         return;
       }
       case 'agent_start':
+        this.turnStartedAt = Date.now();
         this.setBusy(true);
         return;
+      case 'queue_update':
+        this.queue = { steering: f.steering ?? [], followUp: f.followUp ?? [] };
+        this.emit('status', this.status());
+        return;
+      case 'auto_retry_end':
+      case 'auto_compaction_end':
+        this.setActivity(this.busy ? 'thinking' : 'idle');
+        void this.refreshState();
+        return;
+      case 'tool_execution_update': {
+        const e = this.history.find((h) => h.kind === 'tool' && h.id === f.toolCallId) as Extract<ChatEntry, { kind: 'tool' }> | undefined;
+        const content = f.partialResult?.content;
+        if (!e || !Array.isArray(content)) return;
+        e.result = content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n').slice(-6000);
+        const last = this.toolEmitAt.get(e.id) ?? 0;
+        if (Date.now() - last > 500) {
+          this.toolEmitAt.set(e.id, Date.now());
+          this.emit('event', { kind: 'entry', entry: e });
+        }
+        return;
+      }
       case 'prompt_result':
         if (f.status === 'error' && f.error) this.note('error', `LLM error: ${f.error.message}${f.error.httpStatus ? ` (HTTP ${f.error.httpStatus})` : ''}`);
         return;
       case 'session_settled':
         this.setBusy(false);
+        void this.refreshState();
         return;
       case 'agent_end':
         if (f.yielded !== false) this.setBusy(false);
+        void this.refreshState();
         return;
       case 'message_start':
         if (f.message?.role === 'assistant') this.upsertAssistant(f.messageId, '', '', true);
@@ -284,8 +324,15 @@ export class AgentBridge extends EventEmitter {
         if (!ev) return;
         if (ev.type === 'text_delta' || ev.type === 'thinking_delta') {
           const e = this.findAssistant(f.messageId) ?? this.upsertAssistant(f.messageId, '', '', true);
-          if (ev.type === 'text_delta') e.text += ev.delta;
-          else e.thinking += ev.delta;
+          if (ev.type === 'text_delta') {
+            e.text += ev.delta;
+            this.endThinking(e);
+            this.setActivity('writing');
+          } else {
+            e.thinking += ev.delta;
+            if (!this.thinkStart.has(e.id)) this.thinkStart.set(e.id, Date.now());
+            this.setActivity('thinking');
+          }
           this.emit('event', { kind: 'delta', id: f.messageId, channel: ev.type === 'text_delta' ? 'text' : 'thinking', delta: ev.delta });
         }
         return;
@@ -296,6 +343,7 @@ export class AgentBridge extends EventEmitter {
           const text = (m.content ?? []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('');
           const thinking = (m.content ?? []).filter((c: any) => c.type === 'thinking').map((c: any) => c.thinking).join('\n');
           const e = this.upsertAssistant(f.messageId, text, thinking, false);
+          this.endThinking(e);
           if (!e.text && !e.thinking) this.history = this.history.filter((h) => h !== e);
           if (m.stopReason === 'error' && m.errorMessage) this.note('error', `LLM error: ${m.errorMessage}`);
           this.emit('event', { kind: 'entry', entry: e });
@@ -308,8 +356,9 @@ export class AgentBridge extends EventEmitter {
         return;
       }
       case 'tool_execution_start': {
-        const entry: ChatEntry = { kind: 'tool', id: f.toolCallId, name: prettyTool(f.toolName), args: f.args, status: 'running', at: Date.now() };
+        const entry: ChatEntry = { kind: 'tool', id: f.toolCallId, name: prettyTool(f.toolName), args: f.args, intent: f.intent, status: 'running', at: Date.now() };
         this.push(entry);
+        this.setActivity('tool', prettyTool(f.toolName));
         return;
       }
       case 'tool_execution_end': {
@@ -317,6 +366,13 @@ export class AgentBridge extends EventEmitter {
         const content = f.result?.content ?? [];
         const textOut = content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
         const images = [...textOut.matchAll(/captures\/(agent\/[^\s]+\.jpg)/g)].map((m) => m[1]);
+        const phases = f.result?.details?.phases;
+        if (Array.isArray(phases)) {
+          this.todos = phases;
+          this.emit('status', this.status());
+        }
+        this.toolEmitAt.delete(f.toolCallId);
+        if (this.busy) this.setActivity('thinking');
         if (e) {
           e.status = f.isError ? 'error' : 'ok';
           e.result = textOut.slice(0, 6000);
@@ -328,8 +384,10 @@ export class AgentBridge extends EventEmitter {
       }
       case 'auto_compaction_start':
         this.note('info', 'Compacting conversation context…');
+        this.setActivity('compacting');
         return;
       case 'auto_retry_start':
+        this.setActivity('retrying');
         this.note('warn', `Retrying LLM request (${f.attempt ?? ''}/${f.maxAttempts ?? ''}): ${f.errorMessage ?? ''}`);
         return;
       case 'extension_error':
@@ -354,6 +412,7 @@ export class AgentBridge extends EventEmitter {
       this.restartDelay = 2000;
       this.lastError = null;
       await this.loadHistory();
+      await this.refreshState();
       log.info(`agent ready (${this.model}, thinking ${this.thinking})`);
       this.emit('status', this.status());
     } catch (err) {
@@ -427,17 +486,82 @@ export class AgentBridge extends EventEmitter {
   private setBusy(b: boolean): void {
     if (this.busy === b) return;
     this.busy = b;
+    if (!b) {
+      this.activity = { kind: 'idle', since: Date.now() };
+      this.turnStartedAt = null;
+    } else if (this.activity.kind === 'idle') this.activity = { kind: 'thinking', since: Date.now() };
     this.emit('status', this.status());
   }
 
   status() {
-    return { ready: this.ready, busy: this.busy, model: this.model || `astro/${config.llm.model}`, thinking: this.thinking, baseUrl: config.llm.baseUrl, error: this.lastError };
+    return {
+      ready: this.ready,
+      busy: this.busy,
+      model: this.model || `astro/${config.llm.model}`,
+      thinking: this.thinking,
+      baseUrl: config.llm.baseUrl,
+      error: this.lastError,
+      activity: this.activity,
+      turnStartedAt: this.busy ? this.turnStartedAt : null,
+      queue: this.queue,
+      todos: this.todos,
+      context: this.context,
+      tokensPerSecond: this.tokensPerSecond,
+    };
   }
 
-  async prompt(text: string, images: Array<{ data: string; mimeType: string }> = []): Promise<void> {
+  private setActivity(kind: Activity['kind'], tool?: string): void {
+    if (this.activity.kind === kind && this.activity.tool === tool) return;
+    this.activity = { kind, tool, since: Date.now() };
+    this.emit('status', this.status());
+  }
+
+  private endThinking(e: Extract<ChatEntry, { kind: 'assistant' }>): void {
+    const t0 = this.thinkStart.get(e.id);
+    if (t0 === undefined) return;
+    this.thinkStart.delete(e.id);
+    e.thinkingMs = Date.now() - t0;
+  }
+
+  /** Context usage, queue, todos and speed from omp (after every turn). */
+  async refreshState(): Promise<void> {
+    if (!this.ready) return;
+    const st = await this.command('get_state', {}, 15000).catch(() => null);
+    if (!st) return;
+    if (st.contextUsage) this.context = { tokens: st.contextUsage.tokens, contextWindow: st.contextUsage.contextWindow, percent: st.contextUsage.percent };
+    if (st.queuedMessages) this.queue = { steering: st.queuedMessages.steering ?? [], followUp: st.queuedMessages.followUp ?? [] };
+    if (Array.isArray(st.todoPhases)) this.todos = st.todoPhases;
+    if (typeof st.tokensPerSecond === 'number') this.tokensPerSecond = st.tokensPerSecond;
+    if (!st.isStreaming && !this.busy && this.activity.kind !== 'idle') this.activity = { kind: 'idle', since: Date.now() };
+    this.emit('status', this.status());
+  }
+
+  /**
+   * Send a message. While the agent works, "steer" delivers it at the next step of the running
+   * turn and "followUp" queues it until the turn ends (omp's two queues).
+   */
+  async prompt(text: string, images: Array<{ data: string; mimeType: string }> = [], mode: 'auto' | 'steer' | 'followUp' = 'auto'): Promise<void> {
     if (!this.ready) throw new Error(this.lastError ?? 'agent is not ready yet');
     const imgs = images.map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
-    await this.command('prompt', { message: text, images: imgs.length ? imgs : undefined, ...(this.busy ? { streamingBehavior: 'steer' } : {}) }, 120000);
+    const behaviour = this.busy ? (mode === 'followUp' ? 'followUp' : 'steer') : undefined;
+    await this.command('prompt', { message: text, images: imgs.length ? imgs : undefined, ...(behaviour ? { streamingBehavior: behaviour } : {}) }, 120000);
+  }
+
+  async removeQueued(message: string, queue: 'steering' | 'followUp'): Promise<boolean> {
+    const r = await this.command<{ removed: boolean }>('remove_queued_message', { message, queue });
+    await this.refreshState();
+    return !!r?.removed;
+  }
+
+  async compact(): Promise<void> {
+    this.note('info', 'Compacting conversation context…');
+    this.setActivity('compacting');
+    try {
+      await this.command('compact', {}, 600000);
+    } finally {
+      this.setActivity(this.busy ? 'thinking' : 'idle');
+      await this.refreshState();
+    }
   }
 
   async abort(): Promise<void> {
@@ -447,7 +571,9 @@ export class AgentBridge extends EventEmitter {
   async newSession(): Promise<void> {
     await this.command('new_session');
     this.history = [];
+    this.todos = [];
     this.emit('event', { kind: 'reset', history: [] });
+    await this.refreshState();
   }
 
   async setThinking(level: string): Promise<void> {

@@ -123,22 +123,34 @@
       <div class="panel active" id="panel-chat">
         <div class="agent-bar">
           <span id="agent-status" class="agent-status">agent: –</span>
+          <span id="ctx" class="ctx" hidden><span class="ctx-bar"><i></i></span><span id="ctx-text"></span></span>
           <label class="think">thinking
             <select id="sel-thinking">
               <option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option>
             </select>
           </label>
+          <button class="ghost" id="btn-compact" title="Summarise older history to free context space">Compact</button>
           <button class="ghost" id="btn-new" title="Start a new conversation">New</button>
         </div>
-        <div class="chat" id="chat"></div>
+        <details class="todo-card" id="todo-card" hidden><summary id="todo-summary">Plan</summary><div id="todo-list"></div></details>
+        <div class="chat-wrap">
+          <div class="chat" id="chat">
+            <div class="msg notice" id="chat-empty">Ask the agent to plan tonight's imaging, point at something, or check the sky. It can see both cameras and the live stack.</div>
+            <div class="chat-inner" id="chat-inner"></div>
+          </div>
+          <button type="button" class="jump" id="btn-jump" hidden>↓ Latest</button>
+        </div>
+        <div class="activity" id="activity" hidden><span class="spinner"></span><span id="activity-text"></span></div>
         <form class="composer" id="composer">
+          <div class="queue-list" id="queue-list" hidden></div>
           <div class="attach-list" id="attach-list"></div>
           <textarea id="prompt" rows="2" placeholder="Ask the agent… e.g. “What should I image tonight?” or “Raise the scope and show me the wide view”"></textarea>
           <div class="composer-actions">
             <label class="ghost file">📎<input type="file" id="file" accept="image/*" multiple hidden></label>
             <button type="button" class="ghost" id="btn-snap" title="Attach the current main view">＋view</button>
             <span class="spacer"></span>
-            <button type="button" class="warn" id="btn-abort" hidden>Stop</button>
+            <button type="button" class="warn" id="btn-abort" hidden title="Stop the agent (Esc)">Stop</button>
+            <button type="button" class="ghost" id="btn-queue" hidden title="Alt+Enter: deliver when the agent finishes its current turn">Queue</button>
             <button type="submit" class="primary" id="btn-send">Send</button>
           </div>
         </form>

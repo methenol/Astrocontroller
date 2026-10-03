@@ -213,11 +213,13 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
 
   // ---------------------------------------------------------------- agent
   api.post('/agent/prompt', route(async (req) => {
-    const { text, images } = req.body ?? {};
+    const { text, images, mode } = req.body ?? {};
     if (!text || typeof text !== 'string') throw new Error('text required');
-    await agent.prompt(text, Array.isArray(images) ? images : []);
+    await agent.prompt(text, Array.isArray(images) ? images : [], mode === 'steer' || mode === 'followUp' ? mode : 'auto');
     return { ok: true };
   }));
+  api.post('/agent/queue/remove', route(async (req) => ({ removed: await agent.removeQueued(String(req.body?.message ?? ''), req.body?.queue === 'followUp' ? 'followUp' : 'steering') })));
+  api.post('/agent/compact', route(async () => agent.compact()));
   api.post('/agent/abort', route(async () => agent.abort()));
   api.post('/agent/new', route(async () => agent.newSession()));
   api.post('/agent/thinking', route(async (req) => agent.setThinking(String(req.body?.level ?? 'medium'))));
@@ -313,7 +315,7 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
     ws.on('message', async (raw) => {
       try {
         const m = JSON.parse(String(raw));
-        if (m.type === 'prompt') await agent.prompt(String(m.text ?? ''), m.images ?? []);
+        if (m.type === 'prompt') await agent.prompt(String(m.text ?? ''), m.images ?? [], m.mode === 'steer' || m.mode === 'followUp' ? m.mode : 'auto');
         else if (m.type === 'abort') await agent.abort();
       } catch (err) {
         ws.send(JSON.stringify({ type: 'error', message: errMsg(err) }));

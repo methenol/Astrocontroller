@@ -40,12 +40,26 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `LIVE_STREAM_FPS` / `LIVE_STREAM_WIDTH` | Browser live-view rate and size. |
 | `PUID` / `PGID` | (Linux) uid/gid that owns files written to `./data` and the library. Default 1000. |
 | `ASTROPHOTO_URL` | AstroPhoto Studio server (e.g. `http://gpu-box:8000` over Tailscale). Empty = processing off. |
-| `ASTROPHOTO_PROFILE` | Restoration profile, by name, from the server's `/api/v1/profiles`: `default` (the server's default, ImageMM), `n2n-network` (fast), `n2n-imagemm`, `n2n-rl`. |
+| `ASTROPHOTO_PROFILE` | Restoration profile, by name, from the server's `/api/v1/profiles`: `default` (the server's default: ImageMM with its Noise2Noise pass), `imagemm` (without it), `n2n-network` (fast), `n2n-rl`. |
 | `ASTROPHOTO_AUTO_PROCESS` / `ASTROPHOTO_POOL_SESSIONS` | Queue processing after each transfer / stack each new night with the earlier nights of its target. |
 | `ASTROPHOTO_DATA_ACCESS` / `ASTROPHOTO_LIBRARY_PATH` | `auto` \| `shared` \| `upload`, and where the library is as the server sees it (see below). |
 | `ASTROPHOTO_FETCH_OUTPUTS`, `ASTROPHOTO_PRESET`, `ASTROPHOTO_STACK_PARAMS`, `ASTROPHOTO_PARAMS`, `ASTROPHOTO_POLL_S` | Copy results back; optional preset and JSON overrides; poll interval. |
 
 Generated agent config (`models.yml`, `config.yml`, `mcp.json`) is rewritten from `.env` on every start under `data/home/.omp/agent/`.
+
+## Agent chat
+
+The Agent tab streams the agent's work as it happens:
+- **Reasoning and tool calls.**
+  - Reasoning appears in a fold that is open while the model thinks and closes once it answers ("thought for 12 s"). If you open or close it yourself, it stays that way.
+  - Tool calls show their intent, a live timer while they run, and their result. Failed calls stand out.
+- **Scrolling.** The view follows new output while you are at the bottom. Scroll up and it stays where you are; a "↓ new" button brings you back.
+- **Status line.** It shows what the agent is doing (thinking, writing, running `goto_target` for 1 m 20 s), and the context bar shows how full the model's context is. **Compact** summarises older history to free space.
+- **Plan card.** The agent's todo list, i.e. its plan for the night, appears above the chat as it updates it.
+- **Talking to it mid-turn.**
+  - **Enter** steers it: the message is delivered at its next step.
+  - **Alt+Enter** queues a follow-up for when the turn ends. Queued messages show as chips you can remove.
+  - **Esc** stops it, and **↑** in an empty box recalls your last message.
 
 ## Imagery library
 
