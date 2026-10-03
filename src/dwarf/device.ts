@@ -27,6 +27,7 @@ export interface StackingInfo {
   gainIndex?: number;
   updatedAt?: number;
   startedAt?: number;
+  stoppedAt?: number;
 }
 
 export interface TelescopeState {
@@ -109,11 +110,18 @@ export class Dwarf extends EventEmitter {
     this.stateTimer = setInterval(() => {
       if (this.link.connected) void this.refreshState().catch(() => {});
     }, 30000);
+    // Keep the reported mount angles current (they change during GoTo/tracking without notifications).
+    this.motorTimer = setInterval(() => {
+      if (this.link.connected) void this.readMotorPositions().catch(() => {});
+    }, 10000);
     void this.refreshDeviceInfo();
   }
 
+  private motorTimer: NodeJS.Timeout | null = null;
+
   stop(): void {
     if (this.stateTimer) clearInterval(this.stateTimer);
+    if (this.motorTimer) clearInterval(this.motorTimer);
     this.link.stop();
   }
 
@@ -145,6 +153,9 @@ export class Dwarf extends EventEmitter {
       if (config.dwarf.autoSyncTimeLocation) await this.syncTimeLocation().catch((e) => log.warn(`time/location sync failed: ${errMsg(e)}`));
       await this.readMotorPositions().catch(() => {});
       await this.refreshDeviceInfo();
+      // Entering the camera makes the telescope (re)start its RTSP previews and broadcast every
+      // current camera parameter, which primes our live settings cache.
+      await this.ensureLiveView(true).catch(() => {});
     } catch (err) {
       log.warn(`post-connect refresh failed: ${errMsg(err)}`);
     }
@@ -252,16 +263,23 @@ export class Dwarf extends EventEmitter {
         const which = n.name === 'wideStackingState' ? 'wide' : 'tele';
         const state = opState(d.state);
         const prev = st.stacking[which];
-        st.stacking[which] = { ...prev, state, startedAt: state === 'running' && prev.state !== 'running' ? n.ts : prev.startedAt };
+        st.stacking[which] = {
+          ...prev,
+          state,
+          startedAt: state === 'running' && prev.state !== 'running' ? n.ts : prev.startedAt,
+          stoppedAt: state === 'stopped' || state === 'idle' ? n.ts : undefined,
+        };
         break;
       }
       case 'teleStackingProgress':
       case 'wideStackingProgress': {
         const which = n.name === 'wideStackingProgress' ? 'wide' : 'tele';
         const prev = st.stacking[which];
+        // Ignore stragglers that arrive just after a stop.
+        if ((prev.state === 'stopped' || prev.state === 'idle') && prev.stoppedAt && n.ts - prev.stoppedAt < 15000) break;
         st.stacking[which] = {
           ...prev,
-          state: prev.state === 'idle' ? 'running' : prev.state,
+          state: prev.state === 'idle' || prev.state === 'stopped' ? 'running' : prev.state,
           target: d.targetName ?? prev.target,
           totalCount: d.totalCount ?? prev.totalCount,
           currentCount: d.currentCount ?? prev.currentCount,
@@ -320,7 +338,8 @@ export class Dwarf extends EventEmitter {
         st.trackResult = { ...d, camera: n.name === 'wideTrackResult' ? 'wide' : 'tele', at: n.ts };
         break;
       case 'intParam':
-        if (d.paramId) this.params.set(String(d.paramId), { mode: d.mode, value: d.value ?? 0, ts: n.ts });
+        // proto3 omits zero values: a missing mode is mode 0 (auto), a missing value is 0.
+        if (d.paramId) this.params.set(String(d.paramId), { mode: d.mode ?? 0, value: d.value ?? 0, ts: n.ts });
         break;
       case 'boolParam':
         if (d.paramId) this.params.set(String(d.paramId), { value: Boolean(d.value), ts: n.ts });
@@ -404,7 +423,8 @@ export class Dwarf extends EventEmitter {
    * Skipped while an astro operation is running so it can't disturb it.
    */
   async ensureLiveView(force = false): Promise<void> {
-    if (!force && (Date.now() - this.lastLiveViewWake < 60000 || this.isBusy())) return;
+    if (this.isBusy()) return;
+    if (Date.now() - this.lastLiveViewWake < (force ? 5000 : 60000)) return;
     this.lastLiveViewWake = Date.now();
     await this.request(Cmd.TASK_MANAGER_ENTER_CAMERA, { clientParam: { encodeType: 1 } }, { bestEffort: true, timeout: 5000 });
     await this.request(Cmd.CAMERA_TELE_SET_PREVIEW_QUALITY, { level: 1 }, { bestEffort: true, timeout: 3000 });
@@ -423,10 +443,10 @@ export class Dwarf extends EventEmitter {
       const cur = live(def);
       if (name === 'exp') {
         const values = (def.values ?? []) as Array<{ name: string; value: number }>;
-        const mode = cur?.mode ?? def.currentMode;
-        const idx = (cur?.value as number | undefined) ?? (def.currentValue as number);
+        // Only live values from the telescope are trusted (the HTTP schema's currentValue goes stale).
+        const current = !cur ? 'unknown (not reported since connect)' : cur.mode === 0 ? 'auto' : values.find((v) => v.value === cur.value)?.name ?? cur.value;
         out.exposure = {
-          current: mode === 0 ? 'auto' : values.find((v) => v.value === idx)?.name ?? idx,
+          current,
           options: ['auto', ...values.map((v) => v.name)],
           unit: 'seconds',
         };
@@ -479,7 +499,9 @@ export class Dwarf extends EventEmitter {
       const values = def.values as Array<{ name: string; value: number }>;
       const match = matchExposure(values, value);
       await this.request(Cmd.PARAM_SET_EXPOSURE, { paramId: pid(def), mode: 1, value: match.value });
-      return `${camera} exposure → ${match.name}s (manual)`;
+      const secs = match.name.includes('/') ? 0 : Number(match.name);
+      const warn = secs >= 1 ? ` — WARNING: the ${camera} live view is now PAUSED (the telescope stops live streaming at exposures ≥ 1 s) for the user and for you until exposure is set back to "auto". For a one-off night check use view_camera/analyze_image with exposure_s instead, which restores the setting automatically.` : '';
+      return `${camera} exposure → ${match.name}s (manual)${warn}`;
     }
     if (key === 'gain' || key === 'iso') {
       const def = defs.gain;
@@ -544,6 +566,27 @@ export class Dwarf extends EventEmitter {
     }
     await this.request(Cmd.PARAM_SET_GENERAL_INT_PARAM, { paramId: pid(def), value: n });
     return `${name} → ${n}`;
+  }
+
+  /**
+   * Current exposure of a camera in the current mode: null = auto, else seconds.
+   * Long manual exposures stop the camera's RTSP live stream on the telescope.
+   */
+  async exposureSeconds(camera: CameraName): Promise<number | null> {
+    const schema = await http.getParamSchema(await this.currentModeId());
+    const def = schema.cameras[camId(camera)]?.exp;
+    if (!def) return null;
+    // Only trust values the telescope pushed to us (15264); the HTTP schema's currentValue goes stale.
+    const live = this.params.get(String(def.paramId));
+    if (!live || live.mode === 0) return null;
+    const idx = live.value as number;
+    const name = (def.values as Array<{ name: string; value: number }> | undefined)?.find((v) => v.value === idx)?.name;
+    if (!name) return null;
+    if (name.includes('/')) {
+      const [a, b] = name.split('/').map(Number);
+      return a / b;
+    }
+    return Number(name);
   }
 
   // ---- capture -----------------------------------------------------------
@@ -611,17 +654,77 @@ export class Dwarf extends EventEmitter {
   }
 
   /** Home both axes against their limit switches (needed after power-on). */
+  /** Mechanical/sane ranges (verified: rotation stop near 320°, home at rotation≈159° / pitch≈2.4°, pitch 180 = zenith). */
+  static readonly PITCH_RANGE = [0, 195] as const;
+  static readonly ROTATION_RANGE = [0, 315] as const;
+
+  /**
+   * Before driving the motors directly, make sure no astro routine (GoTo, one-click GoTo,
+   * sidereal/special tracking) is still holding them; otherwise resets and moves are
+   * ignored or fought. Refuses while live stacking, which manual motion would ruin.
+   */
+  private async releaseMotors(): Promise<void> {
+    if (this.state.stacking.tele.state === 'running' || this.state.stacking.wide.state === 'running') {
+      throw new Error('live stacking is running — stop it (live_stacking action=stop) before moving the mount');
+    }
+    // Only stop what the telescope reports as running: sending these stops unconditionally
+    // leaves the motor controller in a "needs reset" state (-14520, observed on fw 1.5.3).
+    const st = this.state;
+    const active = (x: string) => ['running', 'plate_solving'].includes(x);
+    if (active(st.goto.state) || active(st.calibration.state) || active(st.tracking.state)) {
+      await this.request(Cmd.ASTRO_STOP_GOTO, {}, { bestEffort: true, timeout: 3000 });
+      await this.request(Cmd.ASTRO_STOP_ONE_CLICK_GOTO, {}, { bestEffort: true, timeout: 3000 });
+      await sleep(1000);
+    }
+  }
+
   async homeMotors(): Promise<string> {
-    await this.request(Cmd.STEP_MOTOR_RESET, { id: 2, direction: true }, { timeout: 120000 });
-    await this.request(Cmd.STEP_MOTOR_RESET, { id: 1, direction: false }, { timeout: 120000 });
-    this.lastMotionAt = Date.now();
-    const p = await this.readMotorPositions();
-    return `homed: rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°`;
+    await this.releaseMotors();
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const reset = async (id: number, direction: boolean) => {
+        const r = await this.request(Cmd.STEP_MOTOR_RESET, { id, direction }, { timeout: 120000, allowError: true });
+        const code = Number(r?.code ?? 0);
+        if (code < 0 && code !== -14520) throw new DwarfCommandError(Cmd.STEP_MOTOR_RESET, code, r ?? {});
+      };
+      // After a failed calibration the firmware ignores resets for a while: retry pitch until it
+      // really reaches the bottom reference.
+      for (let i = 0; i < 5; i++) {
+        await reset(2, true);
+        const pp = await this.readMotorPositions().catch(() => null);
+        if (pp?.pitchDeg !== undefined && pp.pitchDeg < 20) break;
+        await sleep(6000);
+      }
+      await reset(1, false); // the rotation reference switch is at ≈12° (direction=true has no switch → -14520)
+      this.lastMotionAt = Date.now();
+      const p = await this.readMotorPositions();
+      if (p.homed && p.pitchDeg !== undefined && p.rotationDeg !== undefined && p.pitchDeg < 20) {
+        // Park rotation at the centre of travel so every session starts from the same frame.
+        await this.request(Cmd.STEP_MOTOR_RUN_TO, { id: 1, endPosition: 159, speed: 20, speedRamping: 100, resolutionLevel: 3 }, { timeout: 120000 });
+        const q = await this.readMotorPositions();
+        return `homed: rotation ${q.rotationDeg}° (centre of travel), pitch ${q.pitchDeg}° (pointing down; raise with move_motors, e.g. pitch 160 ≈ 70° altitude)`;
+      }
+      if (attempt === 2) {
+        throw new Error(`homing did not complete: motors report ${p.homed ? `rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°` : 'still not homed (-14520)'}. Wait a few seconds and run motors_home again; power-cycling the telescope resets its motor controller.`);
+      }
+      await sleep(5000);
+    }
+    return 'unreachable';
   }
 
   /** Move to absolute motor angles (rotation = motor 1, pitch = motor 2). */
   async moveTo(target: { rotationDeg?: number; pitchDeg?: number }, speedDegPerS = 10): Promise<string> {
     const speed = Math.max(0.1, Math.min(30, speedDegPerS));
+    const [pMin, pMax] = Dwarf.PITCH_RANGE;
+    const [rMin, rMax] = Dwarf.ROTATION_RANGE;
+    if (target.pitchDeg !== undefined && (target.pitchDeg < pMin || target.pitchDeg > pMax)) {
+      throw new Error(`pitch ${target.pitchDeg}° is out of range ${pMin}–${pMax}° (90 = horizon, 180 = zenith in Alt-Az). Nothing was moved.`);
+    }
+    if (target.rotationDeg !== undefined && (target.rotationDeg < rMin || target.rotationDeg > rMax)) {
+      throw new Error(`rotation ${target.rotationDeg}° is out of range ${rMin}–${rMax}° (mechanical stops; centre ≈159°). Nothing was moved.`);
+    }
+    const before = await this.readMotorPositions();
+    if (!before.homed) throw new Error('motors are not homed (after power-on, or a failed calibration/GoTo) — run motors_home first. Nothing was moved.');
+    await this.releaseMotors();
     this.lastMotionAt = Date.now();
     if (target.pitchDeg !== undefined) {
       await this.request(Cmd.STEP_MOTOR_RUN_TO, { id: 2, endPosition: target.pitchDeg, speed, speedRamping: 100, resolutionLevel: 3 }, { timeout: 180000 });
@@ -682,9 +785,14 @@ export class Dwarf extends EventEmitter {
     return `autofocus (${kind}) finished at focus position ${this.state.focusPosition ?? '?'}`;
   }
 
+  private cachedInfinity: number | null = null;
   async infinityFocusPosition(): Promise<number> {
-    const r = await this.request(15011, {}, { timeout: 5000 });
-    return Number(r?.pos ?? 0);
+    for (let i = 0; i < 2; i++) {
+      const r = await this.request(15011, {}, { bestEffort: true, timeout: 4000 });
+      if (r && typeof r.pos === 'number') return (this.cachedInfinity = r.pos);
+    }
+    if (this.cachedInfinity !== null) return this.cachedInfinity;
+    throw new Error('the telescope did not report its stored infinity focus position (no reply to 15011); try again');
   }
 
   /**
@@ -747,6 +855,63 @@ export class Dwarf extends EventEmitter {
     const r = this.state.calibration.result;
     if (first && !first.ok && !r) return `calibration ended without a result (state ${this.state.calibration.state}); check sky visibility`;
     return `calibration complete${r ? ` (azimuth ${r.azimuth.toFixed(2)}°, altitude ${r.altitude.toFixed(2)}°)` : ''}; plate solves: ${this.state.calibration.plateSolvingTimes ?? '?'}`;
+  }
+
+  /**
+   * Run an astro operation that may fail with the motors left un-homed (a failed calibration
+   * resets pitch and leaves the axes in "need reset", -14520). On failure: re-home if needed and
+   * return to the pointing we had before, then rethrow with an explanation.
+   */
+  async withPointingRecovery<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const before = await this.readMotorPositions().catch(() => null);
+    try {
+      return await fn();
+    } catch (err) {
+      await this.restoreWideLiveView();
+      // Make sure the failed routine has let go of the motors before we touch them.
+      await this.request(Cmd.ASTRO_STOP_ONE_CLICK_GOTO, {}, { bestEffort: true, timeout: 3000 });
+      await this.request(Cmd.ASTRO_STOP_CALIBRATION, {}, { bestEffort: true, timeout: 3000 });
+      await sleep(5000);
+      const after = await this.readMotorPositions().catch(() => null);
+      let recovery = '';
+      if (after && !after.homed) {
+        try {
+          await this.homeMotors();
+          if (before?.homed && before.pitchDeg !== undefined && before.rotationDeg !== undefined) {
+            await this.moveTo({ rotationDeg: before.rotationDeg, pitchDeg: before.pitchDeg }, 15);
+            recovery = ` The failed ${label} left the motors un-homed; I re-homed them and returned to the previous pointing (rotation ${before.rotationDeg}°, pitch ${before.pitchDeg}°).`;
+          } else {
+            recovery = ` The failed ${label} left the motors un-homed; I re-homed them (now pointing down — raise with move_motors).`;
+          }
+        } catch (e) {
+          recovery = ` The failed ${label} left the motors un-homed and automatic re-homing failed (${errMsg(e)}); run motors_home.`;
+        }
+      } else if (after?.pitchDeg !== undefined && before?.homed && before.pitchDeg !== undefined && before.rotationDeg !== undefined) {
+        // The firmware's plate-solve sequence leaves the scope wherever it gave up (often pointing at the ground).
+        try {
+          await this.moveTo({ rotationDeg: before.rotationDeg, pitchDeg: before.pitchDeg }, 15);
+          recovery = ` The failed ${label} had left the scope at rotation ${after.rotationDeg}°, pitch ${after.pitchDeg}°; I returned it to the previous pointing (rotation ${before.rotationDeg}°, pitch ${before.pitchDeg}°).`;
+        } catch (e) {
+          recovery = ` Scope is at rotation ${after.rotationDeg}°, pitch ${after.pitchDeg}° (altitude ≈ ${Math.round(after.pitchDeg - 90)}°); returning to the previous pointing failed (${errMsg(e)}).`;
+        }
+      }
+      throw new Error(`${errMsg(err)}.${recovery}`);
+    } finally {
+      await this.restoreWideLiveView();
+    }
+  }
+
+  /**
+   * Calibration/plate-solving leaves the wide camera at a long manual exposure (observed: 1 s),
+   * which stops its live video. Put it back to auto afterwards.
+   */
+  async restoreWideLiveView(): Promise<void> {
+    await sleep(500);
+    const exp = await this.exposureSeconds('wide').catch(() => null);
+    if (exp !== null && exp >= 1) {
+      await this.setSetting('wide', 'exposure', 'auto').catch((e) => log.warn(`could not restore wide exposure: ${errMsg(e)}`));
+      log.info(`wide exposure was left at ${exp}s by the telescope's calibration; set back to auto for live view`);
+    }
   }
 
   async ensureMode(name: string): Promise<void> {

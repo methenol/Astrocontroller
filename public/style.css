@@ -206,3 +206,7 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 7px;
 .burst button { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .burst input { width: 56px; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: none; }
 #btn-record.on { color: #fff; background: #b91c1c; border-color: #b91c1c; }
+
+.stale { position: absolute; z-index: 3; left: 8px; bottom: 6px; right: 8px; font-size: 11.5px; color: var(--warn); text-shadow: 0 1px 2px #000; background: rgba(0,0,0,.55); padding: 2px 6px; border-radius: 5px; width: fit-content; max-width: calc(100% - 16px); }
+.stale[hidden] { display: none; }
+.stale button { margin-left: 6px; color: var(--text); }

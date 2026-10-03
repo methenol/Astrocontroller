@@ -3,6 +3,7 @@ import path from 'node:path';
 import type http from 'node:http';
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
+import sharp from 'sharp';
 import { config } from '../config.js';
 import { logger, logBus, recentLogs, errMsg } from '../log.js';
 import type { Dwarf, CameraName } from '../dwarf/device.js';
@@ -223,7 +224,60 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
   app.use(express.static(config.paths.public, { index: false }));
 
   // ---------------------------------------------------------------- websocket
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ noServer: true });
+  const videoWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  server.on('upgrade', (req, socket, head) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    if (path === '/ws') wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    else if (path === '/ws/video') videoWss.handleUpgrade(req, socket, head, (ws) => videoWss.emit('connection', ws, req));
+    else socket.destroy();
+  });
+
+  // Live video over WebSocket: binary messages [u8 source][f64 capture time ms][JPEG].
+  // Unlike <img> MJPEG streams this reconnects automatically and needs no extra HTTP connections.
+  const SOURCES = ['tele', 'wide', 'stack'] as const;
+  videoWss.on('connection', (ws) => {
+    const subs = new Map<string, () => void>();
+    const busy = new Set<number>();
+    const sendFrame = (idx: number) => (f: { jpeg: Buffer; at: number }) => {
+      // Slow client or a resize still in flight: skip this frame rather than queue it.
+      if (ws.readyState !== 1 || ws.bufferedAmount > 1_500_000 || busy.has(idx)) return;
+      busy.add(idx);
+      sharp(f.jpeg)
+        .resize({ width: config.web.liveWidth, withoutEnlargement: true })
+        .jpeg({ quality: 78 })
+        .toBuffer()
+        .then((small) => {
+          if (ws.readyState !== 1) return;
+          const header = Buffer.alloc(9);
+          header.writeUInt8(idx, 0);
+          header.writeDoubleLE(f.at, 1);
+          ws.send(Buffer.concat([header, small]), { binary: true });
+        })
+        .catch(() => {})
+        .finally(() => busy.delete(idx));
+    };
+    ws.on('message', (raw) => {
+      try {
+        const m = JSON.parse(String(raw));
+        if (m.type !== 'subscribe' || !Array.isArray(m.sources)) return;
+        const want = new Set<string>(m.sources.filter((x: string) => (SOURCES as readonly string[]).includes(x)));
+        for (const [name, unsub] of subs) if (!want.has(name)) {
+          unsub();
+          subs.delete(name);
+        }
+        for (const name of want) if (!subs.has(name)) subs.set(name, hub.get(name).subscribe(sendFrame(SOURCES.indexOf(name as (typeof SOURCES)[number]))));
+      } catch {
+        /* ignore malformed */
+      }
+    });
+    const ping = setInterval(() => ws.readyState === 1 && ws.ping(), 15000);
+    ws.on('close', () => {
+      clearInterval(ping);
+      for (const unsub of subs.values()) unsub();
+      subs.clear();
+    });
+  });
   const clients = new Set<WebSocket>();
   const broadcast = (msg: unknown) => {
     const data = JSON.stringify(msg);
@@ -245,6 +299,10 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
   });
 
   dwarf.on('state', (s) => broadcast({ type: 'telescope', state: s }));
+  // Frame freshness per stream, so the UI can show a stalled view instead of a frozen-looking one.
+  setInterval(() => {
+    if (clients.size) broadcast({ type: 'streams', streams: hub.status(), now: Date.now() });
+  }, 2000).unref();
   dwarf.on('notification', (n) => {
     if (['temperature', 'cmosTemperature', 'intParam', 'systemResourceState'].includes(n.name)) return;
     broadcast({ type: 'notify', name: n.name, data: n.data, ts: n.ts });

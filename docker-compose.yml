@@ -4,6 +4,7 @@ services:
     image: astrocontroller:latest
     container_name: astrocontroller
     restart: unless-stopped
+    stop_grace_period: 15s
     env_file: .env
     environment:
       # Fixed inside the container; the host side comes from .env.

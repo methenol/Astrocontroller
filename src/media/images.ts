@@ -19,6 +19,8 @@ export interface FloatImage {
   source: string;
   camera?: 'tele' | 'wide';
   header?: Record<string, unknown>;
+  /** When the pixels were captured (ms epoch), if known. */
+  capturedAt?: number;
 }
 
 export interface Crop {
@@ -57,17 +59,55 @@ export function resolveLocalPath(p: string): string {
  * Load an image from: "tele" | "wide" | "stack" (live), "device:<sd path>"
  * (album files incl. FITS), or a local file under the library/captures.
  */
-export async function loadImage(source: string, hub: StreamHub, opts: { fullRes?: boolean } = {}): Promise<{ img: FloatImage; encoded?: Buffer }> {
+export async function loadImage(source: string, hub: StreamHub, opts: { fullRes?: boolean; exposureS?: number } = {}): Promise<{ img: FloatImage; encoded?: Buffer }> {
+  // One-off long-exposure still: set exposure, shoot, restore — the live view keeps its own setting.
+  if ((source === 'tele' || source === 'wide') && opts.exposureS !== undefined) {
+    const dwarf = hub.dwarf;
+    const before = await dwarf.exposureSeconds(source).catch(() => null);
+    await dwarf.setSetting(source, 'exposure', String(opts.exposureS));
+    try {
+      const item = await dwarf.takePhoto(source);
+      if (!item) throw new Error(`took a ${opts.exposureS}s ${source} photo but could not find it in the album`);
+      const img = await decode(await fetchFile(item.filePath), `${source} still ${opts.exposureS}s (${item.filePath})`);
+      img.capturedAt = item.modificationTime * 1000;
+      return { img };
+    } finally {
+      // Back to the previous short exposure, or auto: never leave a long manual exposure on a live camera.
+      await dwarf.setSetting(source, 'exposure', before === null || before >= 1 ? 'auto' : String(before)).catch(() => {});
+    }
+  }
   let buf: Buffer;
   let label = source;
   if (source === 'tele' || source === 'wide') {
     const cam = hub.get(source) as import('./streams.js').CameraSource;
+    // At long manual exposures there is no live stream: take a real still instead.
+    const exp = await hub.dwarf.exposureSeconds(source).catch(() => null);
+    if (exp !== null && exp >= 1) {
+      const item = await hub.dwarf.takePhoto(source);
+      if (!item) throw new Error(`took a ${exp}s ${source} photo but could not find it in the album`);
+      const img = await decode(await fetchFile(item.filePath), `${source} still ${exp}s (${item.filePath})`);
+      img.capturedAt = item.modificationTime * 1000;
+      return { img };
+    }
     // Let motion blur settle after the mount moves.
     const settleUntil = hub.lastMotionAt() + 1500;
     if (Date.now() < settleUntil) await new Promise((r) => setTimeout(r, settleUntil - Date.now()));
-    buf = opts.fullRes ? await cam.fullResFrame() : (await cam.snapshot(Math.min(3000, Date.now() - settleUntil))).jpeg;
+    // Require a frame captured after the mount settled, never an older cached one.
+    const grab = async (maxAge: number, timeout: number) => {
+      if (opts.fullRes) return { jpeg: await cam.fullResFrame(), at: Date.now() };
+      return cam.snapshot(maxAge, timeout);
+    };
+    let frame = await grab(Math.max(0, Math.min(3000, Date.now() - settleUntil)), 20000);
+    // The live stream occasionally carries flat grey placeholder frames; wait for a real one.
+    for (let i = 0; i < 4 && (await isFlatJpeg(frame.jpeg)); i++) frame = await grab(0, 10000);
+    const img = await decode(frame.jpeg, source);
+    img.capturedAt = frame.at;
+    return { img, encoded: frame.jpeg };
   } else if (source === 'stack') {
-    buf = (await hub.stack.snapshot(15000, 20000)).jpeg;
+    const f = await hub.stack.snapshot(15000, 20000);
+    const img = await decode(f.jpeg, source);
+    img.capturedAt = f.at;
+    return { img, encoded: f.jpeg };
   } else if (source.startsWith('device:')) {
     const p = source.slice('device:'.length);
     buf = await fetchFile(p.startsWith('/DWARF3') ? p : `/DWARF3${p.startsWith('/') ? '' : '/'}${p}`);
@@ -222,7 +262,10 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
   const devs = new Float32Array(sorted.length);
   for (let i = 0; i < sorted.length; i++) devs[i] = Math.abs(sorted[i] - median);
   devs.sort();
-  const sigma = Math.max(1e-6, percentile(devs, 0.5) * 1.4826);
+  // 8-bit sources can't resolve noise below one grey level; without this floor a flat
+  // frame (σ≈0) turns every quantisation bump into a "star".
+  const sigma = Math.max(img.linear ? 1e-6 : 1.5 / 255, percentile(devs, 0.5) * 1.4826);
+  const flat = percentile(sorted, 0.999) - percentile(sorted, 0.01) < 0.025;
   let sum = 0;
   let sat = 0;
   let black = 0;
@@ -304,6 +347,7 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
       x += R;
     }
   }
+  if (flat) found.length = 0; // no real detections on a blank frame
   found.sort((p, q) => q.peak - p.peak);
   const med = (arr: number[]) => (arr.length ? [...arr].sort((p, q) => p - q)[Math.floor(arr.length / 2)] : undefined);
   const camera = cameraHint ?? img.camera;
@@ -320,6 +364,9 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
   })() : undefined;
 
   const assessment: string[] = [];
+  if (flat) {
+    assessment.push('FLAT/BLANK FRAME: almost no tonal variation — a camera placeholder frame, a covered lens, or a featureless view. This is NOT a valid sky/cloud reading; take a still (take_photo or exposure_s) and analyse that instead.');
+  }
   const satPct = (sat / n) * 100;
   if (satPct > 2) assessment.push(`${satPct.toFixed(1)}% of pixels are saturated — reduce exposure or gain`);
   if (!img.linear && median < 0.03 && satPct < 0.1) assessment.push('image is very dark — increase exposure/gain if this is a daytime or lunar shot');
@@ -360,4 +407,27 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
     },
     assessment,
   };
+}
+
+/**
+ * True for frames that aren't a real picture: a blank placeholder (almost no tonal range), or
+ * the uniform mid-grey, colourless mush the H.265 decoder emits while references are missing
+ * (after motion or at stream start). Dark night-sky frames are not flagged (low mean).
+ */
+async function isFlatJpeg(jpeg: Buffer): Promise<boolean> {
+  const { data, info } = await sharp(jpeg).resize(160, 90, { fit: 'fill' }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const n = info.width * info.height;
+  const lum: number[] = [];
+  let chroma = 0;
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 3], g = data[i * 3 + 1], b = data[i * 3 + 2];
+    lum.push(0.299 * r + 0.587 * g + 0.114 * b);
+    chroma += Math.max(r, g, b) - Math.min(r, g, b);
+  }
+  lum.sort((a, b) => a - b);
+  const range = lum[Math.floor(n * 0.99)] - lum[Math.floor(n * 0.01)];
+  const mean = lum.reduce((a, b) => a + b, 0) / n;
+  if (range < 7) return true; // blank placeholder
+  const greyMush = mean > 90 && mean < 190 && range < 40 && chroma / n < 6;
+  return greyMush;
 }

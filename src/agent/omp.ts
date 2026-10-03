@@ -239,7 +239,7 @@ export class AgentBridge extends EventEmitter {
       if (!this.chunks || this.chunks.id !== f.chunkId) this.chunks = { id: f.chunkId, parts: [], count: f.count };
       this.chunks.parts[f.index] = f.data;
       if (this.chunks.parts.filter(Boolean).length === this.chunks.count) {
-        const json = Buffer.from(this.chunks.parts.join(''), 'base64').toString('utf8');
+        const json = Buffer.concat(this.chunks.parts.map((p) => Buffer.from(p, 'base64'))).toString('utf8');
         this.chunks = null;
         try {
           this.onFrame(JSON.parse(json));

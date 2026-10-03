@@ -101,6 +101,9 @@ const OVERRIDES: Record<number, Entry> = {
   11044: { req: T('astro.ReqDelCaliFrameList'), res: T('base.ComResponse') },
   11045: { req: T('astro.ReqCaptureCaliFrame'), res: T('base.ComResponse') },
   11046: { req: T('astro.ReqStopCaptureCaliFrame'), res: T('base.ComResponse') },
+  // live preview quality (part of the app's camera wake-up sequence)
+  10050: { req: T('camera.ReqSetPreviewQuality'), res: T('base.ComResponse') },
+  12036: { req: T('camera.ReqSetPreviewQuality'), res: T('base.ComResponse') },
   // focus
   15011: { req: T('focus.ReqGetUserInfinityPos'), res: T('focus.ResUserInfinityPos') },
   15012: { req: T('focus.ReqSetUserInfinityPos'), res: T('base.ComResponse') },
@@ -293,7 +296,12 @@ export function rawDecode(data: Uint8Array): Record<string, unknown> {
 
 const HINTS: Record<number, string> = {
   [-1]: 'rejected by firmware — usually the device is in the wrong shooting mode/technique for this command',
-  [-14520]: 'motors must be homed first (use motor_home)',
+  [-14520]: 'motors must be homed first (motors_home); a failed calibration also leaves them in this state',
+  [-14519]: 'mechanical limit reached (rotation travel is about 0–315°)',
+  [-15106]: 'the current exposure is too long for contrast autofocus — in DSO mode use autofocus mode=astro (needs stars), or switch to Normal mode / a shorter exposure',
+  [-11504]: 'calibration failed: plate-solving found no stars (clouds, obstruction, dew or daylight)',
+  [-11505]: 'GoTo refused: a successful calibration is needed first',
+  [-11513]: 'GoTo is needed before live stacking',
 };
 
 export function errorText(code: number): string {

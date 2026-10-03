@@ -40,6 +40,7 @@ server.listen(config.web.port, () => {
 
 const shutdown = () => {
   log.info('shutting down');
+  hub.shutdown();
   agent.stop();
   dwarf.stop();
   server.close();

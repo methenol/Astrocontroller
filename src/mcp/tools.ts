@@ -51,13 +51,19 @@ async function imageResult(img: FloatImage, label: string, opts: { stretch?: boo
   const shown = opts.stretch ?? img.linear ? autoStretch(img) : img;
   const jpeg = await toJpeg(shown, opts.maxSize ?? 1280);
   const saved = saveCapture(jpeg, label);
-  const lines = [`${label}: ${img.width}×${img.height}${img.linear ? ' (linear data, auto-stretched for display)' : ''}`, `saved as captures/${saved}`];
+  const lines = [`${label}: ${img.width}×${img.height}${img.linear ? ' (linear data, auto-stretched for display)' : ''}`, capturedLine(img), `saved as captures/${saved}`].filter(Boolean);
   if (opts.note) lines.push(opts.note);
   return {
     content: config.llm.vision
       ? [{ type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }, { type: 'text', text: lines.join('\n') }]
       : [{ type: 'text', text: `${lines.join('\n')}\n(vision disabled: use analyze_image for numbers)` }],
   };
+}
+
+function capturedLine(img: FloatImage): string {
+  if (!img.capturedAt) return '';
+  const age = (Date.now() - img.capturedAt) / 1000;
+  return `captured ${new Date(img.capturedAt).toLocaleTimeString('en-US', { timeZone: config.observer.timezone, hour12: false })} (${age < 120 ? `${age.toFixed(1)} s` : `${Math.round(age / 60)} min`} ago)`;
 }
 
 const camera = z.enum(['tele', 'wide']).describe('tele = 150mm telephoto (2.95°×1.66° FOV), wide = 6.7mm wide-angle (45°×26°)');
@@ -176,10 +182,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       setting: z.string(),
       value: z.union([z.string(), z.number(), z.boolean()]),
       mode: z.string().optional().describe('apply to this shooting mode instead of the current one (e.g. set DSO exposure while in Normal)'),
+      allow_live_stall: z.boolean().optional().describe('required to set a wide-camera exposure ≥ 1 s: that stops the wide live video until exposure is back to auto (only for wide-camera stacking)'),
     },
-    async ({ camera: cam, setting, value, mode }) => {
-      const modeId = mode ? (await http.resolveShootingMode(mode)).id : undefined;
-      return text(await dwarf.setSetting(cam, setting, value, modeId));
+    async ({ camera: cam, setting, value, mode, allow_live_stall }) => {
+      if (cam === 'wide' && /^(exposure|exp|shutter)$/i.test(setting) && String(value).toLowerCase() !== 'auto') {
+        const v = String(value);
+        const secs = v.includes('/') ? Number(v.split('/')[0]) / Number(v.split('/')[1]) : Number(v.replace(/s$/i, ''));
+        if (secs >= 1 && !allow_live_stall) {
+          throw new Error(`a ${v}s manual exposure on the wide camera stops its live video completely (verified). For a night/sky look use sky_check, or view_camera/analyze_image with exposure_s=${v} (one still, settings restored). Pass allow_live_stall=true only for wide-camera stacking. Nothing was changed.`);
+        }
+      }
+      const m = mode ? await http.resolveShootingMode(mode) : undefined;
+      const res = await dwarf.setSetting(cam, setting, value, m?.id);
+      const modeName = m?.name ?? dwarf.state.shootingMode?.name ?? '?';
+      return text(`${res}  [stored in ${modeName} mode — each shooting mode keeps its own camera settings; switching mode (GoTo switches to DSO) uses that mode's values]`);
     },
   );
 
@@ -212,16 +228,17 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'view_camera',
-    'Look at what a camera sees right now (returns an image). source: tele | wide | stack (the current live-stacking result). Use crop to zoom into a region; full_resolution grabs a 1920×1080 frame (slower).',
+    'Look at what a camera sees right now (returns an image). source: tele | wide | stack (the current live-stacking result). With the camera on auto exposure this is a live frame; with a manual exposure ≥ 1 s (e.g. checking for stars at night) it takes a real still photo at that exposure instead, because the telescope stops its live stream at long exposures. Use crop to zoom into a region; full_resolution grabs a 1920×1080 frame (slower).',
     {
       source: z.enum(['tele', 'wide', 'stack']),
       crop: cropSchema,
       full_resolution: z.boolean().optional(),
       max_size: z.number().int().min(256).max(2048).optional().describe('longest edge of the returned image (default 1280)'),
       stretch: z.boolean().optional().describe('auto-stretch faint data'),
+      exposure_s: z.number().positive().max(60).optional().describe('take ONE still at this exposure (e.g. 2 to see stars at night) and restore the camera setting afterwards; keeps the live view working. Prefer this over changing the camera exposure with set_camera_setting.'),
     },
-    async ({ source, crop, full_resolution, max_size, stretch }) => {
-      let { img } = await loadImage(source, hub, { fullRes: full_resolution });
+    async ({ source, crop, full_resolution, max_size, stretch, exposure_s }) => {
+      let { img } = await loadImage(source, hub, { fullRes: full_resolution, exposureS: source === 'stack' ? undefined : exposure_s });
       if (crop) img = cropImage(img, crop);
       return imageResult(img, `${source} live`, { stretch, maxSize: max_size });
     },
@@ -240,7 +257,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (relative) {
         const p = await dwarf.readMotorPositions();
         if (!p.homed || p.rotationDeg === undefined || p.pitchDeg === undefined) throw new Error('motors are not homed; run motors_home first');
-        return text(await dwarf.moveTo({ rotationDeg: rotation_deg !== undefined ? p.rotationDeg + rotation_deg : undefined, pitchDeg: pitch_deg !== undefined ? p.pitchDeg + pitch_deg : undefined }, speed));
+        for (const [axis, d] of [['rotation_deg', rotation_deg], ['pitch_deg', pitch_deg]] as const) {
+          if (d !== undefined && Math.abs(d) > 60) throw new Error(`relative ${axis}=${d}° is too large for a relative nudge (max ±60°). Did you mean an absolute move? Call again without relative. Nothing was moved.`);
+        }
+        const res = await dwarf.moveTo({ rotationDeg: rotation_deg ? p.rotationDeg + rotation_deg : undefined, pitchDeg: pitch_deg ? p.pitchDeg + pitch_deg : undefined }, speed);
+        return text(`relative move (Δrotation ${rotation_deg ?? 0}°, Δpitch ${pitch_deg ?? 0}°): ${res}`);
       }
       return text(await dwarf.moveTo({ rotationDeg: rotation_deg, pitchDeg: pitch_deg }, speed));
     },
@@ -349,6 +370,56 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   tool(
+    'sky_check',
+    'One-call clear-sky check: points nowhere (uses the current pointing), takes a single wide-camera still at night settings (default 2.5 s, gain 60), restores the camera\'s previous exposure/gain, and returns the star count, background level, a verdict (clear / partly clear / cloudy / bright) and the image. Raise the scope above ~60° altitude first (pitch > 150). Use this instead of hand-setting exposure/gain + take_photo + analyze_image.',
+    {
+      exposure_s: z.number().min(0.2).max(15).optional().describe('default 2.5'),
+      gain: z.number().min(0).max(240).optional().describe('default 60'),
+    },
+    async ({ exposure_s, gain }) => {
+      const exp = exposure_s ?? 2.5;
+      const g = gain ?? 60;
+      const pos = await dwarf.readMotorPositions().catch(() => null);
+      const settings = await dwarf.cameraSettings('wide');
+      const prevGain = (settings.settings.gain as { current?: unknown } | undefined)?.current;
+      // Restore exposure to the previous *known* value; if unknown, auto (a long manual exposure
+      // left on the wide camera stops its live video entirely).
+      const prevExpRaw = (settings.settings.exposure as { current?: unknown } | undefined)?.current;
+      const prevExp = typeof prevExpRaw === 'string' && !prevExpRaw.startsWith('unknown') && !(Number(prevExpRaw) >= 1) ? prevExpRaw : 'auto';
+      await dwarf.setSetting('wide', 'gain', g);
+      let img: FloatImage;
+      try {
+        ({ img } = await loadImage('wide', hub, { exposureS: exp }));
+      } finally {
+        if (typeof prevGain === 'number') await dwarf.setSetting('wide', 'gain', prevGain).catch(() => {});
+        await dwarf.setSetting('wide', 'exposure', prevExp).catch(() => {});
+      }
+      const a = analyze(img, 'wide');
+      const stars = a.stars.count;
+      const bg = a.stats.median;
+      const verdict = a.assessment.some((x) => x.startsWith('FLAT')) ? 'invalid frame (blank)' : bg > 0.6 ? 'too bright (twilight, Moon glow or a lit cloud deck)' : stars >= 40 ? 'clear' : stars >= 10 ? 'partly clear / thin cloud' : 'cloudy (no usable stars)';
+      const jpeg = await toJpeg(autoStretch(img), 1024);
+      const saved = saveCapture(jpeg, 'sky_check');
+      const summary = {
+        verdict,
+        stars,
+        backgroundMedian: bg,
+        medianHfrPx: a.stars.medianHfrPx,
+        pointing: pos ? { rotationDeg: pos.rotationDeg, pitchDeg: pos.pitchDeg, altitudeDeg: pos.pitchDeg !== undefined ? Math.round(pos.pitchDeg - 90) : undefined } : undefined,
+        settingsUsed: `${exp}s, gain ${g} (camera restored to ${prevExp ?? '?'} / gain ${prevGain ?? '?'})`,
+        captured: capturedLine(img),
+        image: `captures/${saved}`,
+        notes: pos?.pitchDeg !== undefined && pos.pitchDeg < 120 ? 'pointing is low (< 30° altitude): trees, houses and haze will reduce the star count' : undefined,
+      };
+      return {
+        content: config.llm.vision
+          ? [{ type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }, { type: 'text', text: JSON.stringify(summary, null, 1) }]
+          : [{ type: 'text', text: JSON.stringify(summary, null, 1) }],
+      };
+    },
+  );
+
+  tool(
     'plan_targets',
     'Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera: hours above min altitude, peak altitude/time, size vs field of view, brightness, Moon separation, and suggested filter. Use before choosing what to image.',
     {
@@ -416,7 +487,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     'calibrate',
     'Astro calibration (plate-solve the sky to learn pointing). Needs a clear sky, synced time/location, DSO mode, and motors homed. Takes ~1-3 minutes. Required before goto_target unless one_click is used.',
     {},
-    async () => text(await dwarf.calibrate()),
+    async () => text(await dwarf.withPointingRecovery('calibration', () => dwarf.calibrate())),
   );
 
   tool(
@@ -430,19 +501,23 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     async ({ name, ra_hours, dec_deg, one_click }) => {
       const oneClick = one_click !== false;
-      if (ra_hours !== undefined && dec_deg !== undefined) return text(await dwarf.gotoRaDec(ra_hours, dec_deg, name ?? 'Custom', oneClick));
+      if (ra_hours !== undefined && dec_deg !== undefined) return text(await dwarf.withPointingRecovery('GoTo', () => dwarf.gotoRaDec(ra_hours, dec_deg, name ?? 'Custom', oneClick)));
       if (!name) throw new Error('give a target name or ra_hours + dec_deg');
       const body = sky.bodyByName(name);
       if (body) {
         if (body === 'Sun') throw new Error('Pointing at the Sun requires the solar filter fitted. Use track_sun_moon after the user confirms the filter is on.');
-        return text(await dwarf.gotoSolarSystem(body, oneClick));
+        return text(await dwarf.withPointingRecovery('GoTo', () => dwarf.gotoSolarSystem(body, oneClick)));
       }
       const o = findObject(name);
       if (!o) throw new Error(`"${name}" not found; use find_target or give coordinates`);
       const alt = sky.altAz(site(), o.raHours, o.decDeg).altitude;
       if (alt < 5) throw new Error(`${o.id} is below the horizon (altitude ${alt.toFixed(1)}°)`);
       const label = o.aliases.find((a) => /^M \d/.test(a)) ?? o.id;
-      return text(await dwarf.gotoRaDec(o.raHours, o.decDeg, label, oneClick));
+      try {
+        return text(await dwarf.withPointingRecovery('GoTo', () => dwarf.gotoRaDec(o.raHours, o.decDeg, label, oneClick)));
+      } catch (err) {
+        throw new Error(`${errMsg(err)} Calibration/plate-solving needs visible stars: -11504 = calibration failed (no stars), -11505 = GoTo refused (needs a successful calibration first). Use sky_check to see when stars are visible.`);
+      }
     },
   );
 
@@ -628,11 +703,16 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   tool(
     'analyze_image',
     'Measure an image numerically: background level & noise, saturation, sharpness, star count, median star HFR/FWHM (focus quality) and roundness (tracking quality), colour balance, with a plain-language assessment. source: tele | wide | stack | device:<path> | library path.',
-    { source: z.string(), crop: cropSchema, camera: camera.optional().describe('which lens took it, for plate scale') },
-    async ({ source, crop, camera: cam }) => {
-      let { img } = await loadImage(source, hub);
+    {
+      source: z.string(),
+      crop: cropSchema,
+      camera: camera.optional().describe('which lens took it, for plate scale'),
+      exposure_s: z.number().positive().max(60).optional().describe('for tele/wide: analyse ONE still at this exposure (e.g. 2 s to count stars at night), restoring the camera setting afterwards'),
+    },
+    async ({ source, crop, camera: cam, exposure_s }) => {
+      let { img } = await loadImage(source, hub, { exposureS: source === 'tele' || source === 'wide' ? exposure_s : undefined });
       if (crop) img = cropImage(img, crop);
-      return text(analyze(img, cam));
+      return text({ captured: capturedLine(img) || undefined, ...analyze(img, cam) });
     },
   );
 

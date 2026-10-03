@@ -106,6 +106,9 @@ function handle(m) {
     case 'error':
       toast(m.message, true);
       break;
+    case 'streams':
+      renderStreamHealth(m.streams);
+      break;
   }
 }
 
@@ -156,7 +159,11 @@ function renderTelescope(t) {
   }
   if (stackActive() !== stackWasActive) {
     stackWasActive = stackActive();
-    for (const [slot, src] of Object.entries(views)) if (src === 'stack') setView(slot, 'stack');
+    videoSubscribe();
+    if (!stackWasActive) {
+      delete blobUrls.stack;
+      for (const [slot, src] of Object.entries(views)) if (src === 'stack') setView(slot, 'stack');
+    }
   }
   const s = t.stacking?.tele?.state === 'running' || t.stacking?.tele?.currentCount ? t.stacking.tele : t.stacking?.wide?.state === 'running' ? t.stacking.wide : null;
   const bar = $('#stackbar');
@@ -175,32 +182,113 @@ function renderTelescope(t) {
 }
 
 // ------------------------------------------------------------------ live views
+// Frames arrive over a dedicated WebSocket (/ws/video): [u8 source][f64 capture ms][JPEG].
+// It reconnects by itself, so a server restart or network blip never leaves a view frozen.
 const views = { main: 'tele', a: 'wide', b: 'stack' };
+const SOURCES = ['tele', 'wide', 'stack'];
+const lastFrame = { tele: 0, wide: 0, stack: 0 }; // local receive time per source
+const blobUrls = {};
+let videoWs = null;
+let videoRetry = 0;
 let stackWasActive = false;
 function stackActive() {
   const s = state.telescope?.stacking;
-  return !!s && ['running', 'stopping'].includes(s.tele?.state) || ['running', 'stopping'].includes(s?.wide?.state);
+  return !!s && (['running', 'stopping'].includes(s.tele?.state) || ['running', 'stopping'].includes(s.wide?.state));
 }
+
+function wantedSources() {
+  if (document.hidden) return [];
+  // The stack feed only means something while stacking (otherwise it mirrors the tele preview).
+  return [...new Set(Object.values(views))].filter((s) => s !== 'stack' || stackActive());
+}
+
+function videoSubscribe() {
+  if (videoWs?.readyState === 1) videoWs.send(JSON.stringify({ type: 'subscribe', sources: wantedSources() }));
+}
+
+function connectVideo() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}ws/video`);
+  ws.binaryType = 'arraybuffer';
+  videoWs = ws;
+  ws.onopen = () => {
+    videoRetry = 0;
+    videoSubscribe();
+  };
+  ws.onmessage = (ev) => {
+    if (!(ev.data instanceof ArrayBuffer) || ev.data.byteLength < 10) return;
+    const dv = new DataView(ev.data);
+    const src = SOURCES[dv.getUint8(0)];
+    if (!src) return;
+    lastFrame[src] = Date.now();
+    const url = URL.createObjectURL(new Blob([new Uint8Array(ev.data, 9)], { type: 'image/jpeg' }));
+    const old = blobUrls[src];
+    blobUrls[src] = url;
+    for (const [slot, s] of Object.entries(views)) {
+      if (s !== src) continue;
+      const img = $(slot === 'main' ? '#img-main' : `#img-${slot}`);
+      img.src = url;
+      img.style.visibility = 'visible';
+    }
+    if (old) setTimeout(() => URL.revokeObjectURL(old), 2000);
+  };
+  ws.onclose = () => {
+    videoWs = null;
+    setTimeout(connectVideo, Math.min(500 * 2 ** videoRetry++, 5000));
+  };
+}
+
 function setView(slot, src) {
   views[slot] = src;
   const img = $(slot === 'main' ? '#img-main' : `#img-${slot}`);
   const fig = img.closest('figure');
   fig.dataset.src = src;
   $('.view-name', fig).textContent = src[0].toUpperCase() + src.slice(1);
-  // The stack stream only carries frames while the telescope is stacking.
-  const live = !(src === 'stack' && !stackActive());
-  if (live) img.src = `stream/${src}?t=${Date.now()}`;
-  else img.removeAttribute('src');
-  img.style.visibility = live ? 'visible' : 'hidden';
+  // Show this source's latest frame immediately if we have one; otherwise the placeholder.
+  if (blobUrls[src]) {
+    img.src = blobUrls[src];
+    img.style.visibility = 'visible';
+  } else {
+    img.removeAttribute('src');
+    img.style.visibility = 'hidden';
+  }
   updateTeleBox();
   if (slot === 'main') {
     state.mainSrc = src;
     // Capture defaults to whichever camera is in the main view.
     if (src === 'tele' || src === 'wide') $('#cap-cam').value = src;
-    $('#empty-main').textContent = src === 'stack' ? 'waiting for live-stacking image…' : 'waiting for stream…';
+    $('#empty-main').textContent = src === 'stack' ? 'no live-stacking image yet' : 'waiting for video…';
+  }
+  videoSubscribe();
+}
+
+// Per-view health: age of the last frame actually received, plus the server's note for that source.
+let serverStreams = {};
+function renderStreamHealth(streams) {
+  if (streams) serverStreams = streams;
+  for (const fig of $$('figure.view')) {
+    const src = fig.dataset.src;
+    const st = serverStreams[src];
+    let tag = $('.stale', fig);
+    if (!tag) {
+      tag = document.createElement('div');
+      tag.className = 'stale';
+      fig.appendChild(tag);
+    }
+    const age = lastFrame[src] ? Math.round((Date.now() - lastFrame[src]) / 1000) : null;
+    let text = '';
+    if (!videoWs) text = '⚠ video connection lost — reconnecting…';
+    else if (st?.note) text = `ℹ ${st.note}`;
+    else if (src === 'stack' && !stackActive()) text = 'no live stack running';
+    else if (age === null) text = '⚠ waiting for first frame…';
+    else if (age > 6) text = `⚠ no new frames for ${age}s`;
+    tag.hidden = !text;
+    if (tag.dataset.text !== text) {
+      tag.dataset.text = text;
+      tag.textContent = text;
+    }
   }
 }
-// The placeholder sits behind the image, so the first decoded MJPEG frame covers it.
+setInterval(() => renderStreamHealth(), 1000);
 
 // Green rectangle on wide views showing the tele field. teleInWide comes from the
 // telescope's own tele↔wide matching: top-left x/y + size in the 1920×1080 wide frame.
@@ -247,17 +335,10 @@ $('#btn-fullscreen').onclick = (e) => {
   e.stopPropagation();
   $('#view-main').requestFullscreen?.();
 };
-// Click on the main tele/wide view → track that point? We offer "send to agent" instead.
 $('#view-main').addEventListener('dblclick', () => lightbox(`api/snapshot/${state.mainSrc}?t=${Date.now()}`, state.mainSrc));
 
-document.addEventListener('visibilitychange', () => {
-  // Release streams while the tab is hidden; restore on return.
-  for (const slot of ['main', 'a', 'b']) {
-    const img = $(slot === 'main' ? '#img-main' : `#img-${slot}`);
-    if (document.hidden) img.removeAttribute('src');
-    else setView(slot, views[slot]);
-  }
-});
+// Hidden tab: unsubscribe (saves the telescope and network); visible again: resubscribe.
+document.addEventListener('visibilitychange', videoSubscribe);
 
 // ------------------------------------------------------------------ manual controls
 let nudgeTimer = null;
@@ -754,7 +835,9 @@ function addLog(l) {
 }
 
 // ------------------------------------------------------------------ boot
+connectVideo();
 setView('main', 'tele');
 setView('a', 'wide');
 setView('b', 'stack');
 connect();
+

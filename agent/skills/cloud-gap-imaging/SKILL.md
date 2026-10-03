@@ -12,7 +12,7 @@ Goal: collect clean subs in the clear gaps without filling the stack with cloudy
 - Waiting for gaps leaves the scope idle, and the Dwarf may **auto-power-off** when idle. `autoShutdown` is a device-wide setting (shown under `deviceSettings` in `get_camera_settings`). With the user's OK: `set_camera_setting camera=tele setting=autoShutdown value=false`; the tool reads it back and reports "verified on device". Restore it (`value=true`) at the end if the user wants.
 
 ## Is the sky clear right now?
-- `analyze_image source=wide` on a night frame: star count is the clear-sky meter. Note the count on a known-clear moment in `NOTES.md` to calibrate ("clear ≈ N stars").
+- **`sky_check`** (one call: wide still at 2.5 s / gain 60, camera settings restored afterwards) → verdict, star count, background, image. Point above ~60° altitude (pitch > 150) first. This is the clear-sky meter; don't hand-set wide exposure/gain for it. Note the star count on a known-clear moment in `NOTES.md` to calibrate ("clear ≈ N stars").
   - Many stars, roundness fine → clear. Stars dropping toward 0 with a brighter, flatter background → cloud. Few stars everywhere with a dark background → dew on the lens or wrong exposure.
 - `view_camera source=wide stretch=true` to see cloud structure and which way it's moving.
 
