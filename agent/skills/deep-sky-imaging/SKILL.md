@@ -29,11 +29,13 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 - Start: `live_stacking action=start exposure=15 gain=60 filter=Duo-Band frames=999` (frames 999 = until stopped).
 
 ## 5. Monitor: follow **session-qc**
-- After the first cohort (12 subs; 20 at 60 s) take the baseline with `analyze_subs`, then check every 5–10 min (`wait seconds=300` between checks).
+- After the first cohort (12 subs; 20 at 60 s) take the baseline with `analyze_subs`, then keep checking it (`stacking_status`, `analyze_subs`) while doing the other night work (sky checks for the next target, hourly forecast). There is no wait tool.
 - Refocus on sustained HFR growth or ≥ 5 °C cooling. EQ-60 → EQ-30 on trailing. Pause for clouds without touching settings.
 - Stop if: target below ~25° altitude, dawn within 20 min, battery < 10%, SD < 2 GB, or the stack stops growing.
 - With a multi-target plan, check the time against the plan at every check, and move on when a target's slot ends (or its altitude window closes), not only when something goes wrong.
 - Dew: a dew-point spread < 2 °C means dew on the lens is likely. Warn the user (a dew heater helps); falling star counts at constant cloud cover usually mean dew.
+
+- Stopping and restarting on the same target continues the telescope's count but writes a new `DWARF_RAW_…` session folder; at the end, process all of that target's sessions together (`process_session target=…`).
 
 ## 6. Finish
 - `live_stacking action=stop` (normal stop finalises the stack; `fast_stop` skips final processing).

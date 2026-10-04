@@ -7,8 +7,9 @@ description: Keep a small, good dark-master library for the qualified acquisitio
 ## Facts
 - Dark masters live on the scope in `CALI_FRAME/dark/cam_0/` (`dark_exp_<s>_gain_<g>_bin_1_<T>C_stack_<n>.fits`). `transfer_session` copies them to the library, where AstroPhoto Studio finds them beside the sessions.
 - **Capturing darks needs the operator.** They must fit the ND filter and fully retract the lens cylinder; DWARFLAB's troubleshooting guide also allows a solar-filter cover in complete darkness. A light leak ruins the master. The firmware stacks up to 20 frames per master and matches exposure, gain and resolution exactly.
-- Tool: `dark_frames action=list | capture | stop`. `capture` needs `nd_filter_confirmed=true`, which you may only pass after the operator has said the filter is on. The firmware addresses exposure and gain by internal codes, and the tool learns them from the firmware's own dark list. It can only capture combinations that exist in that list. A brand-new gain or exposure needs one capture in the DWARFLAB app first.
-- Progress: `telescope_status.darkCapture`. Duration ≈ frames × exposure + overhead, e.g. 20 × 60 s ≈ 21 min.
+- **The ND filter is magnetic and the operator tilts the scope up by hand to fit it.** Any motion knocks it off: no parking, homing, GoTo, nudging or move_motors during an ND session. `dark_frames action=nd_fitted` locks all of that in the controller (UI buttons too) until `nd_removed`.
+- Tool: `dark_frames action=list | nd_fitted | capture | status | stop | nd_removed`. The firmware addresses exposure and gain by internal codes, and the tool learns them from the firmware's own dark list. It can only capture combinations that exist in that list. A brand-new gain or exposure needs one capture in the DWARFLAB app first.
+- **A capture runs in the background.** The telescope never acknowledges the capture command (verified 2026-10-03: 15 s and 30 s masters saved, no reply). The controller marks it done when the new master appears in CALI_FRAME. `capture` returns at once; follow it with `dark_frames action=status` (state running → done, with the master's file name; remainingMin). Duration ≈ frames × exposure + ~1 min, e.g. 20 × 60 s ≈ 21 min. A timeout is not a failure: check `list` for the new master before retrying.
 
 ## How AstroPhoto Studio uses darks (why quality matters more than temperature)
 - It subtracts `light − bias − k·(dark − bias)`, with **k fitted per sub** from the hot pixels (dark optimisation). A dark at another temperature still removes the right amount of thermal signal. On C 20 the lights ran at 35–42 °C against a 27 °C dark, and the fitted scale rose smoothly from 1.29 to 1.50.
@@ -33,12 +34,13 @@ Add an entry when:
 
 Do not add entries because the target, filter or Moon changed.
 
-Current queue (2026-10-03): the 30 s and 60 s / g60 masters are stack 1, so recapture both at 20 frames before relying on EQ-30/EQ-60. The 15 s / g60 master is stack 3: recapture at 20 frames near the typical session temperature (~35–40 °C sensor in autumn).
+Current queue: empty. 2026-10-03 ND session: 15 s / g60 (38 °C), 30 s / g60 (39 °C) and 60 s / g60 (40 °C), all 20 frames. The older stack-1/stack-3 masters at 27–28 °C remain on the card; AstroPhoto Studio picks the nearest temperature. Next refresh: when sessions run more than 8 °C from these (winter nights).
 
 ## Procedure (one ND session)
-1. Make sure nothing is imaging; park (`move_motors pitch_deg=2.5`). `dark_frames action=list` → note the sensor temperature and which masters to make.
-2. Ask the operator once: "Please fit the ND filter and fully retract the lens cylinder, then tell me when done." Wait for their confirmation.
-3. For each master in the batch: `dark_frames action=capture exposure_s=… gain=60 frames=20 nd_filter_confirmed=true`. Wait (`wait`) and check `telescope_status.darkCapture` until it finishes, then do the next.
-4. `dark_frames action=list` → check the new masters exist with stack 20 at the expected temperature.
-5. Ask the operator to remove the ND filter. **No light frames until they confirm.**
-6. Transfer later (any `transfer_session` copies CALI_FRAME). Update the queue in NOTES.md, and the profile table in acquisition-profiles.
+1. Make sure nothing is imaging. **Do not park or move the scope.** `dark_frames action=list` → note the sensor temperature and which masters to make.
+2. Ask the operator once: "Please tilt the scope up by hand, fit the ND filter over the lenses (and retract the lens), then tell me when done." Wait for their confirmation, then `dark_frames action=nd_fitted operator_confirmed=true`.
+3. For each master in the batch: `dark_frames action=capture exposure_s=… gain=60 frames=20`. Then check `dark_frames action=status` until it is `done` (do other useful work in between: planning, reading); start the next master only then.
+4. `dark_frames action=list` → check every new master exists with stack 20 at the session temperature.
+5. Ask the operator to remove the ND filter. When they confirm: `dark_frames action=nd_removed operator_confirmed=true`.
+6. **Then `motors_home`** before any pointing: the hand tilt left the motors' recorded position wrong.
+7. Transfer later (any `transfer_session` copies CALI_FRAME). Update the queue in NOTES.md, and the profile table in acquisition-profiles.

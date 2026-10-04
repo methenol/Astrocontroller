@@ -63,6 +63,9 @@ export async function loadImage(source: string, hub: StreamHub, opts: { fullRes?
   // One-off long-exposure still: set exposure, shoot, restore — the live view keeps its own setting.
   if ((source === 'tele' || source === 'wide') && opts.exposureS !== undefined) {
     const dwarf = hub.dwarf;
+    const cam = hub.get(source) as import('./streams.js').CameraSource;
+    // the still stops this camera's live video: tell the stream supervisor, and reconnect it after
+    cam.expectPause(opts.exposureS * 1000 + 20000);
     const before = await dwarf.exposureSeconds(source).catch(() => null);
     await dwarf.setSetting(source, 'exposure', String(opts.exposureS));
     try {
@@ -74,6 +77,8 @@ export async function loadImage(source: string, hub: StreamHub, opts: { fullRes?
     } finally {
       // Back to the previous short exposure, or auto: never leave a long manual exposure on a live camera.
       await dwarf.setSetting(source, 'exposure', before === null || before >= 1 ? 'auto' : String(before)).catch(() => {});
+      // the telescope tends to stay silent on the open session after a still: reconnect it now
+      setTimeout(() => cam.retryRtsp(), 1500);
     }
   }
   let buf: Buffer;
@@ -127,7 +132,9 @@ export async function decode(buf: Buffer, source: string): Promise<FloatImage> {
     const f = readFits(buf);
     let max = 0;
     for (const v of f.data) if (v > max) max = v;
-    const scale = max > 255 ? 65535 : max > 1 ? 255 : 1;
+    // the sensor's real range: a DWARF 3 writes 12-bit values (0-4095) into 16-bit FITS, and a
+    // faint narrowband sub divided by 65535 sat within 0.003 of black (read as a blank frame)
+    const scale = max > 16383 ? 65535 : max > 4095 ? 16383 : max > 255 ? 4095 : max > 1 ? 255 : 1;
     if (f.bayer) {
       const sp = superpixel(f);
       const data = new Float32Array(sp.rgb.length);
@@ -265,7 +272,10 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
   // 8-bit sources can't resolve noise below one grey level; without this floor a flat
   // frame (σ≈0) turns every quantisation bump into a "star".
   const sigma = Math.max(img.linear ? 1e-6 : 1.5 / 255, percentile(devs, 0.5) * 1.4826);
-  const flat = percentile(sorted, 0.999) - percentile(sorted, 0.01) < 0.025;
+  // Blank: nothing stands out. Linear data (raw subs, stacks) is judged against its own noise,
+  // since a faint narrowband sub is legitimately low-contrast; display images by a fixed range.
+  const range = percentile(sorted, 0.999) - percentile(sorted, 0.01);
+  const flat = img.linear ? range < 10 * sigma : range < 0.025;
   let sum = 0;
   let sat = 0;
   let black = 0;

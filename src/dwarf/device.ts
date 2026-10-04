@@ -1,10 +1,13 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
 import Long from 'long';
 import { config, observerLocation, requireObserverLocation } from '../config.js';
 import { logger, errMsg } from '../log.js';
 import { DwarfLink, DwarfCommandError, type Notification, type RequestOptions } from './link.js';
 import { Cmd, OPERATION_STATE, ASTRO_STATE, SOLAR_SYSTEM_INDEX, errorText, protoTypeByName } from './protocol.js';
 import * as http from './http.js';
+import { listDir } from './ftp.js';
 
 const log = logger('dwarf');
 
@@ -50,7 +53,24 @@ export interface TelescopeState {
   tracking: { state: string; target?: string };
   oneClickGoto?: Record<string, unknown>;
   stacking: { tele: StackingInfo; wide: StackingInfo };
-  darkCapture?: { state: string; progress?: number; remainingS?: number };
+  darkCapture?: {
+    state: string;
+    progress?: number;
+    remainingS?: number;
+    exposureS?: number;
+    gain?: number;
+    frames?: number;
+    sensorC?: number;
+    startedAt?: number;
+    expectedEndAt?: number;
+    finishedAt?: number;
+    error?: string;
+    /** the firmware's own dark-capture state (notification 15206) */
+    fwState?: string;
+    master?: string;
+  };
+  /** ND filter fitted for dark frames: nothing may move the scope or take light frames. */
+  ndLock?: { since: number; note: string } | null;
   eqSolving: { state: string; result?: { azimuthErrorDeg: number; altitudeErrorDeg: number; at: number } };
   autofocus: { state: string; astro?: string };
   capture: { photo?: string; burst?: string; record?: string; timelapse?: string; panorama?: string; burstProgress?: string };
@@ -94,6 +114,7 @@ export class Dwarf extends EventEmitter {
     super();
     this.link = new DwarfLink(config.dwarf.host, config.dwarf.wsPort);
     this.link.on('notification', (n: Notification) => this.onNotification(n));
+    this.loadNdLock();
     this.link.on('connected', () => {
       this.state.connected = true;
       this.changed();
@@ -293,11 +314,17 @@ export class Dwarf extends EventEmitter {
         this.emit('stackProgress', which, st.stacking[which]);
         break;
       }
-      case 'darkCaptureState':
-        st.darkCapture = { ...st.darkCapture, state: opState(d.state) };
+      case 'darkCaptureState': {
+        const fw = opState(d.state);
+        const was = st.darkCapture?.fwState;
+        st.darkCapture = { ...st.darkCapture, state: st.darkCapture?.state ?? fw, fwState: fw };
+        log.info(`dark capture: firmware state ${fw}`);
+        // the firmware leaving "running" is the end of a capture: confirm it from the saved master
+        if (was === 'running' && fw !== 'running') this.darkCheck?.();
         break;
+      }
       case 'darkCaptureProgress':
-        st.darkCapture = { state: 'running', progress: d.progress, remainingS: d.remainingTime };
+        st.darkCapture = { ...st.darkCapture, state: st.darkCapture?.state ?? 'running', progress: d.progress, remainingS: d.remainingTime };
         break;
       case 'eqSolvingState':
         st.eqSolving = { ...st.eqSolving, state: opState(d.state) };
@@ -678,7 +705,41 @@ export class Dwarf extends EventEmitter {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // ND-filter lock: while the magnetic ND filter sits on the lenses for darks, any motion (or
+  // the park position) knocks it off, and light frames would be worthless. Persisted, so a
+  // restart mid-session keeps it.
+  // -------------------------------------------------------------------------
+  private ndLockFile = path.join(config.paths.data, 'nd-lock.json');
+
+  loadNdLock(): void {
+    try {
+      this.state.ndLock = JSON.parse(fs.readFileSync(this.ndLockFile, 'utf8'));
+    } catch {
+      this.state.ndLock = null;
+    }
+  }
+
+  setNdLock(on: boolean, note = ''): void {
+    if (on) {
+      this.state.ndLock = this.state.ndLock ?? { since: Date.now(), note };
+      fs.writeFileSync(this.ndLockFile, JSON.stringify(this.state.ndLock));
+      log.info(`ND filter fitted: motion and light frames locked (${note})`);
+    } else {
+      this.state.ndLock = null;
+      fs.rmSync(this.ndLockFile, { force: true });
+      log.info('ND filter removed: lock released');
+    }
+    this.changed();
+  }
+
+  assertNoNdLock(what: string): void {
+    if (!this.state.ndLock) return;
+    throw new Error(`refused: ${what} while the ND filter is fitted for darks — any motion knocks the magnetic filter off, and light frames would be black. When the operator has removed the filter, call dark_frames action=nd_removed operator_confirmed=true, then motors_home (a hand-tilted scope has lost its motor position).`);
+  }
+
   async homeMotors(): Promise<string> {
+    this.assertNoNdLock('homing the motors');
     await this.releaseMotors();
     for (let attempt = 1; attempt <= 2; attempt++) {
       const reset = async (id: number, direction: boolean) => {
@@ -713,6 +774,7 @@ export class Dwarf extends EventEmitter {
 
   /** Move to absolute motor angles (rotation = motor 1, pitch = motor 2). */
   async moveTo(target: { rotationDeg?: number; pitchDeg?: number }, speedDegPerS = 10): Promise<string> {
+    this.assertNoNdLock('moving the motors');
     const speed = Math.max(0.1, Math.min(30, speedDegPerS));
     const [pMin, pMax] = Dwarf.PITCH_RANGE;
     const [rMin, rMax] = Dwarf.ROTATION_RANGE;
@@ -747,6 +809,7 @@ export class Dwarf extends EventEmitter {
    * Speed 0..1 (≈ 30°/s at 1.0; 0.3 ≈ 9°/s).
    */
   async nudge(angleDeg: number, speed: number, durationMs: number): Promise<void> {
+    this.assertNoNdLock('slewing');
     const fwAngle = (((90 - angleDeg) % 360) + 360) % 360;
     const len = Math.max(0.01, Math.min(1, speed));
     const end = Date.now() + Math.max(100, Math.min(30000, durationMs));
@@ -844,6 +907,7 @@ export class Dwarf extends EventEmitter {
   // -------------------------------------------------------------------------
 
   async calibrate(): Promise<string> {
+    this.assertNoNdLock('plate-solve calibration');
     const loc = this.requireLocation();
     await this.ensureMode('DSO');
     const result = this.link.waitFor((n) => n.name === 'calibrationResult', 300000);
@@ -867,6 +931,12 @@ export class Dwarf extends EventEmitter {
     try {
       return await fn();
     } catch (err) {
+      // A GoTo that ends up tracking reached its target: leave the scope exactly where it is
+      // (tracking also makes the motors report "not homed", which is not a failure).
+      if (this.isTracking()) {
+        await this.restoreWideLiveView();
+        throw new Error(`${errMsg(err)}. The telescope is tracking now, so the pointing was left as is; check the frame (view_camera source=tele, exposure_s=2) before deciding it failed.`);
+      }
       await this.restoreWideLiveView();
       // Make sure the failed routine has let go of the motors before we touch them.
       await this.request(Cmd.ASTRO_STOP_ONE_CLICK_GOTO, {}, { bestEffort: true, timeout: 3000 });
@@ -921,6 +991,7 @@ export class Dwarf extends EventEmitter {
 
   /** GoTo a deep-sky position (RA hours, Dec degrees). Requires prior calibration unless oneClick. */
   async gotoRaDec(raHours: number, decDeg: number, name: string, oneClick: boolean): Promise<string> {
+    this.assertNoNdLock('GoTo');
     await this.ensureMode('DSO');
     if (oneClick) {
       const loc = this.requireLocation();
@@ -935,6 +1006,7 @@ export class Dwarf extends EventEmitter {
   }
 
   async gotoSolarSystem(body: string, oneClick: boolean): Promise<string> {
+    this.assertNoNdLock('GoTo');
     const index = SOLAR_SYSTEM_INDEX[body.toLowerCase()];
     if (!index) throw new Error(`unknown solar system body ${body}`);
     const loc = this.requireLocation();
@@ -950,24 +1022,63 @@ export class Dwarf extends EventEmitter {
   }
 
   /** One-click goto replies several times (per step) until all_end. */
+  /** The scope is tracking a target (after a GoTo): its motors then report "not homed", which is normal. */
+  isTracking(): boolean {
+    const oc = this.state.oneClickGoto as { astroTrackingState?: { state?: number } } | undefined;
+    return this.state.tracking.state === 'running' || astroState(oc?.astroTrackingState?.state) === 'running';
+  }
+
+  /**
+   * One-click GoTo: calibrate (plate-solve), slew, refine, track. Verified 2026-10-04 on fw 1.5.3:
+   * the telescope reports its progress as oneClickGotoState notifications and reached tracking
+   * (M 31, 04:23) without ever sending the allEnd reply this used to wait for, so the GoTo "timed
+   * out" and the recovery path moved a scope that was on target. Complete = tracking (or allEnd).
+   */
   private runOneClick(cmd: number, params: Record<string, unknown>, name: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const steps: string[] = [];
-      const timer = setTimeout(() => finish(new Error(`one-click GoTo ${name} timed out after 10 minutes`)), 600000);
+      const t0 = Date.now();
+      let lastStage = '';
+      const timer = setTimeout(() => {
+        if (this.isTracking()) finish(null);
+        else finish(new Error(`one-click GoTo ${name} timed out after 10 minutes without reaching tracking (last stage: ${lastStage || 'none reported'})`));
+      }, 600000);
       const onReply = (r: { cmd: number; data: Record<string, any> }) => {
         if (r.cmd !== cmd) return;
         const code = Number(r.data.code ?? 0);
         steps.push(`step ${r.data.step ?? '?'}${code < 0 ? ` error ${errorText(code)}` : ''}`);
+        log.info(`one-click GoTo ${name}: reply step ${r.data.step ?? '?'}${code < 0 ? ` error ${errorText(code)}` : ''}${r.data.allEnd ? ' (all end)' : ''}`);
         if (code < 0) finish(new DwarfCommandError(cmd, code, r.data));
         else if (r.data.allEnd) finish(null);
       };
+      const onNotify = (n: Notification) => {
+        if (n.name === 'oneClickGotoState') {
+          const d = n.data as Record<string, any>;
+          const key = ['astroTrackingState', 'astroAutoFocusState', 'astroGotoState', 'astroCalibrationState'].find((k) => d[k]);
+          if (!key) return;
+          const stage = `${key.replace(/^astro|State$/g, '')} ${astroState(d[key].state)}`;
+          if (stage !== lastStage) {
+            lastStage = stage;
+            steps.push(stage);
+            log.info(`one-click GoTo ${name}: ${stage} (${Math.round((Date.now() - t0) / 1000)} s)`);
+          }
+          if (key === 'astroTrackingState' && astroState(d[key].state) === 'running') finish(null);
+        } else if (n.name === 'trackingState' && astroState(n.data.state) === 'running') {
+          finish(null);
+        }
+      };
+      let done = false;
       const finish = (err: Error | null) => {
+        if (done) return;
+        done = true;
         clearTimeout(timer);
         this.link.off('reply', onReply);
+        this.link.off('notification', onNotify);
         if (err) reject(err);
-        else resolve(`one-click GoTo ${name} complete (${steps.join(', ')}); tracking: ${this.state.tracking.state}`);
+        else resolve(`one-click GoTo ${name} complete in ${Math.round((Date.now() - t0) / 1000)} s (${steps.join(' → ')}); now tracking ${name}`);
       };
       this.link.on('reply', onReply);
+      this.link.on('notification', onNotify);
       this.request(cmd, params, { bestEffort: true, timeout: 600000, allowError: true }).catch((e) => finish(e));
     });
   }
@@ -978,6 +1089,7 @@ export class Dwarf extends EventEmitter {
   }
 
   async trackSunMoon(body: 'sun' | 'moon', action: 'start' | 'stop'): Promise<void> {
+    if (action === 'start') this.assertNoNdLock('Sun/Moon tracking');
     if (action === 'stop') {
       await this.request(Cmd.ASTRO_STOP_TRACK_SPECIAL_TARGET, {}, { timeout: 10000 });
       return;
@@ -987,6 +1099,7 @@ export class Dwarf extends EventEmitter {
   }
 
   async startStacking(camera: CameraName, opts: { filterIndex?: number; force?: boolean } = {}): Promise<string> {
+    this.assertNoNdLock('live stacking');
     if (camera === 'tele') {
       let ir = opts.filterIndex;
       if (ir === undefined) {
@@ -995,8 +1108,17 @@ export class Dwarf extends EventEmitter {
         const live = def ? this.params.get(String(def.paramId))?.value : undefined;
         ir = typeof live === 'number' ? live : typeof def?.currentValue === 'number' ? (def.currentValue as number) : 0;
       }
-      const r = await this.request(Cmd.ASTRO_START_CAPTURE_RAW_LIVE_STACKING, { irIndex: ir, forceStart: !!opts.force }, { timeout: 30000, allowError: !!opts.force });
+      const t0 = Date.now();
+      // fw 1.5.3 does not always acknowledge this (verified 2026-10-04: no reply in 30 s while the
+      // stack ran normally), so a missing reply is checked against the stacking notifications.
+      const r = await this.request(Cmd.ASTRO_START_CAPTURE_RAW_LIVE_STACKING, { irIndex: ir, forceStart: !!opts.force }, { timeout: 20000, allowError: true, bestEffort: true });
       const code = Number(r?.code ?? 0);
+      if (!r) {
+        if (!(await this.stackingConfirmed('tele', t0, 45000))) {
+          throw new Error('the telescope neither acknowledged the live-stacking start nor reported stacking within 65 s. Check stacking_status before retrying (it may still start).');
+        }
+        return `tele live stacking started (filter ${FILTERS[ir] ?? ir}); confirmed from the telescope's stacking progress (it does not acknowledge this command)`;
+      }
       if (code < 0) {
         // With force_start the firmware reports the missing prerequisite but starts a preview-only stack.
         await sleep(3000);
@@ -1006,9 +1128,26 @@ export class Dwarf extends EventEmitter {
       this.state.stacking.tele = { state: 'running', startedAt: Date.now() };
       return `tele live stacking started (filter ${FILTERS[ir] ?? ir})`;
     }
-    await this.request(Cmd.ASTRO_START_WIDE_CAPTURE_LIVE_STACKING, { forceStart: !!opts.force }, { timeout: 30000 });
-    this.state.stacking.wide = { state: 'running', startedAt: Date.now() };
+    const t0 = Date.now();
+    const r = await this.request(Cmd.ASTRO_START_WIDE_CAPTURE_LIVE_STACKING, { forceStart: !!opts.force }, { timeout: 20000, allowError: true, bestEffort: true });
+    const code = Number(r?.code ?? 0);
+    if (code < 0) throw new DwarfCommandError(Cmd.ASTRO_START_WIDE_CAPTURE_LIVE_STACKING, code, r ?? {});
+    if (!r && !(await this.stackingConfirmed('wide', t0, 45000))) {
+      throw new Error('the telescope neither acknowledged the wide live-stacking start nor reported stacking within 65 s. Check stacking_status before retrying.');
+    }
+    if (r) this.state.stacking.wide = { state: 'running', startedAt: Date.now() };
     return 'wide live stacking started';
+  }
+
+  /** Stacking reported as running by the telescope's own notifications since `since`. */
+  private async stackingConfirmed(camera: CameraName, since: number, timeoutMs: number): Promise<boolean> {
+    const end = Date.now() + timeoutMs;
+    while (Date.now() < end) {
+      const s = this.state.stacking[camera];
+      if (s.state === 'running' && Math.max(s.updatedAt ?? 0, s.startedAt ?? 0) >= since) return true;
+      await sleep(500);
+    }
+    return false;
   }
 
   async stopStacking(camera: CameraName, fast = false): Promise<void> {
@@ -1018,6 +1157,7 @@ export class Dwarf extends EventEmitter {
 
   /** EQ-mode polar alignment measurement. Returns the polar axis error. */
   async measurePolarAlignment(): Promise<{ azimuthErrorDeg: number; altitudeErrorDeg: number }> {
+    this.assertNoNdLock('polar alignment');
     const loc = this.requireLocation();
     const reply = await this.request(Cmd.ASTRO_START_EQ_SOLVING, { lon: loc.lon, lat: loc.lat }, { timeout: 600000 });
     const code = Number(reply?.code ?? 0);
@@ -1037,6 +1177,7 @@ export class Dwarf extends EventEmitter {
   // -------------------------------------------------------------------------
 
   async trackObject(camera: CameraName, box: { x: number; y: number; w: number; h: number }): Promise<void> {
+    this.assertNoNdLock('object tracking');
     // fw 1.5.3 doesn't reply to 14800; tracking is confirmed by track-result notifications.
     const started = this.link.waitFor((n) => /trackResult|normalTrackState/i.test(n.name), 8000).catch(() => null);
     await this.request(Cmd.TRACK_START_TRACK, { x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.w), h: Math.round(box.h), camId: camId(camera) }, { bestEffort: true, timeout: 3000 });
@@ -1048,6 +1189,7 @@ export class Dwarf extends EventEmitter {
   }
 
   async sentry(action: 'start' | 'stop', type = 0): Promise<void> {
+    if (action === 'start') this.assertNoNdLock('sentry mode');
     if (action === 'start') await this.request(Cmd.SENTRY_MODE_START, { type }, { timeout: 15000 });
     else await this.request(Cmd.SENTRY_MODE_STOP, {}, { timeout: 15000 });
   }
@@ -1067,17 +1209,69 @@ export class Dwarf extends EventEmitter {
     }));
   }
 
-  /** Capture a tele dark master (11021) with the firmware's index codes; progress arrives in state.darkCapture. */
-  async captureDarks(expIndex: number, gainIndex: number, binIndex: number, frames: number): Promise<void> {
-    const r = await this.request(11021, { expIndex, gainIndex, binIndex, capSize: frames }, { timeout: 30000, allowError: true });
-    const code = Number(r?.code ?? 0);
-    if (code < 0) throw new DwarfCommandError(11021, code, r ?? {});
-    this.state.darkCapture = { state: 'running', progress: 0 };
+  /** Re-check for the finished master now (set while a capture runs). */
+  private darkCheck: (() => void) | null = null;
+
+  /**
+   * Start a tele dark master (11021) with the firmware's index codes. The firmware does not
+   * answer this command (verified 2026-10-03: 20 x 15 s and 20 x 30 s masters saved, no reply),
+   * so completion is detected from its state notification and, reliably, from the master file
+   * appearing (or being rewritten) in CALI_FRAME/dark/cam_0. Only an immediate refusal is
+   * reported here; state.darkCapture follows the rest.
+   */
+  async captureDarks(o: { expIndex: number; gainIndex: number; binIndex: number; frames: number; exposureS: number; gain: number }): Promise<void> {
+    if (this.state.darkCapture?.state === 'running') throw new Error('a dark capture is already running (dark_frames action=status)');
+    const dir = '/Astronomy/CALI_FRAME/dark/cam_0';
+    const key = (f: { name: string; size: number; modifiedAt?: string }) => `${f.size}|${f.modifiedAt ?? ''}`;
+    const before = new Map((await listDir(dir).catch(() => [])).map((f) => [f.name, key(f)]));
+    const want = new RegExp(`^dark_exp_${o.exposureS.toFixed(6).replace('.', '\\.')}_gain_${o.gain}_.*stack_${o.frames}\\.fits$`, 'i');
+    const now = Date.now();
+    const runMs = o.frames * o.exposureS * 1000;
+    this.state.darkCapture = { state: 'running', fwState: undefined, exposureS: o.exposureS, gain: o.gain, frames: o.frames, sensorC: this.state.cmosTempC.tele, startedAt: now, expectedEndAt: now + runMs + 60000, progress: 0 };
     this.changed();
+    const finish = (patch: Partial<NonNullable<TelescopeState['darkCapture']>>) => {
+      if (this.state.darkCapture?.state !== 'running') return;
+      this.state.darkCapture = { ...this.state.darkCapture, ...patch, remainingS: 0, finishedAt: Date.now() };
+      clearInterval(timer);
+      this.darkCheck = null;
+      log.info(`dark capture ${o.exposureS} s / gain ${o.gain}: ${this.state.darkCapture.state}${this.state.darkCapture.master ? ` (${this.state.darkCapture.master})` : ''}${this.state.darkCapture.error ? ` — ${this.state.darkCapture.error}` : ''}`);
+      this.changed();
+    };
+    let checking = false;
+    const check = async () => {
+      if (checking || this.state.darkCapture?.state !== 'running') return;
+      checking = true;
+      try {
+        const files = await listDir(dir);
+        const hit = files.find((f) => want.test(f.name) && before.get(f.name) !== key(f));
+        if (hit) finish({ state: 'done', progress: 100, master: hit.name });
+        else if (Date.now() > now + runMs * 2 + 300000) finish({ state: 'unknown', error: 'no new master appeared in CALI_FRAME; check dark_frames action=list' });
+      } catch {
+        /* FTP busy: next round */
+      } finally {
+        checking = false;
+      }
+    };
+    this.darkCheck = () => void check();
+    // the master can only exist after frames x exposure: look from 90 % of that on, every 20 s
+    const timer = setInterval(() => {
+      if (Date.now() >= now + runMs * 0.9) void check();
+    }, 20000);
+    // in case a firmware version does answer: a refusal comes back at once
+    const reply = this.request(11021, { expIndex: o.expIndex, gainIndex: o.gainIndex, binIndex: o.binIndex, capSize: o.frames }, { bestEffort: true, allowError: true, timeout: 8000 });
+    const r = await reply.catch(() => null);
+    const code = Number(r?.code ?? 0);
+    if (code < 0) {
+      finish({ state: 'failed', error: errorText(code) });
+      throw new Error(`the telescope refused the dark capture: ${errorText(code)}`);
+    }
   }
 
   async stopDarks(): Promise<void> {
     await this.request(11022, {}, { bestEffort: true, timeout: 10000 });
+    if (this.state.darkCapture?.state === 'running') this.state.darkCapture = { ...this.state.darkCapture, state: 'stopped', finishedAt: Date.now() };
+    this.darkCheck = null;
+    this.changed();
   }
 
   async raw(cmd: number, params: Record<string, unknown>, reqType?: string, resType?: string, timeoutMs = 15000) {

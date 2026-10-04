@@ -84,7 +84,9 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
     const loc = dwarf.requireLocation();
     const fov = dwarf.state.fov.tele ?? { h: 2.95, v: 1.66 };
     const types = req.query.types ? String(req.query.types).split(',') : undefined;
-    return planNight({ lat: loc.lat, lon: loc.lon, elev: loc.elev }, { types, minAltitude: config.observer.minAltitudeDeg, limit: 20, fovArcmin: { w: fov.h * 60, h: fov.v * 60 }, timezone: config.observer.timezone });
+    const site = { lat: loc.lat, lon: loc.lon, elev: loc.elev };
+    const observability = (await weather.observabilityAt(site, config.observer.timezone)) ?? undefined;
+    return planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, limit: 20, fovArcmin: { w: fov.h * 60, h: fov.v * 60 }, timezone: config.observer.timezone, observability });
   }));
 
   // ---------------------------------------------------------------- album & library

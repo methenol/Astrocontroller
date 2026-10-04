@@ -27,6 +27,8 @@ export interface HourForecast {
   windKmh: number;
   gustKmh: number;
   precipProbability: number;
+  /** expected precipitation in that hour (rain + showers + snow water), mm */
+  precipMm: number;
   visibilityKm: number | null;
   seeing?: string;
   transparency?: string;
@@ -91,7 +93,7 @@ export async function forecast(site: Site, tz: string): Promise<{ hours: HourFor
   const key = `${site.lat.toFixed(3)},${site.lon.toFixed(3)}`;
   if (cache && cache.key === key && Date.now() - cache.at < 15 * 60e3) return cache.data;
 
-  const hourly = 'cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,dew_point_2m,temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,visibility';
+  const hourly = 'cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m,dew_point_2m,temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,precipitation,visibility';
   const om = await getJson(
     `https://api.open-meteo.com/v1/forecast?latitude=${site.lat}&longitude=${site.lon}&hourly=${hourly}&current=cloud_cover,temperature_2m,relative_humidity_2m,dew_point_2m,wind_speed_10m,wind_gusts_10m,precipitation&timezone=UTC&forecast_days=3&past_hours=2`,
   );
@@ -142,6 +144,7 @@ export async function forecast(site: Site, tz: string): Promise<{ hours: HourFor
       windKmh: H.wind_speed_10m[i],
       gustKmh: H.wind_gusts_10m[i],
       precipProbability: H.precipitation_probability[i] ?? 0,
+      precipMm: H.precipitation?.[i] ?? 0,
       visibilityKm: H.visibility?.[i] != null ? H.visibility[i] / 1000 : null,
     };
     const a = astroAt(t.getTime());
@@ -196,4 +199,18 @@ export async function tonight(site: Site, tz: string) {
       ? `${rate(avg)} night overall (avg ${avg}/100); best clear window ${b.from} → ${b.to} (${b.hours} h, avg ${b.avgScore})`
       : `poor night (avg ${avg}/100) — no hour with good observability`;
   return { verdict, averageScore: avg, bestWindow: b, commonIssues: issues, current, darkness: { start: fmtTime(start, tz), end: fmtTime(end, tz) }, hours: night };
+}
+
+/**
+ * Forecast observability (0–100) at any moment, from the hourly forecast (the hour it falls in),
+ * for ranking targets by clear time. Null when the forecast cannot be fetched (offline in the field).
+ */
+export async function observabilityAt(site: Site, tz: string): Promise<((t: Date) => number | undefined) | null> {
+  try {
+    const { hours } = await forecast(site, tz);
+    const byHour = new Map(hours.map((h) => [Math.floor(new Date(h.time).getTime() / 3600e3), h.score]));
+    return (t: Date) => byHour.get(Math.floor(t.getTime() / 3600e3));
+  } catch {
+    return null;
+  }
 }

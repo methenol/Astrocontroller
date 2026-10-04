@@ -112,6 +112,12 @@ export class AgentBridge extends EventEmitter {
         '  enabled: false',
         'mcp:',
         '  startupTimeoutMs: 0',
+        '# No idling: the agent has no wait tool, and bash cannot be used to sleep instead.',
+        'bash:',
+        '  patterns:',
+        ...['sleep*', '*/sleep *', 'usleep*', 'timeout *', 'wait', 'wait *', 'watch *', '*setTimeout*', '*time.sleep*', '*Bun.sleep*', 'read -t*'].map(
+          (m) => `    - { match: ${yamlStr(m)}, approval: deny }`,
+        ),
         '',
       ].join('\n'),
     );
@@ -125,6 +131,12 @@ export class AgentBridge extends EventEmitter {
     const ws = config.paths.workspace;
     const tmpl = config.paths.agentTemplate;
     copyDirIfMissing(path.join(tmpl, 'skills'), this.skillsDir);
+    // Device reference (manual, specs): read-only and shipped with the image, so replaced every start.
+    const ref = path.join(ws, 'reference');
+    if (fs.existsSync(path.join(tmpl, 'reference'))) {
+      fs.rmSync(ref, { recursive: true, force: true });
+      fs.cpSync(path.join(tmpl, 'reference'), ref, { recursive: true });
+    }
     for (const f of ['SYSTEM.md', 'NOTES.md']) {
       const src = path.join(tmpl, f);
       const dest = path.join(ws, f === 'SYSTEM.md' ? '.omp/SYSTEM.md' : f);

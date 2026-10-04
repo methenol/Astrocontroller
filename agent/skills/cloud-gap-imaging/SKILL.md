@@ -20,7 +20,7 @@ Goal: collect clean subs in the clear gaps without filling the stack with cloudy
 1. When clear: `goto_target` (calibration needs stars, so only attempt in a gap), `focus_position action=infinity`, then astro autofocus if time allows, then `live_stacking action=start`.
 2. Every 2–5 min: `stacking_status`. If `rejected` rises quickly or the stack stops growing, check the wide view.
 3. Cloud arriving: `live_stacking action=stop` (normal stop keeps the stack so far). Don't move the scope. The pointing stays valid if the mount isn't disturbed.
-4. Waiting: `wait seconds=300` + a wide-camera star check. Stay within the user's session window.
+4. Between gaps: keep sweeping with `sky_check` toward the targets' part of the sky (several directions, not one patch). Start the moment stars show (~10+): GoTo + stacking in the same turn. Cloudy subs get rejected anyway.
 5. Gap returns: start stacking again. If stars look shifted or the target isn't centred, re-run `goto_target` first. Each start creates a new session folder on the SD card. That's fine: the user can stack them together later from the library.
 6. End of window: stop, summarise (clear minutes, frames stacked/rejected per segment), and offer `transfer_session` for each segment.
 

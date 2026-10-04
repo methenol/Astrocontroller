@@ -299,8 +299,10 @@ const HINTS: Record<number, string> = {
   [-14520]: 'motors must be homed first (motors_home); a failed calibration also leaves them in this state',
   [-14519]: 'mechanical limit reached (rotation travel is about 0–315°)',
   [-15106]: 'the current exposure is too long for contrast autofocus — in DSO mode use autofocus mode=astro (needs stars), or switch to Normal mode / a shorter exposure',
-  [-11504]: 'calibration failed: plate-solving found no stars (clouds, obstruction, dew or daylight)',
-  [-11505]: 'GoTo refused: a successful calibration is needed first',
+  [-11504]: 'calibration failed: the plate-solve did not succeed (usually too few usable stars: cloud, obstruction, dew or daylight)',
+  [-11505]: 'GoTo failed: the slew or the plate-solve that verifies it did not end on the target. Seen 2026-10-04 with the scope on an EQ wedge while the firmware was still in Alt-Az mode (polar alignment not completed), so its level-mount model could not reach targets: complete polar_alignment so EQ mode engages, or level the mount',
+  [-11511]: 'a successful calibration is needed first',
+  [-11516]: 'polar-alignment (EQ) solving failed: the plate-solves at the two positions did not succeed (usually too few stars: cloud or obstruction)',
   [-11513]: 'GoTo is needed before live stacking',
 };
 

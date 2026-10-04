@@ -13,14 +13,58 @@ function parseBigSafe(text: string): unknown {
   return JSON.parse(text.replace(/([:\[,]\s*)(-?\d{16,})(?=\s*[,\]}])/g, '$1"$2"'));
 }
 
+/**
+ * Health of the telescope's HTTP API, which carries everything camera-related (settings, the
+ * parameter schema behind exposure/gain changes, stills). Verified 2026-10-03: its camera service
+ * can hang while the control link and the motors keep working; every camera call then times out
+ * until the telescope is rebooted.
+ */
+const health = { lastOkAt: 0, timeoutsSinceOk: 0, firstTimeoutAt: 0, lastTimeoutPath: '' };
+
+export function apiHealth() {
+  const now = Date.now();
+  const hung = health.timeoutsSinceOk >= 2;
+  return {
+    cameraService: hung ? 'NOT RESPONDING' : health.timeoutsSinceOk === 1 ? 'one recent timeout' : 'ok',
+    consecutiveTimeouts: health.timeoutsSinceOk,
+    timingOutSince: health.firstTimeoutAt ? new Date(health.firstTimeoutAt).toISOString() : null,
+    timingOutForMin: health.firstTimeoutAt ? Math.round((now - health.firstTimeoutAt) / 60000) : 0,
+    lastTimedOut: health.lastTimeoutPath || null,
+    lastAnsweredAgoS: health.lastOkAt ? Math.round((now - health.lastOkAt) / 1000) : null,
+  };
+}
+
+/** What a timeout means, for tool errors. */
+export function timeoutExplanation(): string {
+  const h = apiHealth();
+  if (h.consecutiveTimeouts >= 2) {
+    return `The telescope's camera service is NOT RESPONDING: ${h.consecutiveTimeouts} timeouts in a row over ${h.timingOutForMin} min (last: ${h.lastTimedOut}). Settings, stills, sky checks and plate-solving all fail in this state while motion and the control link still work. Probing again will not fix it; a telescope reboot does (power action=reboot, then motors_home). This says nothing about the sky.`;
+  }
+  return `The telescope's HTTP API did not answer in time (${h.lastTimedOut ?? 'camera call'}). One timeout can be Wi-Fi; if the next camera call also times out, the camera service has hung (see telescope_status.health). This says nothing about the sky.`;
+}
+
 async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 8000): Promise<T> {
-  const res = await fetch(api() + path, {
-    method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(api() + path, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (err) {
+    if ((err as Error).name === 'TimeoutError' || /timeout/i.test(String((err as Error).message))) {
+      if (health.timeoutsSinceOk === 0) health.firstTimeoutAt = Date.now();
+      health.timeoutsSinceOk++;
+      health.lastTimeoutPath = path;
+    }
+    throw err;
+  }
+  health.lastOkAt = Date.now();
+  health.timeoutsSinceOk = 0;
+  health.firstTimeoutAt = 0;
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${path}`);
   const json = parseBigSafe(text) as { code: number; data: T; message?: string };
   if (json.code !== 0) throw new Error(`device API ${path} returned code ${json.code}${json.message ? `: ${json.message}` : ''}`);

@@ -12,6 +12,8 @@ export interface PlanOptions {
   limit?: number;
   fovArcmin: { w: number; h: number };
   timezone: string;
+  /** forecast observability 0–100 at a moment (weather.observabilityAt); without it, geometry only */
+  observability?: (t: Date) => number | undefined;
 }
 
 export interface PlannedTarget {
@@ -32,6 +34,12 @@ export interface PlannedTarget {
   moonSeparationDeg: number;
   framing: string;
   suggestedFilter: string;
+  /** hours above the minimum altitude weighted by the forecast (1 clear hour = 1) */
+  clearHours: number | null;
+  /** forecast quality (0–100) during this target's own best hours (weighted towards its peak) */
+  weatherAlignment: number | null;
+  /** forecast observability (0–100) at its best time (bestTime = its peak altitude) */
+  skyAtBest: number | null;
   score: number;
 }
 
@@ -84,13 +92,43 @@ export function planNight(site: Site, opts: PlanOptions) {
     const brightness = o.mag !== undefined ? Math.max(0, Math.min(1, (13 - o.mag) / 9)) : 0.5;
     const moonPenalty = moon.illuminationPercent > 30 && moonSep < 40 && !EMISSION.has(o.type) ? (moon.illuminationPercent / 100) * (1 - moonSep / 40) * 25 : 0;
     const famous = o.aliases.some((a) => /^M \d/.test(a) || /^C \d/.test(a)) ? 5 : 0;
-    const score =
+    // Weather alignment: how good the forecast is during THIS target's best hours. Each 15 min
+    // above the minimum altitude is weighted by how well placed the target is then (its altitude
+    // above the minimum relative to its own peak, squared, so the hours around the peak dominate),
+    // and the forecast is averaged with those weights: 1 = clear at its peak, 0 = clouded out
+    // when it matters. The geometric score is then scaled by it, so the best targets are those
+    // whose own optimal time coincides with good weather. Without a forecast the factor is 1.
+    let wg = 0;
+    let g = 0;
+    let clear = 0;
+    let wPeak: number | undefined;
+    const stepH = 0.25;
+    const span = Math.max(1, vis.maxAlt - opts.minAltitude);
+    for (let t = start.getTime(); t <= end.getTime(); t += stepH * 3600e3) {
+      const d = new Date(t);
+      const alt = altAz(site, o.raHours, o.decDeg, d).altitude;
+      if (alt < opts.minAltitude) continue;
+      const obs = opts.observability?.(d);
+      const w = obs === undefined ? 1 : obs / 100;
+      const q = ((alt - opts.minAltitude) / span) ** 2;
+      wg += w * q;
+      g += q;
+      clear += stepH * w;
+    }
+    if (opts.observability) {
+      const o2 = opts.observability(vis.maxAltAt);
+      wPeak = o2 === undefined ? undefined : o2 / 100;
+    }
+    const hasWx = !!opts.observability;
+    const alignment = hasWx && g > 0 ? wg / g : 1;
+    const geometric =
       (Math.min(vis.hoursAboveMin, 6) / 6) * 35 +
       ((vis.maxAlt - opts.minAltitude) / (90 - opts.minAltitude)) * 15 +
       fr.fit * 25 +
       brightness * 20 +
       famous -
       moonPenalty;
+    const score = geometric * (0.35 + 0.65 * alignment);
     out.push({
       name: o.id,
       aliases: o.aliases.slice(0, 4),
@@ -109,6 +147,9 @@ export function planNight(site: Site, opts: PlanOptions) {
       moonSeparationDeg: Math.round(moonSep),
       framing: fr.text,
       suggestedFilter: suggestFilter(o, moon.illuminationPercent),
+      clearHours: hasWx ? Math.round(clear * 10) / 10 : null,
+      weatherAlignment: hasWx ? Math.round(alignment * 100) : null,
+      skyAtBest: wPeak === undefined ? null : Math.round(wPeak * 100),
       score: Math.round(score),
     });
   }
@@ -117,6 +158,7 @@ export function planNight(site: Site, opts: PlanOptions) {
     window: { start: fmtTime(start, opts.timezone), end: fmtTime(end, opts.timezone), hours: Math.round(((end.getTime() - start.getTime()) / 3600e3) * 10) / 10 },
     moon: { illuminationPercent: moon.illuminationPercent, phase: moon.phase },
     minAltitude: opts.minAltitude,
+    weather: opts.observability ? 'ranked by how well tonight\'s forecast lines up with each target\'s best hours' : 'no forecast available: ranked on visibility alone',
     candidatesConsidered: candidates.length,
     targets: out.slice(0, opts.limit ?? 15),
   };

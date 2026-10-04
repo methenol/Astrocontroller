@@ -34,6 +34,9 @@ const text = (v: unknown): Result => ({ content: [{ type: 'text', text: typeof v
 function fail(err: unknown): Result {
   let msg = errMsg(err);
   if (err instanceof DwarfCommandError) msg = `${msg}\nresponse: ${JSON.stringify(err.response)}`;
+  // A bare "aborted due to timeout" told the agent nothing (2026-10-03 night): say what timed out
+  // and what that usually means.
+  if (/aborted due to timeout|TimeoutError/i.test(msg)) msg = `${msg}\n${http.timeoutExplanation()}`;
   return { isError: true, content: [{ type: 'text', text: `Error: ${msg}` }] };
 }
 
@@ -111,7 +114,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // ------------------------------------------------------------------ status
   tool(
     'telescope_status',
-    'Current telescope state: connection, battery, temperatures, storage, shooting mode, Alt-Az/EQ mode, motor angles, focus, calibration/GoTo/tracking, live-stacking progress, polar-alignment result, observer location and local time. Call this first and whenever unsure.',
+    'Current telescope state: connection, battery, temperatures, storage, shooting mode, Alt-Az/EQ mode, motor angles, focus, calibration/GoTo/tracking, live-stacking progress, polar-alignment result, observer location and local time, and health (camera service responding or hung, live video per camera). Call this first, whenever unsure, and after any timeout.',
     { refresh: z.boolean().optional().describe('re-query the device instead of using the cached state (default true)') },
     async ({ refresh }) => {
       if (refresh !== false && dwarf.link.connected) {
@@ -122,10 +125,18 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       const s = dwarf.state;
       return text({
         ...s,
-        motorsNote: 'pitch≈90° is level with the horizon in Alt-Az mode (pitch − 90 ≈ altitude); ~2.5° is the parked/down position',
+        motorsNote: 'pitch≈90° is level with the horizon in Alt-Az mode (pitch − 90 ≈ altitude); ~2.5° is the parked/down position. While tracking after a GoTo the motors report homed: false; that is normal, do not re-home a tracking scope.',
+        trackingNow: dwarf.isTracking(),
         observer: loc ? { ...loc, timezone: tz } : 'NOT CONFIGURED — set OBSERVER_LATITUDE/OBSERVER_LONGITUDE',
         localTime: new Date().toLocaleString('en-US', { timeZone: tz }),
         busyWith: dwarf.isBusy(),
+        health: {
+          ...http.apiHealth(),
+          video: Object.fromEntries((['tele', 'wide'] as const).map((n) => {
+            const v = hub.get(n).status() as ReturnType<typeof hub.tele.status>;
+            return [n, { phase: v.phase, lastFrameAgoS: v.lastFrameAt ? Math.round((Date.now() - v.lastFrameAt) / 1000) : null, note: v.note ?? undefined }];
+          })),
+        },
       });
     },
   );
@@ -393,6 +404,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       let img: FloatImage;
       try {
         ({ img } = await loadImage('wide', hub, { exposureS: exp }));
+      } catch (err) {
+        throw new Error(`sky_check could not take its still, so the sky is UNKNOWN (not cloudy): ${errMsg(err)}`);
       } finally {
         if (typeof prevGain === 'number') await dwarf.setSetting('wide', 'gain', prevGain).catch(() => {});
         await dwarf.setSetting('wide', 'exposure', prevExp).catch(() => {});
@@ -424,7 +437,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'plan_targets',
-    'Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera: hours above min altitude, peak altitude/time, size vs field of view, brightness, Moon separation, and suggested filter. Use before choosing what to image.',
+    'Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera. Each target gets a visibility score (hours above the minimum altitude, peak altitude, size vs field of view, brightness, Moon separation), scaled by weatherAlignment: how good the hourly forecast (clouds, rain, wind, dew, seeing, transparency) is during that target\'s own best hours, weighted toward its peak. The best targets are those whose optimal time coincides with good weather. bestTime is the target\'s own peak; skyAtBest is the forecast then; clearHours are its forecast-weighted hours up. Use before choosing what to image, and schedule each target around its bestTime.',
     {
       types: z.array(z.string()).optional().describe('galaxy, nebula, emission, planetary, cluster, globular, open_cluster, supernova_remnant, reflection'),
       min_altitude: z.number().optional(),
@@ -437,8 +450,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     async (a) => {
       const fov = dwarf.state.fov.tele ?? { h: 2.95, v: 1.66 };
+      const observability = (await weather.observabilityAt(site(), tz)) ?? undefined;
       return text(
         planNight(site(), {
+          observability,
           types: a.types,
           minAltitude: a.min_altitude ?? config.observer.minAltitudeDeg,
           maxMagnitude: a.max_magnitude,
@@ -522,7 +537,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       try {
         return text(await dwarf.withPointingRecovery('GoTo', () => dwarf.gotoRaDec(o.raHours, o.decDeg, label, oneClick)));
       } catch (err) {
-        throw new Error(`${errMsg(err)} Calibration/plate-solving needs visible stars: -11504 = calibration failed (no stars), -11505 = GoTo refused (needs a successful calibration first). Use sky_check to see when stars are visible.`);
+        const m = errMsg(err);
+        if (/-11504/.test(m)) throw new Error(`${m} Calibration failed because plate-solving found no usable stars (cloud, obstruction, dew or daylight) at this pointing. Check the sky with sky_check (other directions too) before retrying.`);
+        if (/-11505/.test(m)) throw err;
+        if (/timed out/i.test(m)) throw new Error(`${m} The GoTo did not finish; this is NOT a cloud verdict. Check telescope_status.health: a hung camera service also stops plate-solving.`);
+        throw err;
       }
     },
   );
@@ -569,28 +588,25 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'stacking_status',
-    'Live-stacking progress: frames taken/stacked/target, integration time, target, plus whether frames are being rejected. Use view_camera source "stack" to see the stacked image.',
+    'Live-stacking progress: frames taken/stacked/target, integration time, target, plus whether frames are being rejected. Use view_camera source "stack" to see the stacked image. After a stop and restart on the same target the telescope keeps counting from the earlier stack but writes the new subs to a NEW DWARF_RAW session folder (verified 2026-10-04): process those sessions together (process_session target=…).',
     {},
     async () => {
       const s = dwarf.state.stacking;
+      // fw 1.5.3 progress messages carry no stacked time: use stacked subs x the sub exposure of
+      // the running session (its folder name says EXP_<s>)
+      let subS: number | undefined;
+      if (s.tele.state === 'running' || s.wide.state === 'running') {
+        const newest = (await library.listDeviceSessions(false).catch(() => ({ sessions: [] as library.DeviceSession[] }))).sessions[0];
+        subS = newest?.exposureS;
+      }
       const describe = (x: typeof s.tele) => ({
         ...x,
         rejected: x.currentCount !== undefined && x.stackedCount !== undefined ? x.currentCount - x.stackedCount : undefined,
-        integrationMinutes: x.stackedTimeS !== undefined ? round(x.stackedTimeS / 60, 1) : undefined,
+        subExposureS: x.state === 'running' ? subS : undefined,
+        integrationMinutes: x.stackedTimeS !== undefined ? round(x.stackedTimeS / 60, 1) : x.stackedCount !== undefined && subS ? round((x.stackedCount * subS) / 60, 1) : undefined,
         lastUpdateAgoS: x.updatedAt ? Math.round((Date.now() - x.updatedAt) / 1000) : undefined,
       });
       return text({ tele: describe(s.tele), wide: describe(s.wide), stackPreviewAvailable: !!hub.stack.latest, stackPreviewAgeS: hub.stack.latest ? Math.round((Date.now() - hub.stack.latest.at) / 1000) : null });
-    },
-  );
-
-  tool(
-    'wait',
-    'Pause for a while (e.g. between stacking checks) and then report stacking/GoTo state. Max 600 s per call.',
-    { seconds: z.number().min(1).max(600) },
-    async ({ seconds }) => {
-      await new Promise((r) => setTimeout(r, seconds * 1000));
-      const s = dwarf.state;
-      return text({ waited: seconds, stacking: s.stacking, goto: s.goto, tracking: s.tracking, battery: s.battery });
     },
   );
 
@@ -614,6 +630,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         quality: total < 0.1 ? 'excellent' : total < 0.25 ? 'good' : total < 0.5 ? 'acceptable for short exposures' : 'needs adjustment',
         bodyMode: dwarf.state.bodyMode,
       };
+      // Where the rotation axis points, against where the pole is (the latitude): what the
+      // firmware's own measurement says needs to change, without assuming how the wedge is set.
+      const lat = dwarf.location()?.lat;
+      if (lat !== undefined) {
+        const axisAlt = lat - r.altitudeErrorDeg;
+        out.rotationAxis = `points at altitude ${axisAlt.toFixed(1)}°, azimuth ${(-r.azimuthErrorDeg).toFixed(1)}°; the celestial pole is at altitude ${Math.abs(lat).toFixed(1)}°, azimuth ${lat >= 0 ? 0 : 180}°`;
+        out.correction = `${Math.abs(r.altitudeErrorDeg) >= 0.05 ? `${r.altitudeErrorDeg < 0 ? 'lower' : 'raise'} the rotation axis by ${Math.abs(r.altitudeErrorDeg).toFixed(1)}°` : 'altitude is on'}; ${Math.abs(r.azimuthErrorDeg) >= 0.05 ? `turn it ${Math.abs(r.azimuthErrorDeg).toFixed(1)}° ${r.azimuthErrorDeg < 0 ? 'east' : 'west'} (to be confirmed by the next measurement)` : 'azimuth is on'}. Measure again after each adjustment (about 15 s). EQ mode engages only once the error is small; until then GoTo cannot work on a tilted base.`;
+      }
       if (prev) {
         out.previous = { azimuthErrorDeg: round(prev.azimuthErrorDeg, 3), altitudeErrorDeg: round(prev.altitudeErrorDeg, 3) };
         out.change = {
@@ -865,22 +889,40 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'dark_frames',
-    'Dark-frame library on the telescope (tele camera). list: the masters the firmware has (exposure, gain, bin, temperature) and the files in CALI_FRAME/dark with their stack counts, plus the current sensor temperature. capture: record a new master (the firmware stacks up to 20 frames) — ONLY after the operator has fitted the ND filter, retracted the lens and confirmed it (nd_filter_confirmed=true); a light leak ruins the master. Batch every needed combination into one ND session. stop: abort a capture. Progress shows in telescope_status.darkCapture.',
+    'Dark-frame library (tele camera). An ND session: the operator fits the magnetic ND filter over the lenses (they tilt the scope by hand) -> nd_fitted (locks every motion and light capture: moving or parking would knock the filter off) -> capture each master (runs in the background, ~frames x exposure + 1 min; follow with status) -> the operator removes the filter -> nd_removed. Actions: list (masters on the scope, firmware codes, sensor temperature), nd_fitted, capture, status, stop, nd_removed. NEVER move, park or home the scope during an ND session.',
     {
-      action: z.enum(['list', 'capture', 'stop']),
+      action: z.enum(['list', 'nd_fitted', 'capture', 'status', 'stop', 'nd_removed']),
       exposure_s: z.number().positive().optional(),
       gain: z.number().optional(),
       frames: z.number().int().min(5).max(20).optional().describe('frames stacked into the master (default 20, the firmware maximum)'),
-      nd_filter_confirmed: z.boolean().optional().describe('the operator confirmed the ND filter is on and the lens retracted'),
+      operator_confirmed: z.boolean().optional().describe('nd_fitted / nd_removed: the operator told you the ND filter is on / off'),
+      nd_filter_confirmed: z.boolean().optional().describe('capture: same as calling nd_fitted first'),
     },
-    async ({ action, exposure_s, gain, frames, nd_filter_confirmed }) => {
+    async ({ action, exposure_s, gain, frames, operator_confirmed, nd_filter_confirmed }) => {
+      const dc = () => {
+        const d = dwarf.state.darkCapture;
+        if (!d) return { state: 'none' };
+        const now = Date.now();
+        return { ...d, elapsedMin: d.startedAt ? round((now - (d.finishedAt ?? now) + ((d.finishedAt ?? now) - d.startedAt)) / 60000, 1) : undefined, remainingMin: d.state === 'running' && d.expectedEndAt ? Math.max(0, round((d.expectedEndAt - now) / 60000, 1)) : undefined };
+      };
+      if (action === 'status') return text({ capture: dc(), ndLock: dwarf.state.ndLock ?? null, sensorNowC: dwarf.state.cmosTempC.tele });
       if (action === 'stop') {
         await dwarf.stopDarks();
-        return text('dark capture stopped');
+        return text({ stopped: true, capture: dc() });
       }
-      if (action === 'capture' && nd_filter_confirmed !== true) throw new Error('Ask the operator to fit the ND filter and retract the lens cylinder, wait for their confirmation, then call again with nd_filter_confirmed=true. Nothing was captured.');
-      const listed = await dwarf.darkFrameList().catch((e) => ({ error: errMsg(e) }));
+      if (action === 'nd_fitted') {
+        if (operator_confirmed !== true) throw new Error('Only after the operator has said the ND filter is on: call again with operator_confirmed=true.');
+        dwarf.setNdLock(true, 'operator confirmed the ND filter');
+        return text('ND session started: motion, homing, GoTo, calibration, stacking and tracking are locked until nd_removed. Do not move or park the scope.');
+      }
+      if (action === 'nd_removed') {
+        if (operator_confirmed !== true) throw new Error('Only after the operator has said the ND filter is off: call again with operator_confirmed=true.');
+        if (dwarf.state.darkCapture?.state === 'running') throw new Error('a dark capture is still running; wait for it (status) or stop it first');
+        dwarf.setNdLock(false);
+        return text('ND session ended, motion unlocked. The scope was tilted by hand, so its motor position is unknown: run motors_home before any pointing.');
+      }
       if (action === 'list') {
+        const listed = await dwarf.darkFrameList().catch((e) => ({ error: errMsg(e) }));
         const files = await listDir('/Astronomy/CALI_FRAME/dark/cam_0').catch(() => []);
         const masters = files.filter((f) => /\.fits$/i.test(f.name)).map((f) => ({
           file: f.name,
@@ -889,12 +931,15 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           tempC: Number(f.name.match(/_(-?\d+)C(?:_|\.)/)?.[1]),
           stack: Number(f.name.match(/stack_(\d+)/)?.[1] ?? 1),
         }));
-        return text({ sensorNowC: dwarf.state.cmosTempC.tele, capture: dwarf.state.darkCapture, firmwareList: listed, masterFiles: masters });
+        return text({ sensorNowC: dwarf.state.cmosTempC.tele, ndLock: dwarf.state.ndLock ?? null, capture: dc(), firmwareList: listed, masterFiles: masters });
+      }
+      // capture
+      if (!dwarf.state.ndLock) {
+        if (nd_filter_confirmed !== true) throw new Error('Ask the operator to fit the ND filter (no parking: they tilt the scope by hand), wait for their confirmation, then dark_frames action=nd_fitted operator_confirmed=true. Nothing was captured.');
+        dwarf.setNdLock(true, 'confirmed with the first capture');
       }
       if (exposure_s === undefined || gain === undefined) throw new Error('exposure_s and gain are required');
-      const busy = dwarf.isBusy();
-      if (busy) throw new Error(`the telescope is busy (${busy}); stop it first`);
-      if (!Array.isArray(listed)) throw new Error(`cannot read the firmware's dark list (${listed.error}), which supplies the exposure/gain codes`);
+      const listed = await dwarf.darkFrameList();
       // The firmware addresses exposure and gain by its own index codes; its dark list pairs them with names.
       const expHit = listed.find((d) => Math.abs(parseFloat(d.exposure) - exposure_s) < 0.01);
       const gainHit = listed.find((d) => Math.abs(parseFloat(d.gain) - gain) < 0.01);
@@ -902,8 +947,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!expHit) throw new Error(`no known exposure code for ${exposure_s} s: the firmware's dark list covers ${[...new Set(listed.map((d) => d.exposure))].join(', ') || 'none'}. Capture that exposure once with the DWARFLAB app, then this tool can repeat it.`);
       const n = frames ?? 20;
       await dwarf.ensureMode('DSO');
-      await dwarf.captureDarks(expHit.expIndex, gainHit.gainIndex, expHit.binIndex, n);
-      return text(`dark capture started: ${exposure_s} s, gain ${gain}, ${expHit.bin || 'bin1'}, ${n} frames (≈${Math.ceil((n * exposure_s) / 60) + 1} min) at sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. Follow telescope_status.darkCapture; when every needed master is done, ask the operator to remove the ND filter before any light frame.`);
+      await dwarf.captureDarks({ expIndex: expHit.expIndex, gainIndex: gainHit.gainIndex, binIndex: expHit.binIndex, frames: n, exposureS: exposure_s, gain });
+      return text(`dark capture running in the background: ${exposure_s} s, gain ${gain}, ${expHit.bin || 'bin1'}, ${n} frames, ≈${Math.ceil((n * exposure_s) / 60) + 1} min, sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. The telescope never acknowledges this command; the controller detects the finished master when it appears in CALI_FRAME. Follow with dark_frames action=status (wait between checks) until it is done, then start the next master. The scope must not move until the operator has removed the ND filter.`);
     },
   );
 
@@ -911,7 +956,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'jobs',
-    'List background jobs (transfers), get one, or cancel one.',
+    'List background jobs (transfers), get one, or cancel one. Transfer status: done; partial = finished but some files could not be copied after 3 attempts each (error lists them; run the same transfer again: copied files are skipped); failed = could not run at all (e.g. telescope unreachable).',
     { action: z.enum(['list', 'get', 'cancel']).optional(), id: z.string().optional() },
     async ({ action, id }) => {
       if (action === 'cancel' && id) return text(library.cancelJob(id) ? 'cancelled' : 'not running');
@@ -945,8 +990,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       response_type: z.string().optional(),
       timeout_s: z.number().optional(),
     },
-    async ({ cmd, params, request_type, response_type, timeout_s }) =>
-      text((await dwarf.raw(cmd, params ?? {}, request_type, response_type, (timeout_s ?? 15) * 1000)) ?? 'no reply'),
+    async ({ cmd, params, request_type, response_type, timeout_s }) => {
+      dwarf.assertNoNdLock('raw commands');
+      return text((await dwarf.raw(cmd, params ?? {}, request_type, response_type, (timeout_s ?? 15) * 1000)) ?? 'no reply');
+    },
   );
 }
 
@@ -957,7 +1004,7 @@ function compactHour(h: weather.HourForecast) {
     rating: h.rating,
     dark: h.dark,
     cloud: `${h.cloudTotal}% (L${h.cloudLow}/M${h.cloudMid}/H${h.cloudHigh})`,
-    rain: h.precipProbability,
+    rain: `${h.precipProbability}%${h.precipMm >= 0.1 ? ` (${h.precipMm.toFixed(1)} mm)` : ''}`,
     wind: `${Math.round(h.windKmh)}/${Math.round(h.gustKmh)} km/h`,
     tempC: h.temperatureC,
     dewSpreadC: h.dewSpreadC,

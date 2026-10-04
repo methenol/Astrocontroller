@@ -857,10 +857,13 @@ async function loadTonight() {
   try {
     const type = $('#sel-plan-type').value;
     const p = await api(`plan${type ? `?types=${type}` : ''}`);
-    $('#plan').innerHTML = `<p class="muted small">${p.window.start} → ${p.window.end} (${p.window.hours} h) · min altitude ${p.minAltitude}° · Moon ${p.moon.illuminationPercent}%</p>
-      <table class="plan-table"><tr><th>Target</th><th>Best</th><th>Hours</th><th>Fit / filter</th><th></th></tr>
+    const wx = p.targets.some((t) => t.weatherAlignment != null);
+    const skyCls = (q) => (q == null ? '' : q >= 60 ? 'ok' : q >= 35 ? 'warn' : 'bad');
+    $('#plan').innerHTML = `<p class="muted small">${p.window.start} → ${p.window.end} (${p.window.hours} h) · min altitude ${p.minAltitude}° · Moon ${p.moon.illuminationPercent}% · ${esc(p.weather ?? '')}</p>
+      <table class="plan-table"><tr><th>Target</th><th>Best</th><th title="${wx ? 'weather = forecast quality during the target\'s own best hours (weighted toward its peak); clear / up = forecast-weighted hours / hours above the minimum altitude' : 'hours above the minimum altitude'}">${wx ? 'Weather' : 'Hours'}</th><th>Fit / filter</th><th></th></tr>
       ${p.targets.map((t) => `<tr><td><b>${esc(t.aliases.find((a) => /^M \d/.test(a)) ?? t.name)}</b><small>${esc([t.name, ...t.aliases].filter((a, i, arr) => arr.indexOf(a) === i).slice(0, 3).join(' · '))}</small><small>${esc(t.type)}, ${t.sizeArcmin}′, mag ${t.magnitude ?? '–'}</small></td>
-        <td>${esc(t.bestTime ?? '')}<small>max ${t.maxAltitude}°</small></td><td>${t.hoursAboveMin}</td>
+        <td>${esc(t.bestTime ?? '')}<small>max ${t.maxAltitude}°${t.skyAtBest != null ? ` · <span class="sky ${skyCls(t.skyAtBest)}">sky ${t.skyAtBest}</span>` : ''}</small></td>
+        <td>${t.weatherAlignment != null ? `<b class="sky ${skyCls(t.weatherAlignment)}">${t.weatherAlignment}/100</b><small>${t.clearHours} clear / ${t.hoursAboveMin} h up</small>` : `${t.hoursAboveMin} h`}</td>
         <td><small>${esc(t.framing)}</small><small>${esc(t.suggestedFilter.split(' (')[0])}</small></td>
         <td><button class="ghost" data-image="${esc(t.aliases.find((a) => /^M \d/.test(a)) ?? t.name)}">Image</button></td></tr>`).join('')}</table>`;
   } catch (e) {
@@ -879,8 +882,8 @@ async function loadWeather() {
       <div class="wx-verdict">${esc(w.verdict)}</div>
       <div class="muted small">now: ${c.cloudCover}% cloud · ${c.temperatureC}°C · RH ${c.humidity}% · dew point ${c.dewPointC}°C · wind ${c.windKmh}/${c.gustKmh} km/h${w.commonIssues.length ? ` · watch: ${esc(w.commonIssues.slice(0, 4).join(', '))}` : ''}</div>
       <div class="wx-strip">${w.hours.map((h) => `<div class="wx-h ${h.rating}" title="${esc(`${h.local}: ${h.issues.join('; ') || 'clear'}${h.seeing ? ` · seeing ${h.seeing}, transparency ${h.transparency}` : ''}`)}">
-        <div>${esc(h.local.split(', ')[1] ?? h.local)}</div><div class="sc">${h.score}</div><div>☁${h.cloudTotal}</div><div>💧${h.dewSpreadC}°</div><div>🌬${Math.round(h.gustKmh)}</div></div>`).join('')}</div>
-      <div class="muted small">score 0–100 · ☁ cloud % · 💧 dew-point spread · 🌬 gusts km/h · Open-Meteo + 7Timer</div>`;
+        <div>${esc(h.local.split(', ')[1] ?? h.local)}</div><div class="sc">${h.score}</div><div>☁${h.cloudTotal}</div><div class="rain ${h.precipProbability >= 50 ? 'high' : h.precipProbability >= 25 ? 'mid' : ''}" title="${esc(`rain chance ${h.precipProbability}% · expected ${h.precipMm ?? 0} mm`)}">🌧${h.precipProbability}%${h.precipMm >= 0.1 ? `<br>${h.precipMm.toFixed(1)}mm` : ''}</div><div>💧${h.dewSpreadC}°</div><div>🌬${Math.round(h.gustKmh)}</div></div>`).join('')}</div>
+      <div class="muted small">score 0–100 · ☁ cloud % · 🌧 rain chance (and mm expected) · 💧 dew-point spread · 🌬 gusts km/h · Open-Meteo + 7Timer</div>`;
   } catch (e) {
     $('#weather').innerHTML = `<span class="muted">weather unavailable: ${esc(e.message)}</span>`;
   }

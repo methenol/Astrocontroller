@@ -24,7 +24,8 @@ export interface Job {
   id: string;
   kind: string;
   description: string;
-  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+  /** partial: finished, but some files could not be copied (listed in result.failed and error) */
+  status: 'queued' | 'running' | 'done' | 'partial' | 'failed' | 'cancelled';
   progress?: { filesDone: number; filesTotal: number; bytesDone: number; bytesTotal: number; file?: string };
   result?: unknown;
   error?: string;
@@ -68,8 +69,15 @@ function startJob(kind: string, description: string, run: (job: Job, signal: Abo
     jobBus.emit('job', getJob(id));
     try {
       job.result = await run(job, job.abort.signal);
-      job.status = 'done';
-      log.info(`${description}: done`);
+      const failed = (job.result as { failed?: Array<{ remote: string; error: string }> } | null)?.failed ?? [];
+      if (failed.length) {
+        job.status = 'partial';
+        job.error = `${failed.length} file(s) could not be copied after 3 attempts each: ${failed.slice(0, 5).map((f) => `${f.remote.split('/').pop()} (${f.error})`).join('; ')}${failed.length > 5 ? '; …' : ''}. Run the same transfer again to retry them (copied files are skipped).`;
+        log.warn(`${description}: partial — ${job.error}`);
+      } else {
+        job.status = 'done';
+        log.info(`${description}: done`);
+      }
     } catch (err) {
       job.status = job.abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = errMsg(err);
@@ -189,9 +197,13 @@ export function transferSession(folderOrLatest: string, opts: { includeCalibrati
         path.join(dest, 'session.json'),
         JSON.stringify({ ...s, shotsInfo: shots, transferredAt: new Date().toISOString(), calibrationDir: opts.includeCalibration ? path.join(config.paths.library, 'CALI_FRAME') : null }, null, 2),
       );
-      // Queue processing in AstroPhoto Studio (it waits in the local outbox while the server is unreachable).
+      // Queue processing in AstroPhoto Studio (it waits in the local outbox while the server is unreachable)
+      // once every light frame is here; a calibration master that failed to copy does not block it.
       let processing: unknown;
-      if (opts.includeSubframes && (opts.process ?? config.studio.autoProcess) && config.studio.url) {
+      const lightsMissing = res.failed.filter((f) => f.remote.startsWith(s.path) && /\.fits$/i.test(f.remote));
+      if (lightsMissing.length) {
+        processing = `not queued: ${lightsMissing.length} light frame(s) are still missing; run the transfer again`;
+      } else if (opts.includeSubframes && (opts.process ?? config.studio.autoProcess) && config.studio.url) {
         // pool: this night together with every earlier session of the target in the library
         const sessions = opts.pool ?? config.studio.poolSessions ? librarySessionsFor(s.target, s.camera) : [s.folder];
         processing = enqueueProcessing({ sessions: sessions.includes(s.folder) ? sessions : [...sessions, s.folder], target: s.target, profile: opts.profile, origin: 'transfer' });

@@ -7,8 +7,6 @@
  * browser multipart clients.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { Response } from 'express';
 import { config } from '../config.js';
@@ -205,16 +203,50 @@ export abstract class Source extends EventEmitter {
   note: string | null = null;
 }
 
-/** RTSP camera → ffmpeg → MJPEG. */
+/**
+ * RTSP camera → ffmpeg → MJPEG, run by a supervisor that checks its health once a second.
+ *
+ * What the telescope does (verified on fw 1.5.3, 2026-10-02/03), and what the supervisor does about it:
+ *  - It serves very few RTSP sessions, and an abandoned one blocks video for everyone: exactly one
+ *    reader per camera, closed with SIGINT (ffmpeg sends TEARDOWN) and SIGKILL after 3 s if it hangs.
+ *  - It often goes silent on an open session instead of closing it: after a long-exposure still,
+ *    calibration, motion or a mode change. A session with no frame for 8 s (12 s for a new one) is
+ *    closed and reopened, with backoff 1 → 15 s; one frame resets everything. Expected pauses (the
+ *    mount moving, GoTo / calibration / stacking, a still being taken) are waited out first.
+ *  - A long manual exposure (≥ 1 s) stops a camera's video: set back to auto once per episode.
+ *  - The tele has no RTSP in DSO mode (it hangs the session and blocks the wide video too): there the
+ *    tele view is the telescope's astro preview. Other astro modes are tested: two sessions that never
+ *    deliver a frame mark the mode for the tele until the mode changes. Nothing is persisted, and
+ *    Normal mode always has video.
+ */
+type Phase = 'off' | 'connecting' | 'live' | 'backoff' | 'preview' | 'disconnected';
+
 export class CameraSource extends Source {
   /** Where frames come from when the telescope won't serve RTSP (tele in astro modes → :8092). */
   fallback: Source | null = null;
-  private fallbackActive = false;
-  private onFallbackFrame = (f: Frame) => this.frame(f.jpeg);
+  /** Shooting modes known to have no RTSP for this camera (tele: DSO). */
+  noRtspModes = new Set<number>();
+  private static readonly STALL_MS = 8000;
+  private static readonly FIRST_FRAME_MS = 12000;
+  private phase: Phase = 'off';
   private proc: ChildProcess | null = null;
-  private restartTimer: NodeJS.Timeout | null = null;
-  private failures = 0;
+  /** a reader told to stop that has not exited yet: no new one until it has (one session per camera) */
+  private closing: ChildProcess | null = null;
+  private closingSince = 0;
+  private connectedAt = 0;
+  private lastFrameAt = 0;
+  private attempts = 0;
+  private nextAttemptAt = 0;
+  private pauseUntil = 0;
   private lastError = '';
+  private previewActive = false;
+  private onPreviewFrame = (f: Frame) => this.frame(f.jpeg);
+  private tickTimer: NodeJS.Timeout | null = null;
+  private healedThisEpisode = false;
+  /** this mode's tele RTSP probes that never delivered a frame (reset on a mode change) */
+  private silentProbes = 0;
+  private probedMode: number | null = null;
+  private learnedNoRtsp: number | null = null;
 
   constructor(
     name: 'tele' | 'wide',
@@ -228,261 +260,267 @@ export class CameraSource extends Source {
     return `rtsp://${config.dwarf.host}:${config.dwarf.rtspPort}/ch${this.channel}/stream0`;
   }
 
-  private lastRtspFrameAt = 0;
-  private freshness: NodeJS.Timeout | null = null;
-
+  // ---------------------------------------------------------------- lifecycle
   protected startSource(): void {
-    void this.spawnFfmpeg();
-    // Show whatever the telescope is delivering: if RTSP goes quiet, switch to the fallback feed.
-    if (this.fallback) {
-      this.freshness ??= setInterval(() => {
-        if (!this.running) return;
-        if (Date.now() - this.lastRtspFrameAt > 4000) {
-          if (!this.fallbackActive) {
-            this.enableFallback();
-            this.note = 'showing the telescope\'s astro preview (~2 fps): the live tele stream is not available right now';
-          }
-        }
-      }, 1000);
-    }
-    // No watchdog restarts: the telescope's RTSP server serves very few clients at a time, so
-    // every extra/abandoned connection can block video for everyone. One connection, kept open.
-    // But explain silence caused by a long manual exposure (verified: that stops the RTSP video).
-    this.exposureCheck ??= setInterval(async () => {
-      if (!this.running || this.fallbackActive) return;
-      const quiet = Date.now() - (this.latest?.at ?? 0) > 6000;
-      if (!quiet) return;
-      const exp = await this.dwarf.exposureSeconds(this.name as 'tele' | 'wide').catch(() => null);
-      if (exp !== null && exp >= 1) this.note = `${this.name} exposure is ${exp}s manual — the telescope stops live video at long exposures; set exposure to auto to resume`;
-    }, 3000);
+    this.phase = 'connecting';
+    this.nextAttemptAt = 0;
+    this.tickTimer ??= setInterval(() => this.tick(), 1000);
+    this.tick();
   }
 
-  private exposureCheck: NodeJS.Timeout | null = null;
-
-  private procStartedAt = 0;
-
-  private enableFallback(): void {
-    if (!this.fallback || this.fallbackActive) return;
-    this.fallbackActive = true;
-    this.fallback.on('frame', this.onFallbackFrame);
-    this.fallback.hold(true);
-    log.info(`${this.name}: telescope is not serving RTSP in this mode; using its astro preview stream (:8092)`);
+  protected stopSource(): void {
+    if (this.tickTimer) clearInterval(this.tickTimer);
+    this.tickTimer = null;
+    this.setPreview(false);
+    this.stopReader('no viewers');
+    this.phase = 'off';
   }
 
-  private disableFallback(): void {
-    if (!this.fallback || !this.fallbackActive) return;
-    this.fallbackActive = false;
-    this.fallback.off('frame', this.onFallbackFrame);
-    this.fallback.hold(false);
+  /** A pause the controller causes on purpose (a long-exposure still): don't count it as a stall. */
+  expectPause(ms: number): void {
+    this.pauseUntil = Math.max(this.pauseUntil, Date.now() + ms);
   }
 
-  /** Try RTSP again now (e.g. after a shooting-mode change). */
+  /** Reconnect now (a mode change, the link coming back, or a caller that knows video should resume). */
   retryRtsp(): void {
-    this.rtspBlockedInMode = null;
-    if (!this.running || this.proc || this.spawning) return;
-    if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.failures = 0;
-    void this.spawnFfmpeg();
+    this.attempts = 0;
+    this.nextAttemptAt = 0;
+    this.pauseUntil = 0;
+    if (this.proc && Date.now() - this.lastFrameAt > 3000) this.stopReader('reconnect requested');
+    if (this.running) this.tick();
   }
 
-  stallHint(): string {
-    const parts: string[] = [];
-    if (this.lastError) parts.push(`RTSP: ${this.lastError}`);
-    parts.push('Long manual exposures stall this camera\'s live view (set exposure to auto for framing); the mount moving also pauses frames briefly.');
-    return parts.join(' ');
-  }
-
-  private exposureHealed = false;
-
-  /** True from the moment a spawn starts until its process exits: never two readers per camera. */
-  private spawning = false;
-
-  private async spawnFfmpeg(): Promise<void> {
-    if (!this.running || this.proc || this.spawning) return;
-    this.spawning = true;
-    try {
-      await this.spawnFfmpegInner();
-    } catch (err) {
-      this.spawning = false;
-      log.warn(`${this.name}: could not start reader: ${errMsg(err)}`);
-    }
-  }
-
-  /**
-   * Shooting modes in which this camera's RTSP proved unavailable (tele in DSO = mode 2, verified
-   * 2026-10-02). Opening a session there makes the telescope hang it, which also blocks the other
-   * camera's video, so it is never attempted; learned modes are persisted across restarts.
-   */
-  private rtspBlockedModes = new Set<number>();
-  private rtspBlockedInMode: number | null = null; // set when a probe fails in the current mode
-  private get blockFile() {
-    return path.join(config.paths.data, `rtsp-blocked-${this.name}.json`);
-  }
-  loadBlockedModes(defaults: number[]): void {
-    this.rtspBlockedModes = new Set(defaults);
-    try {
-      for (const m of JSON.parse(fs.readFileSync(this.blockFile, 'utf8'))) this.rtspBlockedModes.add(Number(m));
-    } catch {
-      /* none saved yet */
-    }
-  }
-  private rememberBlocked(modeId: number | null): void {
-    if (modeId === null) return;
-    this.rtspBlockedModes.add(modeId);
-    try {
-      fs.writeFileSync(this.blockFile, JSON.stringify([...this.rtspBlockedModes]));
-    } catch {
-      /* best effort */
-    }
-  }
-
-  private async spawnFfmpegInner(): Promise<void> {
-    const modeId = this.dwarf.state.shootingMode?.id ?? null;
-    if (this.fallback && modeId !== null && (this.rtspBlockedInMode === modeId || this.rtspBlockedModes.has(modeId))) {
-      // Known not to work in this mode: don't open (and possibly hang) an RTSP session.
-      this.enableFallback();
-      this.note = `${this.dwarf.state.shootingMode?.name ?? 'this'} mode: showing the telescope's astro preview (~2 fps); live video returns in Normal mode`;
-      this.spawning = false;
+  // ---------------------------------------------------------------- supervisor
+  private tick(): void {
+    if (!this.running) return;
+    const now = Date.now();
+    const st = this.dwarf.state;
+    if (!st.connected) {
+      if (this.proc) this.stopReader('telescope disconnected');
+      this.setPreview(false);
+      this.phase = 'disconnected';
+      this.note = 'telescope disconnected; live video resumes when it reconnects';
+      this.nextAttemptAt = 0;
       return;
     }
-    if (!this.fallbackActive) this.note = null;
-    if (this.failures > 0) {
-      await this.dwarf.ensureLiveView(this.failures > 2).catch((e) => log.debug(`live-view wake failed: ${errMsg(e)}`));
+    const mode = st.shootingMode?.id ?? null;
+    if (mode !== this.probedMode) {
+      this.probedMode = mode;
+      this.silentProbes = 0;
+      this.learnedNoRtsp = null;
     }
-    if (!this.running) {
-      this.spawning = false;
+    // tele in a mode without RTSP: the astro preview instead
+    if (this.fallback && mode !== null && mode !== 1 && (this.noRtspModes.has(mode) || this.learnedNoRtsp === mode)) {
+      if (this.proc) this.stopReader(`${st.shootingMode?.name} mode has no tele RTSP`);
+      this.setPreview(true);
+      this.phase = 'preview';
+      this.note = st.stacking.tele.state === 'running' || st.stacking.wide.state === 'running'
+        ? `${st.shootingMode?.name ?? 'astro'} mode: showing the live stack preview`
+        : `${st.shootingMode?.name ?? 'astro'} mode: the tele shows the stack preview while stacking runs; live video returns in Normal mode`;
       return;
     }
+    this.setPreview(false);
+    if (!this.proc) {
+      if (this.closing) {
+        // the previous session is still being torn down; never wait on it for ever
+        if (now - this.closingSince < 6000) return;
+        log.warn(`${this.name}: previous reader not confirmed gone after ${Math.round((now - this.closingSince) / 1000)} s; continuing`);
+        try {
+          this.closing.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        this.closing = null;
+      }
+      if (now >= this.nextAttemptAt) this.connect();
+      else this.phase = 'backoff';
+      return;
+    }
+    // a reader is running: is it delivering?
+    const fresh = this.lastFrameAt > this.connectedAt;
+    const quiet = now - (fresh ? this.lastFrameAt : this.connectedAt);
+    const limit = fresh ? CameraSource.STALL_MS : CameraSource.FIRST_FRAME_MS;
+    if (quiet < limit) return;
+    // GoTo / calibration / polar alignment take over the cameras for a while (not stacking: that runs for hours)
+    const busy = this.dwarf.isBusy();
+    const pausing = now < this.pauseUntil || (!!busy && busy !== 'live stacking') || now - this.dwarf.lastMotionAt < 4000;
+    if (pausing) {
+      this.note = 'live video paused while the telescope works; it resumes afterwards';
+      return;
+    }
+    void this.onSilent(fresh, mode);
+  }
+
+  private silentHandling = false;
+  private silentSince = 0;
+  /** A telescope call during recovery, never allowed to hang the supervisor. */
+  private bounded<T>(p: Promise<T>, ms = 6000): Promise<T | null> {
+    return Promise.race([p.catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), ms))]);
+  }
+  private async onSilent(hadFrames: boolean, mode: number | null): Promise<void> {
+    if (this.silentHandling && Date.now() - this.silentSince < 20000) return;
+    this.silentHandling = true;
+    this.silentSince = Date.now();
+    try {
+      const cam = this.name as 'tele' | 'wide';
+      // a long manual exposure stops the video in any mode
+      if (!this.healedThisEpisode) {
+        const exp = await this.bounded(this.dwarf.exposureSeconds(cam));
+        if (exp !== null && exp >= 1) {
+          this.healedThisEpisode = true;
+          await this.bounded(this.dwarf.setSetting(cam, 'exposure', 'auto'));
+          log.warn(`${this.name}: no video with a ${exp} s manual exposure set: exposure set to auto (long exposures stop the telescope's live video)`);
+          this.note = `${this.name} exposure was set to auto to restore live video`;
+        }
+      }
+      if (!hadFrames && this.fallback && mode !== null && mode !== 1) {
+        // the tele in an astro mode: two silent probes and this mode has no tele RTSP (until it changes)
+        this.silentProbes++;
+        if (this.silentProbes >= 2) {
+          this.learnedNoRtsp = mode;
+          log.info(`${this.name}: no RTSP video in ${this.dwarf.state.shootingMode?.name ?? 'this'} mode; using the astro preview until the mode changes`);
+        }
+      }
+      this.restart(hadFrames ? 'live video stalled' : 'no video from the new connection');
+    } finally {
+      this.silentHandling = false;
+    }
+  }
+
+  private backoffMs(): number {
+    return Math.min(1000 * 2 ** Math.max(0, this.attempts - 1), 15000);
+  }
+
+  private restart(reason: string): void {
+    this.attempts++;
+    this.nextAttemptAt = Date.now() + this.backoffMs();
+    if (this.attempts === 1) log.info(`${this.name}: ${reason}; reconnecting`);
+    else if (this.attempts % 4 === 0) log.warn(`${this.name}: ${reason}; still reconnecting (attempt ${this.attempts}, next in ${Math.round(this.backoffMs() / 1000)} s)${this.lastError ? ` — ${this.lastError}` : ''}`);
+    this.note = `${reason}; reconnecting${this.attempts > 1 ? ` (attempt ${this.attempts})` : ''}`;
+    this.stopReader(reason);
+    // re-arm the camera previews on the telescope before the next attempt
+    void this.dwarf.ensureLiveView(true).catch(() => {});
+  }
+
+  private setPreview(on: boolean): void {
+    if (!this.fallback || on === this.previewActive) return;
+    this.previewActive = on;
+    if (on) {
+      this.fallback.on('frame', this.onPreviewFrame);
+      this.fallback.hold(true);
+      log.info(`${this.name}: showing the telescope's astro preview (:8092)`);
+    } else {
+      this.fallback.off('frame', this.onPreviewFrame);
+      this.fallback.hold(false);
+    }
+  }
+
+  // ---------------------------------------------------------------- the reader
+  private connect(): void {
+    this.phase = 'connecting';
+    this.connectedAt = Date.now();
     const args = [
       '-hide_banner', '-loglevel', 'error',
-      // Socket read timeout 30 s: with long exposures frames arrive slowly, and a short timeout
-      // made ffmpeg exit and reconnect over and over, piling up RTSP sessions on the telescope.
-      '-rtsp_transport', 'tcp', '-timeout', '60000000',
-      // Keep frames decoded with missing references: this feed references missing frames so
-      // often that dropping them (-output_corrupt) discarded ~90% of the video (measured 11.2 MB
-      // vs 1.2 MB per 8 s). Grey decoder frames are filtered from agent snapshots instead.
+      // Socket timeout 20 s: only a backstop, the supervisor closes a silent session sooner.
+      '-rtsp_transport', 'tcp', '-timeout', '20000000',
+      // Keep frames decoded with missing references: this feed references missing frames so often
+      // that dropping them (-output_corrupt) discarded ~90 % of the video (11.2 MB vs 1.2 MB per 8 s).
+      // Grey decoder frames are filtered from agent snapshots instead.
       '-fflags', 'nobuffer', '-flags', 'low_delay',
       '-i', this.url,
-      // No fps filter: it duplicates the last frame (with a fresh timestamp) whenever the
-      // camera pauses, e.g. while the mount moves, which made old images look current.
-      // Every real frame passes through; frame-rate limiting is done below by dropping.
-      // Native 1920×1080 so the agent gets full resolution from this single connection;
-      // browsers get a downscaled copy (see the video WebSocket).
+      // No fps filter (it duplicates the last frame with a fresh timestamp whenever the camera
+      // pauses, which made old images look current): every real frame passes, rate-limited below.
+      // Native 1920×1080 for the agent; browsers get a downscaled copy (video WebSocket).
       '-an', '-fps_mode', 'passthrough',
       '-q:v', '4', '-f', 'mjpeg', 'pipe:1',
     ];
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = proc;
-    const started = Date.now();
-    this.procStartedAt = started;
-    let gotFrame = false;
+    let frames = 0;
     let lastEmit = 0;
     const minGap = 1000 / Math.max(1, config.web.liveFps);
     const splitter = new JpegSplitter((jpeg) => {
-      gotFrame = true;
-      this.exposureHealed = false;
-      this.failures = 0;
+      if (this.proc !== proc) return;
+      frames++;
+      const now = Date.now();
+      if (this.phase !== 'live') {
+        if (this.attempts > 0) log.info(`${this.name}: live video is back`);
+        this.phase = 'live';
+      }
+      this.lastFrameAt = now;
+      this.attempts = 0;
+      this.healedThisEpisode = false;
+      this.silentProbes = 0;
       this.lastError = '';
       this.note = null;
-      this.lastRtspFrameAt = Date.now();
-      if (this.fallbackActive) {
-        this.disableFallback();
-        log.info(`${this.name}: RTSP stream is back`);
-      }
-      const now = Date.now();
       if (now - lastEmit < minGap) return; // rate-limit by dropping, never duplicating
       lastEmit = now;
       this.frame(jpeg);
     });
     proc.stdout!.on('data', (c: Buffer) => splitter.push(c));
-    if (!this.fallback) {
-      // No video at all usually means a long manual exposure is set on this camera (verified:
-      // that stops its RTSP video; the telescope's calibration leaves the wide camera at 1 s).
-      // Self-heal once: set exposure to auto, then reconnect.
-      setTimeout(async () => {
-        if (gotFrame || this.proc !== proc || this.exposureHealed) return;
-        this.exposureHealed = true;
-        try {
-          await this.dwarf.setSetting(this.name as 'tele' | 'wide', 'exposure', 'auto');
-          log.warn(`${this.name}: no live video for 15 s — set ${this.name} exposure to auto (a long manual exposure stops the telescope's live video) and reconnecting`);
-          this.note = `${this.name} exposure was set to auto to restore live video`;
-          proc.kill('SIGINT');
-        } catch (err) {
-          log.debug(`${this.name}: exposure self-heal failed: ${errMsg(err)}`);
-        }
-      }, 15000);
-    }
-    if (this.fallback) {
-      // If the telescope accepts the session but sends nothing, it isn't serving this camera in
-      // this mode; close the session promptly so it can't block the RTSP server for the others.
-      setTimeout(() => {
-        if (!gotFrame && this.proc === proc) {
-          this.rtspBlockedInMode = this.dwarf.state.shootingMode?.id ?? null;
-          this.rememberBlocked(this.rtspBlockedInMode);
-          log.info(`${this.name}: no RTSP video in ${this.dwarf.state.shootingMode?.name ?? 'this'} mode; using the astro preview until the mode changes`);
-          proc.kill('SIGINT');
-        }
-      }, 10000);
-    }
     let errTail = '';
     proc.stderr!.on('data', (c: Buffer) => {
       errTail = (errTail + c.toString()).slice(-400);
     });
-    proc.on('error', (err) => log.error(`ffmpeg not available: ${errMsg(err)}`));
+    proc.on('error', (err) => log.error(`${this.name}: ffmpeg not available: ${errMsg(err)}`));
     proc.on('exit', (code) => {
-      this.proc = null;
-      this.spawning = false;
-      if (!this.running) return;
-      if (!gotFrame || Date.now() - started < 5000) this.failures++;
+      const ended = (proc as ChildProcess & { _stopping?: boolean })._stopping;
+      if (this.proc === proc) this.proc = null;
+      if (ended || !this.running) return;
+      // the reader ended by itself (connection refused, RTSP 454, socket timeout)
       const msg = errTail.split('\n').filter((l) => l && !/POC|RPS|Could not find ref|NALU/.test(l)).pop();
-      const notServed = !!msg && /454|4XX/.test(msg);
-      this.lastError = notServed ? 'the telescope is not serving this stream right now (RTSP 454)' : (msg ?? `ffmpeg exited (${code})`);
-      // Re-arm the camera's preview on the telescope before retrying.
-      if (notServed) void this.dwarf.ensureLiveView(true).catch((e) => log.debug(`live-view wake failed: ${errMsg(e)}`));
-      log.debug(`${this.name} ffmpeg exited (${code})${msg ? `: ${msg}` : ''}`);
-      if (this.failures === 3) log.warn(`${this.name} camera RTSP stream unavailable: ${this.lastError}`);
-      if ((notServed || this.rtspBlockedInMode !== null) && this.fallback) {
-        // Expected in DSO/astro modes: show the telescope's astro preview; RTSP is retried after a mode change.
-        if (notServed) {
-          this.rtspBlockedInMode = this.dwarf.state.shootingMode?.id ?? null;
-          this.rememberBlocked(this.rtspBlockedInMode);
-        }
-        this.enableFallback();
-        this.note = `${this.dwarf.state.shootingMode?.name ?? 'this'} mode: showing the telescope's astro preview (~2 fps); live video returns in Normal mode`;
-        return;
+      this.lastError = msg && /454|4XX/.test(msg) ? 'the telescope is not serving this stream right now (RTSP 454)' : (msg ?? `ffmpeg exited (${code})`);
+      log.debug(`${this.name} ffmpeg exited (${code})${msg ? `: ${msg}` : ''} after ${frames} frames`);
+      if (frames === 0 && this.fallback) {
+        const mode = this.dwarf.state.shootingMode?.id ?? null;
+        if (mode !== null && mode !== 1 && ++this.silentProbes >= 2) this.learnedNoRtsp = mode;
       }
-      // Repeated immediate failures on a camera without fallback: most often a long manual
-      // exposure (the telescope then won't start the stream). Self-heal once, then retry.
-      if (!this.fallback && this.failures >= 2 && !this.exposureHealed) {
-        this.exposureHealed = true;
-        void this.dwarf
-          .setSetting(this.name as 'tele' | 'wide', 'exposure', 'auto')
-          .then(() => {
-            log.warn(`${this.name}: live video would not start — set ${this.name} exposure to auto (long manual exposures stop the telescope's live video)`);
-            this.note = `${this.name} exposure was set to auto to restore live video`;
-          })
-          .catch((e) => log.debug(`${this.name}: exposure self-heal failed: ${errMsg(e)}`));
-        this.restartTimer = setTimeout(() => void this.spawnFfmpeg(), 3000);
-        return;
-      }
-      // Back off up to 60 s so a dead stream doesn't turn into a reconnect storm.
-      const delay = Math.min(2000 * 2 ** Math.min(this.failures, 5), 60000);
-      this.note = this.failures > 0 ? `reconnecting (${this.lastError})` : null;
-      this.restartTimer = setTimeout(() => void this.spawnFfmpeg(), delay);
+      this.restart(frames ? 'live video ended' : `could not start live video (${this.lastError})`);
     });
   }
 
-  protected stopSource(): void {
-    this.disableFallback();
-    if (this.freshness) clearInterval(this.freshness);
-    this.freshness = null;
-    if (this.exposureCheck) clearInterval(this.exposureCheck);
-    this.exposureCheck = null;
-    if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.restartTimer = null;
-    // SIGINT/SIGTERM let ffmpeg send RTSP TEARDOWN so the telescope frees the session.
-    this.proc?.kill('SIGINT');
+  /** Close the reader cleanly (SIGINT → TEARDOWN), and for good (SIGKILL after 3 s) if it hangs. */
+  private stopReader(reason: string): void {
+    const proc = this.proc;
+    if (!proc) return;
     this.proc = null;
+    (proc as ChildProcess & { _stopping?: boolean })._stopping = true;
+    if (proc.exitCode !== null || proc.signalCode !== null) return;
+    this.closing = proc;
+    this.closingSince = Date.now();
+    proc.once('exit', () => {
+      if (this.closing === proc) this.closing = null;
+    });
+    log.debug(`${this.name}: closing reader (${reason})`);
+    proc.kill('SIGINT');
+    const t = setTimeout(() => {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        log.warn(`${this.name}: reader did not stop; killing it`);
+        proc.kill('SIGKILL');
+      }
+    }, 3000);
+    proc.once('exit', () => clearTimeout(t));
+  }
+
+  stallHint(): string {
+    const parts: string[] = [];
+    if (this.note) parts.push(this.note);
+    if (this.lastError) parts.push(`RTSP: ${this.lastError}`);
+    parts.push('Long manual exposures stop this camera\'s live view; the mount moving also pauses frames briefly.');
+    return parts.join(' ');
+  }
+
+  status() {
+    const now = Date.now();
+    return {
+      ...super.status(),
+      phase: this.phase,
+      attempts: this.attempts,
+      reader: this.proc?.pid ?? null,
+      closing: this.closing ? Math.round((now - this.closingSince) / 1000) : null,
+      nextAttemptIn: !this.proc && this.nextAttemptAt > now ? Math.round((this.nextAttemptAt - now) / 1000) : 0,
+      recovering: this.silentHandling,
+    };
   }
 
   /**
@@ -542,7 +580,18 @@ export class StreamHub {
     this.wide = new CameraSource('wide', 1, dwarf);
     // In DSO/astro modes the telescope serves the tele preview on :8092 instead of RTSP.
     this.tele.fallback = this.stack;
-    this.tele.loadBlockedModes([2]); // DSO: verified, tele RTSP not served
+    this.tele.noRtspModes.add(2); // DSO: verified, tele RTSP not served (opening it hangs the session)
+    // The link coming back: reconnect right away.
+    let wasConnected = dwarf.state.connected;
+    dwarf.on('state', () => {
+      if (dwarf.state.connected && !wasConnected) {
+        setTimeout(() => {
+          this.tele.retryRtsp();
+          this.wide.retryRtsp();
+        }, 1500);
+      }
+      wasConnected = dwarf.state.connected;
+    });
     // After a mode change, re-check RTSP right away instead of waiting for the next retry.
     dwarf.on('state', () => {
       const id = dwarf.state.shootingMode?.id;

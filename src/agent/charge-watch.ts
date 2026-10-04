@@ -63,7 +63,7 @@ export function watchCharging(dwarf: Dwarf, agent: AgentBridge): void {
       `Sessions on the SD card that are not in the library yet: ${pending.join(', ')}.`,
       '1. Park the scope: move_motors pitch_deg=2.5 (motors_home first if it is not homed).',
       '2. transfer_session for each of those sessions. Processing in AstroPhoto Studio queues itself after each transfer.',
-      '3. Follow the transfers with jobs until all are done (wait between checks). If one fails, retry it once; if it fails again, do NOT shut down: report it and stop.',
+      '3. Follow the transfers with jobs until all are done. If one fails, retry it once; if it fails again, do NOT shut down: report it and stop.',
       '4. Check processing_status that the sessions are queued or processing.',
       '5. Shut the telescope down: power action=shutdown (approved by this setting).',
       '6. Write a short summary: what was transferred, processing profile and ETA.',
