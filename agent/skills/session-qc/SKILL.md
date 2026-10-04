@@ -23,7 +23,7 @@ After 12 subs (< 60 s) or 20 subs (60 s), that is two dither blocks: `analyze_su
 - Roundness well below the last nights → wind, balance or trailing; check the altitude (field rotation table in acquisition-profiles).
 - Thresholds are **relative to this scope's normal**. Accepted 15 s Alt-Az subs here have elongation ≈ 1.2, measured by AstroPhoto Studio on NGC 281 2026-10-01; its rejected trailed subs were ≈ 2.0. Do not act on absolute textbook numbers (e.g. "axis ratio > 1.2").
 
-## Every check (keep cycling through these while the stack runs; no idle waiting)
+## Every check (on each duty sample while the stack runs)
 1. `stacking_status`, then `analyze_subs count=3`.
 2. **Focus:** hfrPx > baseline × 1.15 on three consecutive checks, with the star count steady (not cloud), or the sensor ≥ 5 °C colder than at autofocus → `autofocus mode=astro`, then reset the baseline. Ignore single spikes (seeing).
 3. **Trailing:** roundness falling ≥ 0.1 below baseline over two checks → check wind and altitude. EQ-60 → switch to EQ-30. Alt-Az above ~65° → the target is near the zenith; move on to the next target, or accept the loss until it descends.

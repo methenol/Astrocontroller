@@ -8,6 +8,7 @@ import { DwarfLink, DwarfCommandError, type Notification, type RequestOptions } 
 import { Cmd, OPERATION_STATE, ASTRO_STATE, SOLAR_SYSTEM_INDEX, errorText, protoTypeByName } from './protocol.js';
 import * as http from './http.js';
 import { listDir } from './ftp.js';
+import { gate } from './gate.js';
 
 const log = logger('dwarf');
 
@@ -15,6 +16,8 @@ export type CameraName = 'tele' | 'wide';
 export const camId = (c: CameraName) => (c === 'wide' ? 1 : 0);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Firmware time limits on a motor move or reset ("overtime"): the axis stopped early, not an error in the request. */
+const MOTOR_OVERTIME = new Set([-14510, -14511, -14512, -14513, -14514, -14515, -14521, -14522]);
 const opState = (n: unknown) => OPERATION_STATE[Number(n ?? 0)] ?? `state_${n}`;
 const astroState = (n: unknown) => ASTRO_STATE[Number(n ?? 0)] ?? `state_${n}`;
 
@@ -35,6 +38,8 @@ export interface StackingInfo {
 
 export interface TelescopeState {
   connected: boolean;
+  /** the user released the telescope from the web UI (Disconnect): no traffic until Connect */
+  released?: boolean;
   device: { name?: string; serial?: string; firmware?: string; ip?: string };
   battery?: number;
   charging?: boolean;
@@ -126,8 +131,14 @@ export class Dwarf extends EventEmitter {
     });
   }
 
+  private releasedFile = path.join(config.paths.data, 'released.json');
+
   start(): void {
-    this.link.start();
+    // A release survives a restart: the user may be using the DWARFLAB app.
+    gate.released = fs.existsSync(this.releasedFile);
+    this.state.released = gate.released;
+    if (gate.released) log.warn('the telescope is released (Disconnect in the web UI): not connecting until Connect is pressed');
+    else this.link.start();
     this.stateTimer = setInterval(() => {
       if (this.link.connected) void this.refreshState().catch(() => {});
     }, 30000);
@@ -135,7 +146,32 @@ export class Dwarf extends EventEmitter {
     this.motorTimer = setInterval(() => {
       if (this.link.connected) void this.readMotorPositions().catch(() => {});
     }, 10000);
-    void this.refreshDeviceInfo();
+    if (!gate.released) void this.refreshDeviceInfo();
+  }
+
+  /**
+   * Disconnect button: close the control link and stop every other kind of traffic (HTTP, FTP,
+   * video) so the telescope is free for another client, and stay that way until connectLink().
+   */
+  release(): void {
+    gate.released = true;
+    fs.writeFileSync(this.releasedFile, JSON.stringify({ since: Date.now() }));
+    this.link.stop();
+    this.state.released = true;
+    this.state.connected = false;
+    log.info('telescope released by the user: control link closed, no traffic until Connect');
+    this.emit('released');
+    this.changed();
+  }
+
+  /** Connect button: take the telescope back. */
+  connectLink(): void {
+    gate.released = false;
+    fs.rmSync(this.releasedFile, { force: true });
+    this.state.released = false;
+    log.info('connecting to the telescope (Connect pressed)');
+    this.link.start();
+    this.changed();
   }
 
   private motorTimer: NodeJS.Timeout | null = null;
@@ -199,7 +235,7 @@ export class Dwarf extends EventEmitter {
   // -------------------------------------------------------------------------
 
   async refreshState(): Promise<Record<string, unknown>> {
-    const s = (await this.request(Cmd.TASK_GET_DEVICE_STATE_INFO, {}, { timeout: 8000 })) as Record<string, any>;
+    const s = (await this.request(Cmd.TASK_GET_DEVICE_STATE_INFO, {}, { timeout: 12000 })) as Record<string, any>;
     const st = this.state;
     if (typeof s.shootingMode === 'number') await this.setModeState(s.shootingMode);
     const tele = s.teleCameraStateInfo ?? {};
@@ -382,6 +418,27 @@ export class Dwarf extends EventEmitter {
     this.changed();
   }
 
+  /**
+   * Send a command that fw 1.5.3 may or may not acknowledge. An error reply fails; a missing
+   * reply is not a failure in itself: `confirm` checks the telescope's own state for the change
+   * (its notifications or a state read), and only if that also never shows it does this fail.
+   */
+  private async send(cmd: number, params: Record<string, unknown>, what: string, o: { timeout?: number; confirm?: () => boolean | Promise<boolean>; confirmMs?: number } = {}): Promise<Record<string, unknown> | null> {
+    const timeout = o.timeout ?? 15000;
+    const r = await this.request(cmd, params, { timeout, bestEffort: true, allowError: true });
+    const code = Number(r?.code ?? 0);
+    if (r && code < 0) throw new DwarfCommandError(cmd, code, r);
+    if (!r && o.confirm) {
+      const end = Date.now() + (o.confirmMs ?? 10000);
+      for (;;) {
+        if (await Promise.resolve(o.confirm()).catch(() => false)) break;
+        if (Date.now() > end) throw new Error(`${what}: the telescope neither acknowledged the command nor showed the change within ${Math.round((timeout + (o.confirmMs ?? 10000)) / 1000)} s`);
+        await sleep(500);
+      }
+    }
+    return r;
+  }
+
   // -------------------------------------------------------------------------
   // System
   // -------------------------------------------------------------------------
@@ -415,8 +472,15 @@ export class Dwarf extends EventEmitter {
 
   async setShootingMode(nameOrId: string | number): Promise<http.ShootingModeDef> {
     const mode = await http.resolveShootingMode(nameOrId);
-    await this.request(Cmd.TASK_MANAGER_SWITCH_SHOOTING_MODE, { mode: mode.id }, { timeout: 15000 });
-    await this.request(Cmd.TASK_MANAGER_ENTER_CAMERA, { clientParam: { encodeType: 1 } }, { timeout: 15000, allowError: true });
+    await this.send(Cmd.TASK_MANAGER_SWITCH_SHOOTING_MODE, { mode: mode.id }, `switching to ${mode.name} mode`, {
+      timeout: 20000,
+      confirmMs: 15000,
+      confirm: async () => {
+        await this.refreshState();
+        return this.state.shootingMode?.id === mode.id;
+      },
+    });
+    await this.request(Cmd.TASK_MANAGER_ENTER_CAMERA, { clientParam: { encodeType: 1 } }, { timeout: 15000, allowError: true, bestEffort: true });
     this.state.shootingMode = { id: mode.id, name: mode.name };
     this.lastLiveViewWake = Date.now();
     this.changed();
@@ -426,7 +490,7 @@ export class Dwarf extends EventEmitter {
   async setShootingTech(tech: 'single_photo' | 'stacking' | 'burst' | 'video' | 'timelapse' | 'panorama'): Promise<void> {
     const id = Number(Object.entries(http.SHOOTING_TECH_NAMES).find(([, n]) => n === tech)?.[0]);
     if (!id) throw new Error(`unknown technique ${tech}`);
-    await this.request(Cmd.TASK_MANAGER_SWITCH_SHOOTING_TECH, { tech: id }, { timeout: 10000 });
+    await this.send(Cmd.TASK_MANAGER_SWITCH_SHOOTING_TECH, { tech: id }, `switching to ${tech}`);
     this.state.shootingTech.tele = tech;
     this.state.shootingTech.wide = tech;
   }
@@ -621,10 +685,18 @@ export class Dwarf extends EventEmitter {
   /** Take a still photo and return the album entry it produced. */
   async takePhoto(camera: CameraName): Promise<http.MediaItem | null> {
     const started = Math.floor(Date.now() / 1000) - 2;
-    const done = this.link.waitFor((n) => n.name === 'photoState' && (n.data.state ?? 0) === 0 && (((n.data.cameraType as number) ?? 0) === camId(camera)), 30000);
-    await this.request(camera === 'tele' ? Cmd.CAMERA_TELE_PHOTOGRAPH : Cmd.CAMERA_WIDE_PHOTOGRAPH, {}, { timeout: 20000 });
+    // a long exposure answers only after it is read out: allow for it, then the album is the proof
+    const expS = (await this.exposureSeconds(camera).catch(() => null)) ?? 0;
+    const budget = Math.round(expS * 1000) + 30000;
+    const done = this.link.waitFor((n) => n.name === 'photoState' && (n.data.state ?? 0) === 0 && (((n.data.cameraType as number) ?? 0) === camId(camera)), budget + 10000);
+    const cmd = camera === 'tele' ? Cmd.CAMERA_TELE_PHOTOGRAPH : Cmd.CAMERA_WIDE_PHOTOGRAPH;
+    const r = await this.request(cmd, {}, { timeout: budget, bestEffort: true, allowError: true });
+    if (r && Number(r.code ?? 0) < 0) {
+      done.catch(() => {});
+      throw new DwarfCommandError(cmd, Number(r.code), r);
+    }
     await done.catch(() => sleep(1500));
-    return this.findNewMedia(1, camera, started);
+    return this.findNewMedia(1, camera, started, 8);
   }
 
   async findNewMedia(mediaType: number, camera: CameraName | null, sinceEpochS: number, tries = 5): Promise<http.MediaItem | null> {
@@ -642,16 +714,19 @@ export class Dwarf extends EventEmitter {
     const schema = await http.getParamSchema(await this.currentModeId());
     const def = schema.techSettings.burstCount;
     if (def) await this.request(Cmd.PARAM_SET_GENERAL_INT_PARAM, { paramId: Long.fromString(String(def.paramId)), value: count });
-    const done = this.link.waitFor((n) => n.name === 'burstState' && (n.data.state ?? 0) === 0, 30000 + count * 3000);
-    await this.request(camera === 'tele' ? Cmd.CAMERA_TELE_BURST : Cmd.CAMERA_WIDE_BURST, { count }, { timeout: 15000 });
-    await done.catch(() => {});
-    return `burst of ${count} on ${camera} finished (${this.state.capture.burstProgress ?? 'done'})`;
+    const done = this.link.waitFor((n) => n.name === 'burstState' && (n.data.state ?? 0) === 0, 60000 + count * 5000);
+    await this.send(camera === 'tele' ? Cmd.CAMERA_TELE_BURST : Cmd.CAMERA_WIDE_BURST, { count }, 'burst');
+    const ok = await done.then(() => true).catch(() => false);
+    return ok
+      ? `burst of ${count} on ${camera} finished (${this.state.capture.burstProgress ?? 'done'})`
+      : `burst of ${count} on ${camera} started, but the telescope did not report its end (progress ${this.state.capture.burstProgress ?? 'unknown'}); check list_album`;
   }
 
   async record(camera: CameraName, action: 'start' | 'stop'): Promise<void> {
     if (action === 'start') await this.setShootingTech('video');
     const cmd = camera === 'tele' ? (action === 'start' ? Cmd.CAMERA_TELE_START_RECORD : Cmd.CAMERA_TELE_STOP_RECORD) : action === 'start' ? Cmd.CAMERA_WIDE_START_RECORD : Cmd.CAMERA_WIDE_STOP_RECORD;
-    await this.request(cmd, action === 'start' ? { encodeType: 1 } : {}, { timeout: 15000 });
+    const want = action === 'start' ? 'running' : 'idle|stopped';
+    await this.send(cmd, action === 'start' ? { encodeType: 1 } : {}, `${action} recording`, { confirm: () => new RegExp(`^${camera}:(${want})$`).test(this.state.capture.record ?? '') });
   }
 
   async timelapse(camera: CameraName, action: 'start' | 'stop', intervalS?: number, totalS?: number): Promise<void> {
@@ -661,7 +736,8 @@ export class Dwarf extends EventEmitter {
       if (totalS !== undefined) await this.setSetting(camera, 'timelapseTotalTime', totalS);
     }
     const cmd = camera === 'tele' ? (action === 'start' ? Cmd.CAMERA_TELE_START_TIMELAPSE_PHOTO : Cmd.CAMERA_TELE_STOP_TIMELAPSE_PHOTO) : action === 'start' ? Cmd.CAMERA_WIDE_START_TIMELAPSE_PHOTO : Cmd.CAMERA_WIDE_STOP_TIMELAPSE_PHOTO;
-    await this.request(cmd, {}, { timeout: 15000 });
+    const want = action === 'start' ? 'running' : 'idle|stopped';
+    await this.send(cmd, {}, `${action} timelapse`, { confirm: () => new RegExp(`^${camera}:(${want})$`).test(this.state.capture.timelapse ?? '') });
   }
 
   // -------------------------------------------------------------------------
@@ -671,7 +747,7 @@ export class Dwarf extends EventEmitter {
   async readMotorPositions(): Promise<{ rotationDeg?: number; pitchDeg?: number; homed: boolean }> {
     const out: { rotationDeg?: number; pitchDeg?: number; homed: boolean } = { homed: true };
     for (const [id, key] of [[1, 'rotationDeg'], [2, 'pitchDeg']] as const) {
-      const r = await this.request(Cmd.STEP_MOTOR_GET_POSITION, { id }, { allowError: true, timeout: 5000 });
+      const r = await this.request(Cmd.STEP_MOTOR_GET_POSITION, { id }, { allowError: true, timeout: 8000 });
       if (r && typeof r.code === 'number' && r.code === -14520) out.homed = false;
       else if (r && typeof r.position === 'number') out[key] = round(r.position, 2);
     }
@@ -698,7 +774,7 @@ export class Dwarf extends EventEmitter {
     // leaves the motor controller in a "needs reset" state (-14520, observed on fw 1.5.3).
     const st = this.state;
     const active = (x: string) => ['running', 'plate_solving'].includes(x);
-    if (active(st.goto.state) || active(st.calibration.state) || active(st.tracking.state)) {
+    if (active(st.goto.state) || active(st.calibration.state) || this.isTracking()) {
       await this.request(Cmd.ASTRO_STOP_GOTO, {}, { bestEffort: true, timeout: 3000 });
       await this.request(Cmd.ASTRO_STOP_ONE_CLICK_GOTO, {}, { bestEffort: true, timeout: 3000 });
       await sleep(1000);
@@ -738,41 +814,89 @@ export class Dwarf extends EventEmitter {
     throw new Error(`refused: ${what} while the ND filter is fitted for darks — any motion knocks the magnetic filter off, and light frames would be black. When the operator has removed the filter, call dark_frames action=nd_removed operator_confirmed=true, then motors_home (a hand-tilted scope has lost its motor position).`);
   }
 
+  /**
+   * Home both axes against their reference switches. Every step is judged by the motor positions
+   * the telescope reports afterwards, not by its replies: a reset can end on the firmware's own time
+   * limit (-14511 "overtime get reset return", verified 2026-10-04 02:43 after an EQ solve left the
+   * rotation far from its switch) with the axis part of the way there, and resetting again goes on
+   * from where it stopped.
+   */
   async homeMotors(): Promise<string> {
     this.assertNoNdLock('homing the motors');
     await this.releaseMotors();
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const reset = async (id: number, direction: boolean) => {
-        const r = await this.request(Cmd.STEP_MOTOR_RESET, { id, direction }, { timeout: 120000, allowError: true });
-        const code = Number(r?.code ?? 0);
-        if (code < 0 && code !== -14520) throw new DwarfCommandError(Cmd.STEP_MOTOR_RESET, code, r ?? {});
-      };
-      // After a failed calibration the firmware ignores resets for a while: retry pitch until it
-      // really reaches the bottom reference.
+    const notes: string[] = [];
+    const reset = async (id: 1 | 2, direction: boolean) => {
+      const r = await this.request(Cmd.STEP_MOTOR_RESET, { id, direction }, { timeout: 240000, allowError: true, bestEffort: true });
+      const code = Number(r?.code ?? 0);
+      if (!r) notes.push(`${id === 1 ? 'rotation' : 'pitch'} reset: no reply within 4 min`);
+      else if (MOTOR_OVERTIME.has(code)) notes.push(`${id === 1 ? 'rotation' : 'pitch'} reset stopped at the firmware's time limit (${errorText(code)}); reset again from there`);
+      else if (code < 0 && code !== -14520) throw new DwarfCommandError(Cmd.STEP_MOTOR_RESET, code, r ?? {});
+    };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      // Pitch to its bottom reference. After a failed calibration the firmware ignores resets
+      // for a while, and a long way down can hit the time limit: repeat until it is really there.
       for (let i = 0; i < 5; i++) {
         await reset(2, true);
         const pp = await this.readMotorPositions().catch(() => null);
         if (pp?.pitchDeg !== undefined && pp.pitchDeg < 20) break;
-        await sleep(6000);
+        await sleep(3000);
       }
-      await reset(1, false); // the rotation reference switch is at ≈12° (direction=true has no switch → -14520)
+      // Rotation reference switch at ≈12° (direction=true has no switch → -14520).
+      for (let i = 0; i < 3; i++) {
+        await reset(1, false);
+        const pr = await this.readMotorPositions().catch(() => null);
+        if (pr?.homed && pr.rotationDeg !== undefined) break;
+        await sleep(3000);
+      }
       this.lastMotionAt = Date.now();
       const p = await this.readMotorPositions();
       if (p.homed && p.pitchDeg !== undefined && p.rotationDeg !== undefined && p.pitchDeg < 20) {
         // Park rotation at the centre of travel so every session starts from the same frame.
-        await this.request(Cmd.STEP_MOTOR_RUN_TO, { id: 1, endPosition: 159, speed: 20, speedRamping: 100, resolutionLevel: 3 }, { timeout: 120000 });
+        await this.runAxis(1, 159, 20, p.rotationDeg);
         const q = await this.readMotorPositions();
-        return `homed: rotation ${q.rotationDeg}° (centre of travel), pitch ${q.pitchDeg}° (pointing down; raise with move_motors, e.g. pitch 160 ≈ 70° altitude)`;
+        return `homed: rotation ${q.rotationDeg}° (centre of travel), pitch ${q.pitchDeg}° (pointing down; raise with move_motors, e.g. pitch 160 ≈ 70° altitude)${notes.length ? `. Notes: ${notes.join('; ')}` : ''}`;
       }
-      if (attempt === 2) {
-        throw new Error(`homing did not complete: motors report ${p.homed ? `rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°` : 'still not homed (-14520)'}. Wait a few seconds and run motors_home again; power-cycling the telescope resets its motor controller.`);
+      if (attempt === 3) {
+        throw new Error(`homing did not complete after 3 rounds: motors report ${p.homed ? `rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°` : 'still not homed (-14520)'}${notes.length ? ` (${notes.join('; ')})` : ''}. Power-cycling the telescope resets its motor controller.`);
       }
       await sleep(5000);
     }
     return 'unreachable';
   }
 
-  /** Move to absolute motor angles (rotation = motor 1, pitch = motor 2). */
+  /**
+   * Run one axis to an absolute angle. The reply arrives when the motion ends; the timeout allows
+   * for the distance at this speed. Without a reply, or when the firmware's own time limit ends the
+   * move early, the measured position decides, and an unfinished move continues once from there.
+   */
+  private async runAxis(id: 1 | 2, end: number, speed: number, from?: number): Promise<void> {
+    const axis = id === 1 ? 'rotation' : 'pitch';
+    const at = async () => {
+      const p = await this.readMotorPositions().catch(() => null);
+      return id === 1 ? p?.rotationDeg : p?.pitchDeg;
+    };
+    let pos = from;
+    let last = '';
+    for (let tryNo = 1; tryNo <= 2; tryNo++) {
+      const dist = pos !== undefined ? Math.abs(end - pos) : 200;
+      const timeout = Math.round((dist / speed) * 2000 + 60000);
+      this.lastMotionAt = Date.now();
+      const r = await this.request(Cmd.STEP_MOTOR_RUN_TO, { id, endPosition: end, speed, speedRamping: 100, resolutionLevel: 3 }, { timeout, bestEffort: true, allowError: true });
+      this.lastMotionAt = Date.now();
+      const code = Number(r?.code ?? 0);
+      if (r && code >= 0) return;
+      if (r && !MOTOR_OVERTIME.has(code)) throw new DwarfCommandError(Cmd.STEP_MOTOR_RUN_TO, code, r);
+      pos = await at();
+      if (pos !== undefined && Math.abs(pos - end) < 1) return;
+      last = r ? errorText(code) : `no reply within ${Math.round(timeout / 1000)} s`;
+    }
+    throw new Error(`${axis} did not reach ${end}° (now ${pos ?? 'unknown'}°; ${last})`);
+  }
+
+  /**
+   * Move to absolute motor angles (rotation = motor 1, pitch = motor 2). A scope that is tracking
+   * or was left un-homed by an astro routine is released and homed first, so a move always works.
+   */
   async moveTo(target: { rotationDeg?: number; pitchDeg?: number }, speedDegPerS = 10): Promise<string> {
     this.assertNoNdLock('moving the motors');
     const speed = Math.max(0.1, Math.min(30, speedDegPerS));
@@ -784,19 +908,20 @@ export class Dwarf extends EventEmitter {
     if (target.rotationDeg !== undefined && (target.rotationDeg < rMin || target.rotationDeg > rMax)) {
       throw new Error(`rotation ${target.rotationDeg}° is out of range ${rMin}–${rMax}° (mechanical stops; centre ≈159°). Nothing was moved.`);
     }
-    const before = await this.readMotorPositions();
-    if (!before.homed) throw new Error('motors are not homed (after power-on, or a failed calibration/GoTo) — run motors_home first. Nothing was moved.');
     await this.releaseMotors();
-    this.lastMotionAt = Date.now();
-    if (target.pitchDeg !== undefined) {
-      await this.request(Cmd.STEP_MOTOR_RUN_TO, { id: 2, endPosition: target.pitchDeg, speed, speedRamping: 100, resolutionLevel: 3 }, { timeout: 180000 });
+    let before = await this.readMotorPositions();
+    let homed = '';
+    if (!before.homed) {
+      // Tracking after a GoTo, or a failed calibration/GoTo, leaves the axes without a reference (-14520).
+      await this.homeMotors();
+      homed = 'the motors had no reference (tracking or after an astro routine), so they were homed first; ';
+      before = await this.readMotorPositions();
     }
-    if (target.rotationDeg !== undefined) {
-      await this.request(Cmd.STEP_MOTOR_RUN_TO, { id: 1, endPosition: target.rotationDeg, speed, speedRamping: 100, resolutionLevel: 3 }, { timeout: 180000 });
-    }
+    if (target.pitchDeg !== undefined) await this.runAxis(2, target.pitchDeg, speed, before.pitchDeg);
+    if (target.rotationDeg !== undefined) await this.runAxis(1, target.rotationDeg, speed, before.rotationDeg);
     this.lastMotionAt = Date.now();
     const p = await this.readMotorPositions();
-    return `now at rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°`;
+    return `${homed}now at rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°`;
   }
 
   /** Last time the mount moved; camera frames right after motion are corrupt for a few seconds. */
@@ -834,18 +959,35 @@ export class Dwarf extends EventEmitter {
   // Focus
   // -------------------------------------------------------------------------
 
+  /**
+   * Autofocus. Done = the telescope's AF state returning to idle/stopped after it ran (fw 1.5.3
+   * does not always answer the start command). A run that never reports its end is said so.
+   */
   async autofocus(kind: 'normal' | 'astro', x = 960, y = 540): Promise<string> {
-    if (kind === 'normal') {
-      const done = this.link.waitFor((n) => n.name === 'autoFocusState' && (n.data.state ?? 0) === 0, 60000);
-      await this.request(Cmd.FOCUS_AUTO_FOCUS, { mode: 0, centerX: Math.round(x), centerY: Math.round(y) }, { timeout: 30000 });
-      await done.catch(() => {});
-    } else {
-      const done = this.link.waitFor((n) => (n.name === 'astroAutoFocusState' || n.name === 'astroAutoFocusFastState') && [0, 3].includes(Number(n.data.state ?? 0)), 240000);
-      await this.request(Cmd.FOCUS_START_ASTRO_AUTO_FOCUS, { mode: 0 }, { timeout: 240000, bestEffort: true });
-      await done.catch(() => {});
+    const astro = kind === 'astro';
+    const limitMs = astro ? 480000 : 90000;
+    const names = astro ? ['astroAutoFocusState', 'astroAutoFocusFastState'] : ['autoFocusState'];
+    let ran = false;
+    const t0 = Date.now();
+    const done = this.link.waitFor((n) => {
+      if (!names.includes(n.name)) return false;
+      const st = Number(n.data.state ?? 0);
+      if (st === 1) ran = true;
+      return ran && (st === 0 || st === 3);
+    }, limitMs);
+    const cmd = astro ? Cmd.FOCUS_START_ASTRO_AUTO_FOCUS : Cmd.FOCUS_AUTO_FOCUS;
+    const r = await this.request(cmd, astro ? { mode: 0 } : { mode: 0, centerX: Math.round(x), centerY: Math.round(y) }, { timeout: 30000, bestEffort: true, allowError: true });
+    if (r && Number(r.code ?? 0) < 0) {
+      done.catch(() => {});
+      throw new DwarfCommandError(cmd, Number(r.code), r);
     }
+    const finished = await done.then(() => true).catch(() => false);
     await sleep(500);
-    return `autofocus (${kind}) finished at focus position ${this.state.focusPosition ?? '?'}`;
+    const secs = Math.round((Date.now() - t0) / 1000);
+    if (!finished) {
+      return `autofocus (${kind}) did not report its end within ${Math.round(limitMs / 60000)} min${ran ? ' (it did start)' : ' (no sign that it started)'}; focus position now ${this.state.focusPosition ?? '?'}. Check sharpness (analyze_image) before relying on it.`;
+    }
+    return `autofocus (${kind}) finished in ${secs} s at focus position ${this.state.focusPosition ?? '?'}`;
   }
 
   private cachedInfinity: number | null = null;
@@ -865,7 +1007,7 @@ export class Dwarf extends EventEmitter {
    */
   async focusTo(target: number, tolerance = 2): Promise<number> {
     const readPos = async () => {
-      const s = (await this.request(Cmd.TASK_GET_DEVICE_STATE_INFO, {}, { timeout: 5000 })) as Record<string, any>;
+      const s = (await this.request(Cmd.TASK_GET_DEVICE_STATE_INFO, {}, { timeout: 8000 })) as Record<string, any>;
       const p = Number(s.focusMotorStateInfo?.focusPosition?.pos ?? 0);
       this.state.focusPosition = p;
       return p;
@@ -906,19 +1048,55 @@ export class Dwarf extends EventEmitter {
   // Astronomy
   // -------------------------------------------------------------------------
 
+  /**
+   * Plate-solve calibration. Followed through the telescope's notifications: a calibrationResult
+   * is success; the calibration state ending without one is failure; an error reply fails at
+   * once. The start command's own reply is not waited for (the firmware may send it late or not).
+   */
   async calibrate(): Promise<string> {
     this.assertNoNdLock('plate-solve calibration');
     const loc = this.requireLocation();
     await this.ensureMode('DSO');
-    const result = this.link.waitFor((n) => n.name === 'calibrationResult', 300000);
-    const failed = this.link.waitFor((n) => n.name === 'calibrationState' && ['stopped', 'idle'].includes(astroState(n.data.state)), 300000);
-    const reply = await this.request(Cmd.ASTRO_START_CALIBRATION, { lon: loc.lon, lat: loc.lat }, { timeout: 300000 });
-    const code = Number(reply?.code ?? 0);
-    if (code < 0) throw new DwarfCommandError(Cmd.ASTRO_START_CALIBRATION, code, reply ?? {});
-    const first = await Promise.race([result.then((n) => ({ ok: true, n })), failed.then((n) => ({ ok: false, n }))]).catch(() => null);
-    const r = this.state.calibration.result;
-    if (first && !first.ok && !r) return `calibration ended without a result (state ${this.state.calibration.state}); check sky visibility`;
-    return `calibration complete${r ? ` (azimuth ${r.azimuth.toFixed(2)}°, altitude ${r.altitude.toFixed(2)}°)` : ''}; plate solves: ${this.state.calibration.plateSolvingTimes ?? '?'}`;
+    const t0 = Date.now();
+    const cmd = Cmd.ASTRO_START_CALIBRATION;
+    return new Promise<string>((resolve, reject) => {
+      let ran = false;
+      let done = false;
+      let endTimer: NodeJS.Timeout | null = null;
+      const finish = (err: Error | null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (endTimer) clearTimeout(endTimer);
+        this.link.off('notification', onNotify);
+        if (err) return reject(err);
+        const r = this.state.calibration.result;
+        resolve(`calibration complete in ${Math.round((Date.now() - t0) / 1000)} s${r ? ` (azimuth ${r.azimuth.toFixed(2)}°, altitude ${r.altitude.toFixed(2)}°)` : ''}; plate solves: ${this.state.calibration.plateSolvingTimes ?? '?'}`);
+      };
+      const ended = () => {
+        // the result can trail the state change by a moment
+        if (!endTimer) endTimer = setTimeout(() => finish((this.state.calibration.at ?? 0) >= t0 ? null : new Error(`calibration ended without a result after ${this.state.calibration.plateSolvingTimes ?? '?'} plate solve(s); plate-solving did not succeed at this pointing`)), 3000);
+      };
+      const onNotify = (n: Notification) => {
+        if (n.name === 'calibrationResult') finish(null);
+        else if (n.name === 'calibrationState') {
+          const st = astroState(n.data.state);
+          if (st === 'running' || st === 'plate_solving') ran = true;
+          else if (ran && (st === 'stopped' || st === 'idle')) ended();
+        }
+      };
+      const timer = setTimeout(() => finish((this.state.calibration.at ?? 0) >= t0 ? null : new Error(`calibration did not finish within 7 min (state ${this.state.calibration.state}, ${this.state.calibration.plateSolvingTimes ?? 0} plate solve(s))`)), 420000);
+      this.link.on('notification', onNotify);
+      this.request(cmd, { lon: loc.lon, lat: loc.lat }, { timeout: 420000, bestEffort: true, allowError: true }).then(
+        (r) => {
+          const code = Number(r?.code ?? 0);
+          if (r && code < 0) finish(new DwarfCommandError(cmd, code, r));
+          // a success reply may be the start's acknowledgement: the notifications decide
+          else if (r && (this.state.calibration.at ?? 0) >= t0) finish(null);
+        },
+        (e) => finish(e),
+      );
+    });
   }
 
   /**
@@ -998,11 +1176,7 @@ export class Dwarf extends EventEmitter {
       const dso = await http.resolveShootingMode('DSO');
       return this.runOneClick(Cmd.ASTRO_START_ONE_CLICK_GOTO_DSO, { ra: raHours, dec: decDeg, targetName: name, lon: loc.lon, lat: loc.lat, shootingMode: dso.id, gotoOnly: false }, name);
     }
-    const tracking = this.link.waitFor((n) => n.name === 'trackingState' && astroState(n.data.state) === 'running', 300000);
-    const reply = await this.request(Cmd.ASTRO_START_GOTO_DSO, { ra: raHours * 15, dec: decDeg, targetName: name, gotoOnly: false }, { timeout: 300000 });
-    if (Number(reply?.code ?? 0) < 0) throw new DwarfCommandError(Cmd.ASTRO_START_GOTO_DSO, Number(reply?.code), reply ?? {});
-    await Promise.race([tracking, sleep(15000)]).catch(() => {});
-    return `GoTo ${name} complete; tracking: ${this.state.tracking.state}`;
+    return this.runGoto(Cmd.ASTRO_START_GOTO_DSO, { ra: raHours * 15, dec: decDeg, targetName: name, gotoOnly: false }, name);
   }
 
   async gotoSolarSystem(body: string, oneClick: boolean): Promise<string> {
@@ -1016,9 +1190,50 @@ export class Dwarf extends EventEmitter {
       await this.ensureMode(mode.name);
       return this.runOneClick(Cmd.ASTRO_START_ONE_CLICK_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, shootingMode: mode.id, forceStart: false }, pretty);
     }
-    const reply = await this.request(Cmd.ASTRO_START_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, forceStart: false }, { timeout: 300000 });
-    if (Number(reply?.code ?? 0) < 0) throw new DwarfCommandError(Cmd.ASTRO_START_GOTO_SOLAR_SYSTEM, Number(reply?.code), reply ?? {});
-    return `GoTo ${pretty} complete; tracking: ${this.state.tracking.state}`;
+    return this.runGoto(Cmd.ASTRO_START_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, forceStart: false }, pretty);
+  }
+
+  /**
+   * GoTo on an existing calibration. Complete = tracking (a trackingState notification or a
+   * success reply); failed = an error reply, or the GoTo state ending without tracking.
+   */
+  private runGoto(cmd: number, params: Record<string, unknown>, name: string): Promise<string> {
+    const t0 = Date.now();
+    return new Promise<string>((resolve, reject) => {
+      let ran = false;
+      let done = false;
+      let endTimer: NodeJS.Timeout | null = null;
+      const finish = (err: Error | null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (endTimer) clearTimeout(endTimer);
+        this.link.off('notification', onNotify);
+        if (err) reject(err);
+        else resolve(`GoTo ${name} complete in ${Math.round((Date.now() - t0) / 1000)} s; now tracking ${name}`);
+      };
+      const ended = (why: string) => {
+        if (!endTimer) endTimer = setTimeout(() => finish(this.isTracking() ? null : new Error(`GoTo ${name} ended without tracking (${why})`)), 10000);
+      };
+      const onNotify = (n: Notification) => {
+        if (n.name === 'trackingState' && astroState(n.data.state) === 'running') finish(null);
+        else if (n.name === 'gotoState') {
+          const st = astroState(n.data.state);
+          if (st === 'running') ran = true;
+          else if (ran && (st === 'stopped' || st === 'idle')) ended(`GoTo state ${st}`);
+        }
+      };
+      const timer = setTimeout(() => finish(this.isTracking() ? null : new Error(`GoTo ${name} did not reach tracking within 10 minutes (GoTo state ${this.state.goto.state})`)), 600000);
+      this.link.on('notification', onNotify);
+      this.request(cmd, params, { timeout: 600000, bestEffort: true, allowError: true }).then(
+        (r) => {
+          const code = Number(r?.code ?? 0);
+          if (r && code < 0) finish(new DwarfCommandError(cmd, code, r));
+          else if (r && this.isTracking()) finish(null);
+        },
+        (e) => finish(e),
+      );
+    });
   }
 
   /** One-click goto replies several times (per step) until all_end. */
@@ -1091,11 +1306,12 @@ export class Dwarf extends EventEmitter {
   async trackSunMoon(body: 'sun' | 'moon', action: 'start' | 'stop'): Promise<void> {
     if (action === 'start') this.assertNoNdLock('Sun/Moon tracking');
     if (action === 'stop') {
-      await this.request(Cmd.ASTRO_STOP_TRACK_SPECIAL_TARGET, {}, { timeout: 10000 });
+      await this.send(Cmd.ASTRO_STOP_TRACK_SPECIAL_TARGET, {}, `stop ${body} tracking`, { confirm: () => !this.isTracking() });
       return;
     }
     const loc = this.requireLocation();
-    await this.request(Cmd.ASTRO_START_TRACK_SPECIAL_TARGET, { index: body === 'sun' ? 0 : 1, lon: loc.lon, lat: loc.lat }, { timeout: 120000 });
+    // the reply may come only once it tracks (or never): tracking in the state also confirms
+    await this.send(Cmd.ASTRO_START_TRACK_SPECIAL_TARGET, { index: body === 'sun' ? 0 : 1, lon: loc.lon, lat: loc.lat }, `${body} tracking`, { timeout: 180000, confirmMs: 30000, confirm: () => this.isTracking() });
   }
 
   async startStacking(camera: CameraName, opts: { filterIndex?: number; force?: boolean } = {}): Promise<string> {
@@ -1150,9 +1366,14 @@ export class Dwarf extends EventEmitter {
     return false;
   }
 
+  /** Who started the current stack and when we asked it to stop (to tell a requested stop from one the scope made itself). */
+  readonly stackControl: Record<CameraName, { startedBy?: 'agent' | 'ui'; stopRequestedAt?: number }> = { tele: {}, wide: {} };
+
   async stopStacking(camera: CameraName, fast = false): Promise<void> {
     const cmd = camera === 'tele' ? (fast ? 11037 : Cmd.ASTRO_STOP_CAPTURE_RAW_LIVE_STACKING) : fast ? 11038 : Cmd.ASTRO_STOP_WIDE_CAPTURE_LIVE_STACKING;
-    await this.request(cmd, {}, { timeout: 60000 });
+    this.stackControl[camera].stopRequestedAt = Date.now();
+    // A normal stop finishes the final stack first; the stacking state is the proof either way.
+    await this.send(cmd, {}, `stop ${camera} stacking`, { timeout: 30000, confirmMs: 120000, confirm: () => this.state.stacking[camera].state !== 'running' });
   }
 
   /** EQ-mode polar alignment measurement. Returns the polar axis error. */
@@ -1190,8 +1411,8 @@ export class Dwarf extends EventEmitter {
 
   async sentry(action: 'start' | 'stop', type = 0): Promise<void> {
     if (action === 'start') this.assertNoNdLock('sentry mode');
-    if (action === 'start') await this.request(Cmd.SENTRY_MODE_START, { type }, { timeout: 15000 });
-    else await this.request(Cmd.SENTRY_MODE_STOP, {}, { timeout: 15000 });
+    if (action === 'start') await this.send(Cmd.SENTRY_MODE_START, { type }, 'start sentry mode', { confirm: () => !!this.state.sentry && this.state.sentry.state !== 'idle' });
+    else await this.send(Cmd.SENTRY_MODE_STOP, {}, 'stop sentry mode', { confirm: () => !this.state.sentry || this.state.sentry.state === 'idle' });
   }
 
   /** Escape hatch: send any command with an explicit proto type. */

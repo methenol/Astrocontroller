@@ -29,7 +29,7 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 - Start: `live_stacking action=start exposure=15 gain=60 filter=Duo-Band frames=999` (frames 999 = until stopped).
 
 ## 5. Monitor: follow **session-qc**
-- After the first cohort (12 subs; 20 at 60 s) take the baseline with `analyze_subs`, then keep checking it (`stacking_status`, `analyze_subs`) while doing the other night work (sky checks for the next target, hourly forecast). There is no wait tool.
+- After the first cohort (12 subs; 20 at 60 s) take the baseline with `analyze_subs`, then check it on every duty sample (`stacking_status`, `analyze_subs`) along with the other night work (sky checks for the next target, hourly forecast). Between samples end your turn; the duty loop wakes you.
 - Refocus on sustained HFR growth or ≥ 5 °C cooling. EQ-60 → EQ-30 on trailing. Pause for clouds without touching settings.
 - Stop if: target below ~25° altitude, dawn within 20 min, battery < 10%, SD < 2 GB, or the stack stops growing.
 - With a multi-target plan, check the time against the plan at every check, and move on when a target's slot ends (or its altitude window closes), not only when something goes wrong.

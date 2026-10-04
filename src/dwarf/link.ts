@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import { encodePacket, decodePacket, MessageType } from '@alikh/dwarflab-sdk';
 import { requestType, responseType, decodeWith, decodeNotification, errorText, type ProtoType } from './protocol.js';
 import { logger, errMsg } from '../log.js';
+import { assertLinked } from './gate.js';
 
 const log = logger('link');
 
@@ -21,7 +22,7 @@ export interface RequestOptions {
   reqType?: ProtoType;
   /** Override the response message type. */
   resType?: ProtoType;
-  /** ms to wait for the reply (default 10s). */
+  /** ms to wait for the reply (default 15 s). */
   timeout?: number;
   /** Resolve with the payload even if code < 0 (default false → throw). */
   allowError?: boolean;
@@ -81,11 +82,15 @@ export class DwarfLink extends EventEmitter {
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.teardown(new Error('link stopped'));
   }
 
   /** Force a fresh connection (used by the reconnect tool). */
   reconnect(): void {
+    assertLinked();
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.teardown(new Error('reconnecting'));
     this.backoff = 1000;
     this.open();
@@ -219,6 +224,7 @@ export class DwarfLink extends EventEmitter {
 
   /** Send a command and wait for its reply. */
   async request(cmd: number, params: Record<string, unknown> = {}, opts: RequestOptions = {}): Promise<Record<string, unknown> | null> {
+    assertLinked();
     if (!this.connected) await this.waitConnected(opts.timeout ? Math.min(opts.timeout, 10000) : 10000);
     const ws = this.ws;
     if (!ws) throw new Error('telescope not connected');
@@ -230,7 +236,8 @@ export class DwarfLink extends EventEmitter {
       throw new Error(`no request type registered for command ${cmd}; pass reqType`);
     }
     const packet = encodePacket(cmd, MessageType.REQUEST, payload, this.clientId, 1);
-    const timeout = opts.timeout ?? 10000;
+    // Generous by default: the scope's Wi-Fi spikes past 200 ms and busy firmware answers late.
+    const timeout = opts.timeout ?? 15000;
     return new Promise((resolve, reject) => {
       const entry: Pending = {
         resolve,

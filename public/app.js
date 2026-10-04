@@ -76,6 +76,7 @@ function handle(m) {
       (m.jobs ?? []).forEach((j) => state.jobs.set(j.id, j));
       renderTelescope(m.telescope);
       renderAgentStatus(m.agent);
+      renderDuty(m.duty);
       renderChat();
       renderJobs();
       (m.processing ?? []).forEach((i) => state.proc.set(i.id, i));
@@ -88,6 +89,9 @@ function handle(m) {
       break;
     case 'agentStatus':
       renderAgentStatus(m.status);
+      break;
+    case 'duty':
+      renderDuty(m.duty);
       break;
     case 'agent':
       onAgentEvent(m.event);
@@ -128,7 +132,11 @@ function setConn(ok, text) {
 function renderTelescope(t) {
   if (!t) return;
   state.telescope = t;
-  setConn(t.connected, t.connected ? (t.device?.name ?? 'connected') : 'telescope offline');
+  setConn(t.connected, t.connected ? (t.device?.name ?? 'connected') : t.released ? 'released' : 'telescope offline');
+  const lb = $('#btn-link');
+  lb.textContent = t.released ? 'Connect' : 'Disconnect';
+  lb.classList.toggle('primary', !!t.released);
+  lb.classList.toggle('ghost', !t.released);
   $('#chip-battery').textContent = `🔋 ${t.battery ?? '–'}%${t.charging ? ' ⚡' : ''}`;
   $('#chip-temp').textContent = `🌡 ${t.temperatureC ?? '–'}° / ${t.cmosTempC?.tele ?? '–'}°`;
   $('#chip-mode').textContent = t.shootingMode?.name ?? 'mode –';
@@ -386,6 +394,82 @@ $$('[data-act]').forEach((b) =>
     }
   }),
 );
+$$('[data-power]').forEach((b) =>
+  b.addEventListener('click', async () => {
+    const act = b.dataset.power;
+    const busy = state.telescope?.stacking?.tele?.state === 'running' ? ' Live stacking is running and will be interrupted.' : '';
+    if (!confirm(act === 'reboot' ? `Reboot the telescope?${busy} It reconnects in about a minute; the motors then need homing.` : `Shut the telescope down?${busy}`)) return;
+    b.disabled = true;
+    try {
+      await control({ action: act }, act === 'reboot' ? 'Reboot' : 'Shut down');
+    } finally {
+      b.disabled = false;
+    }
+  }),
+);
+$('#btn-link').onclick = async () => {
+  const released = !!state.telescope?.released;
+  if (!released) {
+    const running = [...state.jobs.values()].filter((j) => j.status === 'running' || j.status === 'queued').length;
+    if (!confirm(`Release the telescope? Astrocontroller closes every connection to it (control, video, transfers) until you press Connect.${running ? ` ${running} transfer(s) will be cancelled (run them again later; copied files are skipped).` : ''}`)) return;
+  }
+  try {
+    const r = await api('link', { connect: released });
+    toast(released ? 'Connecting…' : `Telescope released${r.cancelledTransfers ? `, ${r.cancelledTransfers} transfer(s) cancelled` : ''}`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+
+// ---- duty loop
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function renderDuty(d) {
+  if (!d) return;
+  state.duty = d;
+  const bar = $('#duty-bar');
+  bar.className = `duty-bar ${d.status}`;
+  $('#duty-state').textContent = d.status === 'active' ? 'On duty' : d.status === 'paused' ? 'Duty paused' : 'Duty off';
+  const parts = [];
+  if (d.status !== 'off') {
+    if (d.untilLabel) parts.push(`until ${d.untilLabel}`);
+    if (d.status === 'active') parts.push(d.nextWakeAt ? `next sample ${clock(d.nextWakeAt)}` : 'next sample after this turn');
+    if (d.status === 'paused' && d.pausedReason) parts.push(d.pausedReason);
+    parts.push(`${d.wakes} wake${d.wakes === 1 ? '' : 's'}`);
+  } else if (d.endedReason) parts.push(`last: ${d.endedReason}`);
+  if (d.pendingEvents) parts.push(`${d.pendingEvents} event(s) waiting`);
+  if (d.heldByStop) parts.push('automatic wakes held until you write to the agent');
+  $('#duty-text').textContent = parts.join(' · ');
+  bar.title = d.objective ? `Objective: ${d.objective}` : '';
+  $('#btn-duty').textContent = d.status === 'off' ? 'Start duty…' : 'Stop duty';
+  $('#btn-duty-pause').hidden = d.status === 'off';
+  $('#btn-duty-pause').textContent = d.status === 'paused' ? 'Resume' : 'Pause';
+  $('#btn-duty-wake').hidden = d.status !== 'active';
+}
+const dutyApi = (body) => api('duty', body).then(renderDuty).catch((e) => toast(e.message, true));
+$('#btn-duty').onclick = () => {
+  if (state.duty?.status && state.duty.status !== 'off') {
+    if (confirm(`Stop the duty?\n\n${state.duty.objective ?? ''}`)) dutyApi({ action: 'stop' });
+    return;
+  }
+  $('#duty-form').hidden = !$('#duty-form').hidden;
+  if (!$('#duty-form').hidden) $('#duty-objective').focus();
+};
+$('#btn-duty-pause').onclick = () => dutyApi({ action: state.duty?.status === 'paused' ? 'resume' : 'pause' });
+$('#btn-duty-wake').onclick = () => dutyApi({ action: 'wake' });
+$('#duty-cancel').onclick = () => ($('#duty-form').hidden = true);
+$('#duty-until').onchange = () => ($('#duty-time').hidden = $('#duty-until').value !== 'time');
+$('#duty-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const sel = $('#duty-until').value;
+  const until = sel === 'time' ? $('#duty-time').value : sel;
+  if (sel === 'time' && !until) return toast('pick an end time', true);
+  const objective = $('#duty-objective').value.trim();
+  if (!objective) return toast('write the objective', true);
+  await dutyApi({ action: 'start', objective, until, intervalS: Math.round(Number($('#duty-interval').value || 5) * 60) });
+  $('#duty-form').hidden = true;
+  $('#duty-objective').value = '';
+};
+
 // ---- capture
 async function capture(btn, body, label) {
   btn.disabled = true;
@@ -620,7 +704,14 @@ function entryEl(e) {
 function renderEntry(e) {
   if (e.kind === 'assistant') return renderAssistant(e);
   const el = entryEl(e);
-  if (e.kind === 'user') {
+  if (e.kind === 'user' && /^\[Astrocontroller /.test(e.text)) {
+    // a wake from the duty loop or an event: not something the user typed
+    const [head, ...rest] = e.text.split('\n');
+    const open = el.querySelector('details')?.open ?? false;
+    el.className = 'msg auto';
+    el.title = fmtClock(e.at);
+    el.innerHTML = `<details${open ? ' open' : ''}><summary>${esc(head.replace(/^\[|\]$/g, ''))} · ${fmtClock(e.at)}</summary><pre>${esc(rest.join('\n').trim())}</pre></details>`;
+  } else if (e.kind === 'user') {
     el.className = 'msg user';
     el.title = fmtClock(e.at);
     el.textContent = e.text + (e.images ? `  📎×${e.images}` : '');

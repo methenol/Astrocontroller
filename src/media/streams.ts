@@ -545,8 +545,20 @@ export class StackSource extends Source {
     void this.connect();
   }
 
+  /** Whether the telescope may be contacted now (set by the hub: linked and connected). */
+  allowed: () => boolean = () => true;
+
+  /** Drop the current connection; the loop reconnects when allowed. */
+  interrupt(): void {
+    this.abort?.abort();
+  }
+
   private async connect(): Promise<void> {
     if (!this.running) return;
+    if (!this.allowed()) {
+      this.retry = setTimeout(() => void this.connect(), 3000);
+      return;
+    }
     const ac = new AbortController();
     this.abort = ac;
     try {
@@ -557,7 +569,8 @@ export class StackSource extends Source {
     } catch (err) {
       if (!ac.signal.aborted) log.debug(`stack stream: ${errMsg(err)}`);
     }
-    if (this.running && !ac.signal.aborted) this.retry = setTimeout(() => void this.connect(), 3000);
+    // one loop only: a stop + restart meanwhile started a new one with its own controller
+    if (this.running && this.abort === ac) this.retry = setTimeout(() => void this.connect(), 3000);
   }
 
   protected stopSource(): void {
@@ -581,6 +594,7 @@ export class StreamHub {
     // In DSO/astro modes the telescope serves the tele preview on :8092 instead of RTSP.
     this.tele.fallback = this.stack;
     this.tele.noRtspModes.add(2); // DSO: verified, tele RTSP not served (opening it hangs the session)
+    this.stack.allowed = () => dwarf.state.connected && !dwarf.state.released;
     // The link coming back: reconnect right away.
     let wasConnected = dwarf.state.connected;
     dwarf.on('state', () => {
@@ -616,6 +630,14 @@ export class StreamHub {
 
   status() {
     return { tele: this.tele.status(), wide: this.wide.status(), stack: this.stack.status() };
+  }
+
+  /**
+   * The user released the telescope (Disconnect): drop the stack preview now. The camera readers
+   * close themselves within a second (their supervisor sees the link down) and stay closed.
+   */
+  release(): void {
+    this.stack.interrupt();
   }
 
   /** Close all readers cleanly (ffmpeg sends RTSP TEARDOWN) before the process exits. */

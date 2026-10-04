@@ -9,6 +9,7 @@ import { mountMcp } from './mcp/server.js';
 import { mountWeb } from './web/server.js';
 import { AgentBridge } from './agent/omp.js';
 import { watchCharging } from './agent/charge-watch.js';
+import { DutyLoop } from './agent/duty.js';
 import { catalog } from './astro/catalog.js';
 import { startProcessing, stopProcessing } from './processing/queue.js';
 
@@ -24,11 +25,12 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '60mb' }));
 
-mountMcp(app, { dwarf, hub });
+const agent = new AgentBridge();
+const duty = new DutyLoop(dwarf, agent);
+mountMcp(app, { dwarf, hub, duty });
 
 const server = http.createServer(app);
-const agent = new AgentBridge();
-mountWeb(app, server, { dwarf, hub, agent });
+mountWeb(app, server, { dwarf, hub, agent, duty });
 
 server.listen(config.web.port, () => {
   log.info(`Astrocontroller on http://0.0.0.0:${config.web.port}  (MCP at /mcp, telescope ${config.dwarf.host})`);

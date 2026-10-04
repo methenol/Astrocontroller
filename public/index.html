@@ -22,6 +22,7 @@
       <span class="chip" id="chip-wx" title="Weather now / tonight">☁ –</span>
     </div>
     <div class="top-actions">
+      <button class="ghost" id="btn-link" title="Release the telescope (closes every connection to it, e.g. to use the DWARFLAB app) or take it back">Disconnect</button>
       <button class="ghost" id="btn-night" title="Red night-vision mode">Night</button>
     </div>
   </header>
@@ -103,6 +104,11 @@
             <button data-act="sync" title="Push time & location">Sync time/loc</button>
             <button data-act="liveview" title="Wake RTSP previews">Wake view</button>
           </div>
+          <div class="ctl-row">
+            <strong class="row-label">Power</strong>
+            <button class="warn" data-power="reboot" title="Reboot the telescope (fixes a hung camera service); it reconnects in about a minute">Reboot</button>
+            <button class="warn" data-power="shutdown" title="Shut the telescope down">Shut down</button>
+          </div>
         </div>
       </div>
 
@@ -132,6 +138,25 @@
           <button class="ghost" id="btn-compact" title="Summarise older history to free context space">Compact</button>
           <button class="ghost" id="btn-new" title="Start a new conversation">New</button>
         </div>
+        <div class="duty-bar" id="duty-bar">
+          <span class="duty-state" id="duty-state">Duty off</span>
+          <span class="duty-text" id="duty-text"></span>
+          <span class="spacer"></span>
+          <button type="button" class="ghost" id="btn-duty-wake" hidden title="Send the next sample now">Wake now</button>
+          <button type="button" class="ghost" id="btn-duty-pause" hidden>Pause</button>
+          <button type="button" class="ghost" id="btn-duty" title="Put the agent on duty: it is woken with fresh measurements every few minutes and on events until the end time">Start duty…</button>
+        </div>
+        <form class="duty-form" id="duty-form" hidden>
+          <textarea id="duty-objective" rows="2" placeholder="Objective, in your words: e.g. Image M 42 until dawn, then transfer and process it"></textarea>
+          <div class="duty-form-row">
+            <label>until <select id="duty-until"><option value="dawn">astronomical dawn</option><option value="time">a time…</option><option value="none">no end time</option></select></label>
+            <input type="time" id="duty-time" hidden>
+            <label>sample every <input type="number" id="duty-interval" min="1" max="15" value="5"> min</label>
+            <span class="spacer"></span>
+            <button type="button" class="ghost" id="duty-cancel">Cancel</button>
+            <button type="submit" class="primary">Start</button>
+          </div>
+        </form>
         <details class="todo-card" id="todo-card" hidden><summary id="todo-summary">Plan</summary><div id="todo-list"></div></details>
         <div class="chat-wrap">
           <div class="chat" id="chat">

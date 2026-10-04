@@ -18,12 +18,14 @@ import * as library from '../library/transfer.js';
 import { listDir } from '../dwarf/ftp.js';
 import * as processing from '../processing/queue.js';
 import * as studio from '../processing/studio.js';
+import type { DutyLoop } from '../agent/duty.js';
 
 const log = logger('mcp');
 
 export interface ToolContext {
   dwarf: Dwarf;
   hub: StreamHub;
+  duty?: DutyLoop;
 }
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
@@ -100,7 +102,7 @@ function wrap<A>(name: string, fn: (args: A) => Promise<Result>) {
 }
 
 export function registerTools(server: McpServer, ctx: ToolContext): void {
-  const { dwarf, hub } = ctx;
+  const { dwarf, hub, duty } = ctx;
   const site = () => {
     const l = dwarf.requireLocation();
     return { lat: l.lat, lon: l.lon, elev: l.elev };
@@ -146,7 +148,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     return text({ ...info, firmware: fw?.version, shootingModes: modes.map((m) => ({ id: m.id, name: m.name, parent: m.parentId, techniques: m.shootingTechnology.map((t) => http.SHOOTING_TECH_NAMES[t.id] ?? t.id) })) });
   });
 
-  tool('telescope_reconnect', 'Drop and re-open the control connection. Use if commands time out. Note: the official DWARFLAB app must be closed or it takes over the session.', {}, async () => {
+  tool('telescope_reconnect', 'Drop and re-open the control connection. Use if commands time out. Note: the official DWARFLAB app must be closed or it takes over the session. Does nothing while the user has released the telescope (Disconnect in the web UI).', {}, async () => {
     dwarf.link.reconnect();
     await dwarf.link.waitConnected(15000);
     return text('reconnected');
@@ -259,18 +261,18 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   );
 
   // ------------------------------------------------------------------ motion
-  tool('motors_home', 'Home (reset) both motor axes against their limit switches. Required after power-on before any motion (error -14520 means "home first"). Takes up to ~1 minute; the scope ends pointing down.', {}, async () => text(await dwarf.homeMotors()));
+  tool('motors_home', 'Home (reset) both motor axes against their reference switches. Needed after power-on (error -14520 means "no reference"); move_motors also does it by itself when needed. Returns when the telescope reports both axes homed (usually under a minute; from a far starting position it continues past the firmware\'s own time limit, up to several minutes). The scope ends pointing down.', {}, async () => text(await dwarf.homeMotors()));
 
   tool('motor_position', 'Read the rotation (azimuth axis) and pitch (altitude axis) motor angles.', {}, async () => text(await dwarf.readMotorPositions()));
 
   tool(
     'move_motors',
-    'Move the motors. Absolute: pitch ~2.5 parked/down, ~90 level (Alt-Az: altitude ≈ pitch − 90, so 135 ≈ 45° up); rotation ~159 after homing is the centre of travel. relative=true moves BY the given degrees instead. Directions (verified): rotation DEcreasing pans the view RIGHT; pitch increasing tilts UP. To centre a subject at pixel offset (dx right, dy down) from frame centre: rotation_deg = −dx·scale, pitch_deg = −dy·scale, with scale ≈ 0.0235°/px (wide) or 0.0015°/px (tele) for a 1920-px-wide frame (scale by 1920/width for smaller frames). speed 0.1-30 °/s (default 10). Waits until the motion completes.',
+    'Move the motors. Returns when the telescope reports the move finished. If the motors have no reference (after power-on, while tracking after a GoTo, or after a failed astro routine), it stops tracking and homes them first by itself. Absolute: pitch ~2.5 parked/down, ~90 level (Alt-Az: altitude ≈ pitch − 90, so 135 ≈ 45° up); rotation ~159 after homing is the centre of travel. relative=true moves BY the given degrees instead. Directions (verified): rotation DEcreasing pans the view RIGHT; pitch increasing tilts UP. To centre a subject at pixel offset (dx right, dy down) from frame centre: rotation_deg = −dx·scale, pitch_deg = −dy·scale, with scale ≈ 0.0235°/px (wide) or 0.0015°/px (tele) for a 1920-px-wide frame (scale by 1920/width for smaller frames). speed 0.1-30 °/s (default 10). Waits until the motion completes.',
     { rotation_deg: z.number().optional(), pitch_deg: z.number().optional(), relative: z.boolean().optional(), speed: z.number().optional() },
     async ({ rotation_deg, pitch_deg, relative, speed }) => {
       if (relative) {
         const p = await dwarf.readMotorPositions();
-        if (!p.homed || p.rotationDeg === undefined || p.pitchDeg === undefined) throw new Error('motors are not homed; run motors_home first');
+        if (!p.homed || p.rotationDeg === undefined || p.pitchDeg === undefined) throw new Error('the motors report no position (no reference: while tracking, after power-on or a failed astro routine), so a relative move cannot be computed. Give an absolute move instead (it homes first by itself), or call motors_home. Nothing was moved.');
         for (const [axis, d] of [['rotation_deg', rotation_deg], ['pitch_deg', pitch_deg]] as const) {
           if (d !== undefined && Math.abs(d) > 60) throw new Error(`relative ${axis}=${d}° is too large for a relative nudge (max ±60°). Did you mean an absolute move? Call again without relative. Nothing was moved.`);
         }
@@ -308,7 +310,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // ------------------------------------------------------------------ focus
   tool(
     'autofocus',
-    'Run autofocus. normal = contrast AF for daytime/Moon/planets at a point (x,y in 1920×1080 tele frame, default centre). astro = star-based AF for deep sky (needs stars in view, takes ~1-2 min).',
+    'Run autofocus. normal = contrast AF for daytime/Moon/planets at a point (x,y in 1920×1080 tele frame, default centre). astro = star-based AF for deep sky (needs stars in view, takes ~1-3 min). Returns when the telescope reports AF finished, and says so plainly if it never did.',
     { mode: z.enum(['normal', 'astro']), x: z.number().optional(), y: z.number().optional() },
     async ({ mode, x, y }) => text(await dwarf.autofocus(mode, x, y)),
   );
@@ -503,14 +505,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // ------------------------------------------------------------------ astro operations
   tool(
     'calibrate',
-    'Astro calibration (plate-solve the sky to learn pointing). Needs a clear sky, synced time/location, DSO mode, and motors homed. Takes ~1-3 minutes. Required before goto_target unless one_click is used.',
+    'Astro calibration (plate-solve the sky to learn pointing). Needs a clear sky, synced time/location, DSO mode, and motors homed. Takes ~1-3 minutes and returns when the telescope reports the result (or that plate-solving failed). Required before goto_target unless one_click is used.',
     {},
     async () => text(await dwarf.withPointingRecovery('calibration', () => dwarf.calibrate())),
   );
 
   tool(
     'goto_target',
-    'Slew to and track a target. Give a name (catalog object or planet/Moon/Sun) or ra_hours+dec_deg (J2000). one_click (default true) = calibrate + GoTo in one step. Waits for arrival (can take several minutes). NEVER point at the Sun without a solar filter.',
+    'Slew to and track a target. Give a name (catalog object or planet/Moon/Sun) or ra_hours+dec_deg (J2000). one_click (default true) = calibrate + GoTo in one step. Returns when the telescope reports it is tracking the target (usually 1-3 minutes, at most 10), or with the telescope\'s error code. NEVER point at the Sun without a solar filter.',
     {
       name: z.string().optional(),
       ra_hours: z.number().min(0).max(24).optional(),
@@ -553,7 +555,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'live_stacking',
-    'Start or stop deep-sky live stacking (in DSO mode, after GoTo). On start you may set exposure (s), gain, filter (VIS/Astro/Duo-Band) and frame count first. Raw FITS subframes are saved on the SD card. Stop normally lets the final stack finish; fast_stop skips final processing.',
+    'Start or stop deep-sky live stacking (in DSO mode, after GoTo). On start you may set exposure (s), gain, filter (VIS/Astro/Duo-Band) and frame count first. Raw FITS subframes are saved on the SD card. Start returns once the telescope reports stacking; stop once it reports it stopped (normal stop lets the final stack finish; fast_stop skips it). If the scope ends a stack by itself (frame count reached), Astrocontroller tells you with an event.',
     {
       action: z.enum(['start', 'stop']),
       camera: camera.optional(),
@@ -581,6 +583,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         if (filterIndex < 0) filterIndex = undefined;
       }
       if (a.frames !== undefined) applied.push(await dwarf.setSetting(cam, cam === 'wide' ? 'stackCount_wide' : 'stackCount', a.frames));
+      dwarf.stackControl[cam] = { startedBy: 'agent' };
       const r = await dwarf.startStacking(cam, { filterIndex, force: a.force });
       return text(`${applied.join('\n')}\n${r}`.trim());
     },
@@ -773,8 +776,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       pool: z.boolean().optional().describe(`process this session pooled with every earlier library session of the same target, as one multi-night image (default ${config.studio.poolSessions})`),
     },
     async ({ session, include_subframes, include_calibration, process, profile, pool }) => {
-      const job = await library.transferSession(session, { includeSubframes: include_subframes !== false, includeCalibration: include_calibration !== false, process, profile, pool });
-      return text(job);
+      const job = await library.transferSession(session, { includeSubframes: include_subframes !== false, includeCalibration: include_calibration !== false, process, profile, pool, origin: 'agent' });
+      return text({ ...job, note: 'Runs in the background; Astrocontroller tells you with an event when it ends (done, partial or failed), and again when its processing finishes. No need to poll.' });
     },
   );
 
@@ -889,7 +892,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'dark_frames',
-    'Dark-frame library (tele camera). An ND session: the operator fits the magnetic ND filter over the lenses (they tilt the scope by hand) -> nd_fitted (locks every motion and light capture: moving or parking would knock the filter off) -> capture each master (runs in the background, ~frames x exposure + 1 min; follow with status) -> the operator removes the filter -> nd_removed. Actions: list (masters on the scope, firmware codes, sensor temperature), nd_fitted, capture, status, stop, nd_removed. NEVER move, park or home the scope during an ND session.',
+    'Dark-frame library (tele camera). An ND session: the operator fits the magnetic ND filter over the lenses (they tilt the scope by hand) -> nd_fitted (locks every motion and light capture: moving or parking would knock the filter off) -> capture each master (runs in the background, ~frames x exposure + 1 min; you get an event when it is saved) -> the operator removes the filter -> nd_removed. Actions: list (masters on the scope, firmware codes, sensor temperature), nd_fitted, capture, status, stop, nd_removed. NEVER move, park or home the scope during an ND session.',
     {
       action: z.enum(['list', 'nd_fitted', 'capture', 'status', 'stop', 'nd_removed']),
       exposure_s: z.number().positive().optional(),
@@ -948,11 +951,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       const n = frames ?? 20;
       await dwarf.ensureMode('DSO');
       await dwarf.captureDarks({ expIndex: expHit.expIndex, gainIndex: gainHit.gainIndex, binIndex: expHit.binIndex, frames: n, exposureS: exposure_s, gain });
-      return text(`dark capture running in the background: ${exposure_s} s, gain ${gain}, ${expHit.bin || 'bin1'}, ${n} frames, ≈${Math.ceil((n * exposure_s) / 60) + 1} min, sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. The telescope never acknowledges this command; the controller detects the finished master when it appears in CALI_FRAME. Follow with dark_frames action=status (wait between checks) until it is done, then start the next master. The scope must not move until the operator has removed the ND filter.`);
+      return text(`dark capture running in the background: ${exposure_s} s, gain ${gain}, ${expHit.bin || 'bin1'}, ${n} frames, ≈${Math.ceil((n * exposure_s) / 60) + 1} min, sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. The telescope never acknowledges this command; Astrocontroller detects the finished master when it appears in CALI_FRAME and wakes you with an event (dark master saved, or why it failed). End your turn now; on that event start the next master. The scope must not move until the operator has removed the ND filter.`);
     },
   );
 
-  tool('transfer_files', 'Copy specific album files (photos, videos, stacked images) from the telescope into the library.', { paths: z.array(z.string()).min(1) }, async ({ paths }) => text(library.transferFiles(paths)));
+  tool('transfer_files', 'Copy specific album files (photos, videos, stacked images) from the telescope into the library. Runs in the background; you get an event when it ends.', { paths: z.array(z.string()).min(1) }, async ({ paths }) => text(library.transferFiles(paths, 'agent')));
 
   tool(
     'jobs',
@@ -969,10 +972,42 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     text({ root: config.paths.library, targets: library.listLibrary() }),
   );
 
+  // ------------------------------------------------------------------ duty (closed-loop control)
+  tool(
+    'duty',
+    'Your duty loop: while on duty, Astrocontroller wakes you with the objective and fresh measurements every few minutes and on events, so ending your turn never ends the work. start: when the user gives you an objective to carry out unattended (a night of imaging, a dark library, transfers to see through), start a duty with the user\'s instruction as the objective, word for word, and an end time (until: "dawn" for night imaging unless the user said otherwise, "HH:MM", or "none"). next_check: choose when the next sample comes (in_s 30-900) when the default does not fit, e.g. 60 s while sweeping for clear sky, 600 s while a long stack runs fine; this replaces waiting. status: the duty as it stands. complete: only when the objective is fully done; refused before the end time. Only the user can stop or pause a duty.',
+    {
+      action: z.enum(['start', 'status', 'next_check', 'complete']),
+      objective: z.string().optional().describe("start: the user's instruction, verbatim"),
+      until: z.string().optional().describe('start: "dawn" | "HH:MM" (local) | "none"'),
+      interval_s: z.number().optional().describe('start: default time between samples (30-900, default from .env)'),
+      in_s: z.number().optional().describe('next_check: seconds until the next sample (30-900)'),
+      reason: z.string().optional().describe('next_check: why this time'),
+      report: z.string().optional().describe('complete: what was achieved, from tool results'),
+    },
+    async ({ action, objective, until, interval_s, in_s, reason, report }) => {
+      if (!duty) throw new Error('the duty loop is not available in this process');
+      if (action === 'status') return text(duty.status());
+      if (action === 'start') {
+        if (!objective) throw new Error("objective is required: the user's instruction, verbatim");
+        const st = duty.start({ objective, until, intervalS: interval_s, by: 'agent' });
+        return text({ ...st, note: 'On duty. Carry on now; whenever your turn ends you will be woken for the next sample or on an event.' });
+      }
+      if (action === 'next_check') {
+        if (in_s === undefined) throw new Error('in_s is required');
+        const r = duty.nextCheck(in_s, reason);
+        return text(`next sample in ${r.inS} s (${r.at}) after this turn ends, or sooner on an event. End your turn when you are done with this one.`);
+      }
+      if (!report) throw new Error('report is required: what was achieved, from tool results');
+      duty.complete(report);
+      return text('duty completed');
+    },
+  );
+
   // ------------------------------------------------------------------ system
   tool(
     'power',
-    'Power & lights: reboot, shutdown (ask the user first), rgb_on/rgb_off (ring light — turn off for astro), indicator_on/indicator_off.',
+    'Power & lights: reboot, shutdown (ask the user first), rgb_on/rgb_off (ring light — turn off for astro), indicator_on/indicator_off. After a reboot the connection drops and comes back by itself in about a minute (you get events when on duty); then motors_home and sync_time_and_location.',
     { action: z.enum(['reboot', 'shutdown', 'rgb_on', 'rgb_off', 'indicator_on', 'indicator_off']) },
     async ({ action }) => {
       await dwarf.power(action);

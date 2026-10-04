@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { Client, FileType } from 'basic-ftp';
 import { config } from '../config.js';
+import { assertLinked } from './gate.js';
 
 export interface FtpEntry {
   name: string;
@@ -24,6 +25,7 @@ export function toFtpPath(devicePath: string): string {
 }
 
 async function withClient<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+  assertLinked();
   const client = new Client(30000);
   try {
     await client.access({ host: config.dwarf.host, user: 'anonymous', password: 'astrocontroller@', secure: false });
@@ -77,6 +79,7 @@ function localSize(file: string): number {
 }
 
 async function openClient(): Promise<Client> {
+  assertLinked();
   const client = new Client(30000);
   await client.access({ host: config.dwarf.host, user: 'anonymous', password: 'astrocontroller@', secure: false });
   return client;

@@ -31,6 +31,8 @@ export interface Job {
   error?: string;
   startedAt: number;
   finishedAt?: number;
+  /** who asked for it: the agent is told when its own jobs end */
+  origin?: 'agent' | 'ui';
 }
 
 export const jobBus = new EventEmitter();
@@ -57,9 +59,16 @@ export function cancelJob(id: string): boolean {
   return true;
 }
 
-function startJob(kind: string, description: string, run: (job: Job, signal: AbortSignal) => Promise<unknown>): Job {
+/** Cancel every queued or running job (the user released the telescope). */
+export function cancelActiveJobs(): number {
+  let n = 0;
+  for (const j of jobs.values()) if (cancelJob(j.id)) n++;
+  return n;
+}
+
+function startJob(kind: string, description: string, run: (job: Job, signal: AbortSignal) => Promise<unknown>, origin?: Job['origin']): Job {
   const id = `job_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  const job: Job & { abort: AbortController } = { id, kind, description, status: 'queued', startedAt: Date.now(), abort: new AbortController() };
+  const job: Job & { abort: AbortController } = { id, kind, description, status: 'queued', startedAt: Date.now(), origin, abort: new AbortController() };
   jobs.set(id, job);
   jobBus.emit('job', getJob(id));
   // FTP on the telescope is single-threaded in practice: run jobs one at a time.
@@ -154,7 +163,7 @@ export function librarySessionsFor(target: string, camera?: 'tele' | 'wide'): st
     .map((s) => s.folder);
 }
 
-export function transferSession(folderOrLatest: string, opts: { includeCalibration: boolean; includeSubframes: boolean; process?: boolean; profile?: string; pool?: boolean }): Promise<Job> {
+export function transferSession(folderOrLatest: string, opts: { includeCalibration: boolean; includeSubframes: boolean; process?: boolean; profile?: string; pool?: boolean; origin?: Job['origin'] }): Promise<Job> {
   return (async () => {
     let session: DeviceSession | null;
     if (folderOrLatest === 'latest') {
@@ -206,15 +215,15 @@ export function transferSession(folderOrLatest: string, opts: { includeCalibrati
       } else if (opts.includeSubframes && (opts.process ?? config.studio.autoProcess) && config.studio.url) {
         // pool: this night together with every earlier session of the target in the library
         const sessions = opts.pool ?? config.studio.poolSessions ? librarySessionsFor(s.target, s.camera) : [s.folder];
-        processing = enqueueProcessing({ sessions: sessions.includes(s.folder) ? sessions : [...sessions, s.folder], target: s.target, profile: opts.profile, origin: 'transfer' });
+        processing = enqueueProcessing({ sessions: sessions.includes(s.folder) ? sessions : [...sessions, s.folder], target: s.target, profile: opts.profile, origin: opts.origin === 'ui' ? 'ui-transfer' : 'transfer' });
       }
       return { destination: dest, ...res, processing };
-    });
+    }, opts.origin);
   })();
 }
 
 /** Copy individual album files (photos/videos/stacked images) into the library. */
-export function transferFiles(devicePaths: string[]): Job {
+export function transferFiles(devicePaths: string[], origin?: Job['origin']): Job {
   return startJob('transfer_files', `transfer ${devicePaths.length} file(s)`, async (job, signal) => {
     const out: string[] = [];
     for (const [i, p] of devicePaths.entries()) {
@@ -228,7 +237,7 @@ export function transferFiles(devicePaths: string[]): Job {
       jobBus.emit('job', getJob(job.id));
     }
     return { files: out };
-  });
+  }, origin);
 }
 
 /** Summary of what's in the library: sessions (DWARF_RAW_… folders) grouped by target. */

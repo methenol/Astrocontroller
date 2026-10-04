@@ -102,14 +102,14 @@ export async function loadImage(source: string, hub: StreamHub, opts: { fullRes?
       if (opts.fullRes) return { jpeg: await cam.fullResFrame(), at: Date.now() };
       return cam.snapshot(maxAge, timeout);
     };
-    let frame = await grab(Math.max(0, Math.min(3000, Date.now() - settleUntil)), 20000);
+    let frame = await grab(Math.max(0, Math.min(3000, Date.now() - settleUntil)), 30000);
     // The live stream occasionally carries flat grey placeholder frames; wait for a real one.
     for (let i = 0; i < 4 && (await isFlatJpeg(frame.jpeg)); i++) frame = await grab(0, 10000);
     const img = await decode(frame.jpeg, source);
     img.capturedAt = frame.at;
     return { img, encoded: frame.jpeg };
   } else if (source === 'stack') {
-    const f = await hub.stack.snapshot(15000, 20000);
+    const f = await hub.stack.snapshot(15000, 30000);
     const img = await decode(f.jpeg, source);
     img.capturedAt = f.at;
     return { img, encoded: f.jpeg };

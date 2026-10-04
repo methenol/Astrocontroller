@@ -109,6 +109,8 @@ export const config = {
     enabled: bool('AGENT_ENABLED', true),
     /** Wake the agent to park, transfer and shut down when the telescope is plugged in to charge with sessions still on its SD card. */
     promptOnCharge: bool('PROMPT_TRANSFER_ON_CHARGE', false),
+    /** Duty loop: default time between automatic wakes while on duty (the agent can pick 30 s–15 min per wake). */
+    dutyIntervalS: num('DUTY_INTERVAL_S', 300),
     command: str('OMP_COMMAND', 'omp'),
     mcpUrl: str('MCP_URL', ''),
   },

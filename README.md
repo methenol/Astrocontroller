@@ -34,6 +34,7 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `LLM_CONTEXT_WINDOW` / `LLM_MAX_TOKENS` | Model limits. |
 | `LLM_THINKING_FORMAT` | Optional request shape for thinking (`qwen-chat-template`, `openai`, …). Leave empty for auto. |
 | `LLM_VISION` | Send camera and FITS images to the model (default `true`). |
+| `DUTY_INTERVAL_S` | Default time between duty samples (see "Duty loop"); the agent can choose 30 s–15 min per sample. Default `300`. |
 | `PROMPT_TRANSFER_ON_CHARGE` | When the scope is plugged in to charge with sessions still on its SD card, the agent is woken to park, transfer (processing queues itself) and shut the telescope down once the transfers are done. Never while imaging. Default `false`. |
 | `LIBRARY_PATH` | Host folder for your imagery library (mounted at `/library`). |
 | `WEB_PORT` | Host port for the UI and MCP endpoint. |
@@ -60,6 +61,20 @@ The Agent tab streams the agent's work as it happens:
   - **Enter** steers it: the message is delivered at its next step.
   - **Alt+Enter** queues a follow-up for when the turn ends. Queued messages show as chips you can remove.
   - **Esc** stops it, and **↑** in an empty box recalls your last message.
+- **Automatic messages** (duty samples and events) are shown folded and marked as automatic.
+
+### Duty loop
+
+An LLM turn ends when the model stops calling tools, and nothing happens after that until someone writes again. A **duty** keeps the agent working as a closed-loop controller without giving it a way to sleep:
+- Start one from the duty bar (objective, end time: astronomical dawn, a time, or none; sample interval), or the agent starts one with the `duty` tool when you give it an unattended objective.
+- Each time the agent's turn ends, the next **sample** is scheduled. At that time the agent is woken with the objective and fresh measurements (time to dawn, connection, battery, tracking, stacking progress, dark capture, transfers, processing, camera-service health).
+- **Events** wake it at once: a stack the scope ended itself, a dark master saved, a transfer or processing job finished, connection lost or back, low battery, charging, a hung camera service. Events about work the agent started reach it even without a duty.
+- The agent cannot complete a duty before its end time. You can pause, resume, stop or "wake now" from the duty bar, and pressing Stop on the agent pauses the duty.
+
+### Telescope controls
+
+- **Disconnect / Connect** (top bar) releases the telescope without stopping the container. It closes the control link, the video readers and the stack preview, cancels transfers, and refuses every command until you press Connect (e.g. to use the DWARFLAB app). It survives a restart.
+- **Reboot / Shut down** are in the Power row of the controls (with confirmation).
 
 ## Imagery library
 

@@ -5,6 +5,7 @@
  * so responses are parsed with large integers kept as strings.
  */
 import { config } from '../config.js';
+import { assertLinked } from './gate.js';
 
 const api = () => `http://${config.dwarf.host}:${config.dwarf.httpPort}`;
 
@@ -43,7 +44,8 @@ export function timeoutExplanation(): string {
   return `The telescope's HTTP API did not answer in time (${h.lastTimedOut ?? 'camera call'}). One timeout can be Wi-Fi; if the next camera call also times out, the camera service has hung (see telescope_status.health). This says nothing about the sky.`;
 }
 
-async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 8000): Promise<T> {
+async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 15000): Promise<T> {
+  assertLinked();
   let res: Response;
   let text: string;
   try {
@@ -238,6 +240,7 @@ export function fileUrl(devicePath: string): string {
 }
 
 export async function fetchFile(devicePath: string, timeoutMs = 60000): Promise<Buffer> {
+  assertLinked();
   const res = await fetch(fileUrl(devicePath), { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${devicePath}`);
   return Buffer.from(await res.arrayBuffer());

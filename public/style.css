@@ -267,3 +267,20 @@ details.thinking summary { font-style: italic; }
 .plan-table .sky.ok { color: var(--ok); }
 .plan-table .sky.warn { color: var(--warn); }
 .plan-table .sky.bad { color: var(--err); }
+
+/* duty loop */
+.duty-bar { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.duty-bar .duty-state { font-weight: 600; color: var(--muted); white-space: nowrap; }
+.duty-bar.active { border-color: var(--accent-2); }
+.duty-bar.active .duty-state { color: var(--accent); }
+.duty-bar.paused .duty-state { color: var(--warn); }
+.duty-text { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.duty-bar button { padding: 2px 8px; font-size: 12px; }
+.duty-form { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.duty-form textarea { width: 100%; resize: vertical; }
+.duty-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.duty-form-row input[type=number] { width: 4em; }
+/* automatic wakes from the duty loop / events */
+.msg.auto { font-size: 12px; color: var(--muted); border-left: 2px solid var(--accent-2); padding: 2px 8px; background: transparent; }
+.msg.auto summary { cursor: pointer; }
+.msg.auto pre { white-space: pre-wrap; margin: 4px 0 0; font: inherit; }

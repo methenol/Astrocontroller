@@ -7,7 +7,7 @@ import { logger, errMsg } from '../log.js';
 const log = logger('mcp');
 
 const INSTRUCTIONS = `Tools for a DWARFLAB Dwarf 3 smart telescope (two cameras: tele 150mm f/4.3 with VIS/Astro/Duo-Band filters, and wide 6.7mm).
-Start with telescope_status. Motors must be homed after power-on (motors_home). Long operations (calibrate, goto_target, polar_alignment, autofocus astro) block until finished.
+Start with telescope_status. Motors must be homed after power-on (motors_home). Long operations (calibrate, goto_target, polar_alignment, autofocus astro, motors_home, move_motors) block until the telescope reports them finished. Background work (dark masters, transfers, processing, a stack the scope ends itself) is reported to the agent by Astrocontroller as an event when it ends.
 Coordinates are J2000. Never point at the Sun without the user confirming a solar filter.`;
 
 export function mountMcp(app: Express, ctx: ToolContext): void {
