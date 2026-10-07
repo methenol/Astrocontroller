@@ -4,7 +4,7 @@ An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Doc
 
 - **An MCP server** with 50 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
-- **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs.
+- **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs. It is mobile-first: the same page is a thumb-driven single-screen app on a phone at the scope and a two-column desk layout on a laptop.
 
 The agent keeps playbooks ("skills") and site notes in its workspace and is told to refine them as it learns.
 
@@ -73,8 +73,21 @@ An LLM turn ends when the model stops calling tools, and nothing happens after t
 
 ### Telescope controls
 
-- **Disconnect / Connect** (top bar) releases the telescope without stopping the container. It closes the control link, the video readers and the stack preview, cancels transfers, and refuses every command until you press Connect (e.g. to use the DWARFLAB app). It survives a restart.
-- **Reboot / Shut down** are in the Power row of the controls (with confirmation).
+- **Disconnect / Connect** releases the telescope without stopping the container. It closes the control link, the video readers and the stack preview, cancels transfers, and refuses every command until you press Connect (e.g. to use the DWARFLAB app). It survives a restart. On a phone it is in the ⋯ menu; at desk widths it sits in the top bar.
+- **Reboot / Shut down** are in the System group of the controls (with confirmation). On a phone the whole System group is folded behind the ⋯ menu.
+
+## On a phone or tablet
+
+The UI is one page, one screen at a time, sized for gloves and dark skies. Nothing scrolls the page itself; each screen scrolls inside its own body, so the header, the capture bar and the tab bar never move.
+
+- **Bottom bar**: View · Agent · Tonight · Album · More. Library, Skills and Log live under **More** on a phone and become top-level tabs at desk widths. The screen you were on is remembered.
+- **View**: tap the main view to fill the screen (Fullscreen API where it exists, an in-page mode where it does not — iOS), pinch to zoom, drag to pan, double-tap to zoom to the point you tapped and again to reset, ✕ or Esc to leave. Tapping a small view swaps it into the main slot. Frames are only streamed for the views on screen, so leaving the View screen stops the video and frees the radio.
+- **Capture bar** is pinned under your thumb: camera, Photo, Burst, Record, Stack.
+- **Aim** is a 166 px round pad — press and hold anywhere in it, including the diagonals — with a speed slider and Home / Level / Park. Only Aim and Focus are open at phone widths; System is folded.
+- **Tonight** turns the target plan into cards below 760 px, with each target's best time, weather, framing and filter labelled.
+- **Night mode** (⋯ menu) puts a red multiply tint over everything, including the live images, and is remembered.
+- **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
+- **Installable**: Add to Home Screen gives a standalone app (manifest + icons, `display_override` falls back to minimal-ui where window controls overlay is not implemented). It honours the notch and home indicator safe areas. Home-screen install and fullscreen need a secure context — plain HTTP on the LAN works fine in a browser tab; put a reverse proxy or Tailscale Serve in front for HTTPS.
 
 ## Imagery library
 

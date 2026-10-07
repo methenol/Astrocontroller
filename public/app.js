@@ -57,6 +57,210 @@ const md = (text) => {
   return window.marked.parse(text, { breaks: true, gfm: true });
 };
 
+// ------------------------------------------------------------------ app shell
+//
+// A phone shows one screen at a time and the bottom bar drives it; at desk widths the live view
+// is always up-left and the section stack sits on the right. app.js's own tab handler keeps the
+// .active classes (and loads each screen's data), so this only mirrors that state onto the two
+// navs, <body data-screen>, the menus and the video subscription.
+const wideMq = window.matchMedia('(min-width: 1000px)');
+const viewOnScreen = () => wideMq.matches || $('#panel-view').classList.contains('active');
+const screenName = () => ($$('.panel').find((p) => p.classList.contains('active') && p.id !== 'panel-view') || { id: 'panel-view' }).id.slice(6);
+const storedScreen = () => {
+  try { return localStorage.getItem('screen'); } catch { return null; }
+};
+
+// Which .panel classes a tab tap should set. At desk widths the live view is a fixed column that
+// stays up whatever section is showing, and the View tab (bottom bar only) leaves the section alone.
+function applyTabSelection(name) {
+  const wide = wideMq.matches;
+  for (const p of $$('.panel')) {
+    if (p.id === 'panel-view') p.classList.toggle('active', name === 'view' || wide);
+    else if (!(name === 'view' && wide)) p.classList.toggle('active', p.id === `panel-${name}`);
+  }
+}
+
+function reflectScreen() {
+  const name = screenName();
+  document.body.dataset.screen = name;
+  const inMore = name === 'library' || name === 'skills' || name === 'log';
+  for (const t of $$('#tabbar .tab')) {
+    const on = t.dataset.tab === name || (t.id === 'btn-more' && inMore);
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', String(t.dataset.tab === name));
+  }
+  for (const t of $$('.tabs-top .tab')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
+  for (const t of $$('.sheet-item')) t.classList.toggle('active', t.dataset.tab === name);
+  if (name !== 'view') {
+    try { localStorage.setItem('screen', name); } catch {}
+  }
+  // A phone that is looking at something else should not keep the telescope streaming frames.
+  videoSubscribe();
+}
+
+// Programmatic screen change: clicking the tab is the one path that also loads its data.
+const showScreen = (name) => $(`.tab[data-tab="${name}"]`)?.click();
+
+function closeOverlays() {
+  $('#menu').classList.remove('open');
+  $('#btn-menu').setAttribute('aria-expanded', 'false');
+  $('#sheet-more').hidden = true;
+  $('#btn-more').setAttribute('aria-expanded', 'false');
+}
+
+$('#btn-menu').onclick = (e) => {
+  e.stopPropagation();
+  $('#sheet-more').hidden = true;
+  const open = $('#menu').classList.toggle('open');
+  $('#btn-menu').setAttribute('aria-expanded', String(open));
+};
+$('#menu').onclick = (e) => {
+  // picking an action dismisses the popover: on a phone it covers the screen it came from
+  if (e.target.closest('button')) { $('#menu').classList.remove('open'); $('#btn-menu').setAttribute('aria-expanded', 'false'); }
+};
+$('#btn-more').onclick = (e) => {
+ e.stopPropagation(); // the document handler closes overlays on any tap; this one owns the sheet
+ const show = $('#sheet-more').hidden;
+ closeOverlays();
+ $('#sheet-more').hidden = !show;
+ $('#btn-more').setAttribute('aria-expanded', String(show));
+};
+$('#sheet-more').onclick = (e) => {
+  if (e.target.closest('[data-close]')) closeOverlays();
+};
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#btn-menu, #menu')) {
+    $('#menu').classList.remove('open');
+    $('#btn-menu').setAttribute('aria-expanded', 'false');
+  }
+  if (e.target.closest('.tab')) {
+    $('#sheet-more').hidden = true;
+    $('#btn-more').setAttribute('aria-expanded', 'false');
+    reflectScreen();
+  }
+});
+
+// ---- full-bleed live view
+// The Fullscreen API where it exists (desktop, Android Chrome); iOS Safari has no element
+// fullscreen, so an in-page mode covers the same need. Pinch zooms, drag pans, double-tap toggles.
+let fullMode = false;
+const zoom = { s: 1, x: 0, y: 0 };
+function applyZoom(fig) {
+  $('img', fig).style.transform = zoom.s > 1.02 ? `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.s})` : '';
+  fig.classList.toggle('zoomed', zoom.s > 1.02);
+}
+function setZoom(fig, s, x, y) {
+  zoom.s = Math.max(1, Math.min(5, s));
+  const r = fig.getBoundingClientRect();
+  zoom.x = zoom.s <= 1.02 ? 0 : Math.min(0, Math.max(r.width * (1 - zoom.s), x));
+  zoom.y = zoom.s <= 1.02 ? 0 : Math.max(r.height * (1 - zoom.s), Math.min(0, y));
+  applyZoom(fig);
+}
+function exitFull() {
+  if (!fullMode) return;
+  fullMode = false;
+  document.body.classList.remove('view-full');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  zoom.s = 1; zoom.x = 0; zoom.y = 0;
+  applyZoom($('#view-main'));
+}
+async function enterFull() {
+  if (fullMode) return;
+  fullMode = true;
+  document.body.classList.add('view-full'); // the chrome (nav, hints, buttons) keys off this in both modes
+  const fig = $('#view-main');
+  if (fig.requestFullscreen) {
+    try { await fig.requestFullscreen(); } catch { /* iOS: the in-page mode already filled the screen */ }
+  }
+}
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) exitFull(); });
+
+function attachViewGestures(fig) {
+  const pts = new Map();
+  let tap = { t: 0, x: 0, y: 0 }, press = null, pinch = null;
+  const pair = () => [...pts.values()];
+  fig.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (e.pointerType !== 'mouse') fig.setPointerCapture(e.pointerId);
+    if (pts.size === 1) press = { x: e.clientX, y: e.clientY, t: Date.now(), moved: 0 };
+    else if (pts.size === 2 && fullMode) {
+      const [a, b] = pair();
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, s: zoom.s, x: zoom.x, y: zoom.y };
+    }
+  });
+  fig.addEventListener('pointermove', (e) => {
+    const p = pts.get(e.pointerId);
+    if (!p) return;
+    if (press) press.moved = Math.max(press.moved, Math.hypot(e.clientX - press.x, e.clientY - press.y));
+    if (pinch && pts.size >= 2 && fullMode) {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const [a, b] = pair();
+      const s = ((pinch.s * (Math.hypot(a.x - b.x, a.y - b.y) || 1)) / pinch.d);
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      // keep the world point that was under the starting midpoint under the current one
+      setZoom(fig, s, mx - ((pinch.mx - pinch.x) * s) / pinch.s, my - ((pinch.my - pinch.y) * s) / pinch.s);
+      return;
+    }
+    if (fullMode && zoom.s > 1.02) setZoom(fig, zoom.s, zoom.x + (e.clientX - p.x), zoom.y + (e.clientY - p.y));
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  });
+  const lifted = (e) => {
+    const before = pts.size;
+    pts.delete(e.pointerId);
+    if (pts.size < 2) pinch = null;
+    const clean = before === 1 && press && press.moved < 14;
+    if (!fullMode) {
+      if (clean && e.pointerType !== 'mouse' && Date.now() - press.t < 450 && !e.target.closest('button')) enterFull();
+      press = null;
+      return;
+    }
+    const now = Date.now();
+    if (clean && !e.target.closest('button') && now - tap.t < 330) {
+      if (zoom.s > 1.02) setZoom(fig, 1, 0, 0);
+      else setZoom(fig, 2.6, e.clientX * (1 - 2.6), e.clientY * (1 - 2.6));
+      tap.t = 0;
+    } else tap = { t: now, x: e.clientX, y: e.clientY };
+    if (pts.size === 0) press = null;
+  };
+  fig.addEventListener('pointerup', lifted);
+  fig.addEventListener('pointercancel', lifted);
+}
+
+// ---- the keyboard, in-page scrollers and the composer
+const vv = window.visualViewport;
+function fitViewport() {
+  // iOS keeps the layout viewport full height when the keyboard opens, which would push the
+  // composer under it; Chrome shrinks the layout viewport itself, so only correct the delta.
+  const shrink = window.innerHeight - (vv ? vv.height : window.innerHeight);
+  document.documentElement.style.setProperty('--vh', shrink > 60 ? `${Math.round(vv.height + vv.offsetTop)}px` : '');
+}
+if (vv) {
+  vv.addEventListener('resize', fitViewport);
+  vv.addEventListener('scroll', fitViewport);
+}
+function grow(el) {
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight + 2, Math.round(window.innerHeight * 0.34))}px`;
+}
+$('#prompt').addEventListener('input', (e) => grow(e.target));
+
+// ---- layout boot
+function layoutBoot() {
+  if (wideMq.matches) $$('.group').forEach((g) => (g.open = true));
+  const remember = storedScreen();
+  if (wideMq.matches) {
+    if (screenName() === 'view') showScreen(remember && remember !== 'view' ? remember : 'chat');
+  } else {
+    showScreen(remember && remember !== 'view' ? remember : 'view');
+  }
+  reflectScreen();
+}
+wideMq.addEventListener('change', layoutBoot);
+window.addEventListener('orientationchange', () => setTimeout(layoutBoot, 250));
+// (layoutBoot runs from the boot section: it touches the live-view state, which is declared below)
+fitViewport();
+
 // ------------------------------------------------------------------ websocket
 let ws;
 function connect() {
@@ -137,8 +341,8 @@ function renderTelescope(t) {
   lb.textContent = t.released ? 'Connect' : 'Disconnect';
   lb.classList.toggle('primary', !!t.released);
   lb.classList.toggle('ghost', !t.released);
-  $('#chip-battery').textContent = `🔋 ${t.battery ?? '–'}%${t.charging ? ' ⚡' : ''}`;
-  $('#chip-temp').textContent = `🌡 ${t.temperatureC ?? '–'}° / ${t.cmosTempC?.tele ?? '–'}°`;
+  $('#chip-battery').textContent = t.battery == null ? '🔋 –' : `🔋 ${t.battery}%${t.charging ? ' ⚡' : ''}`;
+  $('#chip-temp').textContent = t.temperatureC == null ? '🌡 –' : `🌡 ${t.temperatureC}° body · ${t.cmosTempC?.tele ?? '–'}° sensor`;
   $('#chip-mode').textContent = t.shootingMode?.name ?? 'mode –';
   const m = t.motors ?? {};
   const mount = t.bodyMode === 'eq' ? 'EQ' : t.bodyMode === 'altaz' ? 'Alt-Az' : 'mount';
@@ -211,7 +415,9 @@ function stackActive() {
 }
 
 function wantedSources() {
-  if (document.hidden) return [];
+  // A phone that is looking at another screen does not need frames: the telescope and the Wi-Fi
+  // both get a rest while you read the plan.
+  if (document.hidden || !viewOnScreen()) return [];
   // The stack feed only means something while stacking (otherwise it mirrors the tele preview).
   return [...new Set(Object.values(views))].filter((s) => s !== 'stack' || stackActive());
 }
@@ -345,11 +551,22 @@ for (const slot of ['a', 'b']) {
     setView('main', src);
   });
 }
+// Enlarging the live view: a tap on it, or the ⛶ chip. Where the Fullscreen API exists that is
+// what you get; elsewhere (iOS) the in-page mode fills the screen the same way.
 $('#btn-fullscreen').onclick = (e) => {
   e.stopPropagation();
-  $('#view-main').requestFullscreen?.();
+  if (fullMode) exitFull();
+  else enterFull();
 };
-$('#view-main').addEventListener('dblclick', () => lightbox(`api/snapshot/${state.mainSrc}?t=${Date.now()}`, state.mainSrc));
+$('#btn-unfull').onclick = (e) => {
+  e.stopPropagation();
+  exitFull();
+};
+$('#view-main').addEventListener('dblclick', (e) => {
+  if (fullMode || e.target.closest('button')) return;
+  lightbox(`api/snapshot/${state.mainSrc}?t=${Date.now()}`, state.mainSrc);
+});
+attachViewGestures($('#view-main'));
 
 // Hidden tab: unsubscribe (saves the telescope and network); visible again: resubscribe.
 document.addEventListener('visibilitychange', videoSubscribe);
@@ -517,8 +734,9 @@ $('#btn-apply').onclick = async () => {
 // ------------------------------------------------------------------ tabs
 $$('.tab').forEach((t) =>
   t.addEventListener('click', () => {
+    if (!t.dataset.tab) return; // the More chip is a tab visually, but it opens a sheet, not a section
     $$('.tab').forEach((x) => x.classList.toggle('active', x === t));
-    $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `panel-${t.dataset.tab}`));
+    applyTabSelection(t.dataset.tab);
     const tab = t.dataset.tab;
     if (tab === 'tonight') {
       loadTonight();
@@ -857,6 +1075,7 @@ async function sendPrompt(mode = 'auto') {
     await api('agent/prompt', { text, images, mode });
     chatUI.lastPrompt = text;
     $('#prompt').value = '';
+    grow($('#prompt'));
     state.attachments = [];
     renderAttachments();
     chatUI.stick = true; // sending a message jumps to the conversation's end
@@ -953,9 +1172,9 @@ async function loadTonight() {
     $('#plan').innerHTML = `<p class="muted small">${p.window.start} → ${p.window.end} (${p.window.hours} h) · min altitude ${p.minAltitude}° · Moon ${p.moon.illuminationPercent}% · ${esc(p.weather ?? '')}</p>
       <table class="plan-table"><tr><th>Target</th><th>Best</th><th title="${wx ? 'weather = forecast quality during the target\'s own best hours (weighted toward its peak); clear / up = forecast-weighted hours / hours above the minimum altitude' : 'hours above the minimum altitude'}">${wx ? 'Weather' : 'Hours'}</th><th>Fit / filter</th><th></th></tr>
       ${p.targets.map((t) => `<tr><td><b>${esc(t.aliases.find((a) => /^M \d/.test(a)) ?? t.name)}</b><small>${esc([t.name, ...t.aliases].filter((a, i, arr) => arr.indexOf(a) === i).slice(0, 3).join(' · '))}</small><small>${esc(t.type)}, ${t.sizeArcmin}′, mag ${t.magnitude ?? '–'}</small></td>
-        <td>${esc(t.bestTime ?? '')}<small>max ${t.maxAltitude}°${t.skyAtBest != null ? ` · <span class="sky ${skyCls(t.skyAtBest)}">sky ${t.skyAtBest}</span>` : ''}</small></td>
-        <td>${t.weatherAlignment != null ? `<b class="sky ${skyCls(t.weatherAlignment)}">${t.weatherAlignment}/100</b><small>${t.clearHours} clear / ${t.hoursAboveMin} h up</small>` : `${t.hoursAboveMin} h`}</td>
-        <td><small>${esc(t.framing)}</small><small>${esc(t.suggestedFilter.split(' (')[0])}</small></td>
+        <td data-label="Best time">${esc(t.bestTime ?? '')}<small>max ${t.maxAltitude}°${t.skyAtBest != null ? ` · <span class="sky ${skyCls(t.skyAtBest)}">sky ${t.skyAtBest}</span>` : ''}</small></td>
+        <td data-label="${wx ? 'Weather' : 'Hours above minimum'}">${t.weatherAlignment != null ? `<b class="sky ${skyCls(t.weatherAlignment)}">${t.weatherAlignment}/100</b><small>${t.clearHours} clear / ${t.hoursAboveMin} h up</small>` : `${t.hoursAboveMin} h`}</td>
+        <td data-label="Framing &amp; filter"><small>${esc(t.framing)}</small><small>${esc(t.suggestedFilter.split(' (')[0])}</small></td>
         <td><button class="ghost" data-image="${esc(t.aliases.find((a) => /^M \d/.test(a)) ?? t.name)}">Image</button></td></tr>`).join('')}</table>`;
   } catch (e) {
     $('#plan').innerHTML = `<span class="muted">${esc(e.message)}</span>`;
@@ -1199,6 +1418,7 @@ async function loadSkills() {
   try {
     const skills = await api('skills');
     $('#skills').innerHTML = skills.map((s) => `<li data-skill="${esc(s.name)}" class="${s.name === currentSkill ? 'active' : ''}">${esc(s.name)}<small>${esc(s.description.slice(0, 90))}</small></li>`).join('') || '<li class="muted">no skills yet</li>';
+    $('.skill-editor').classList.toggle('on', !!currentSkill);
   } catch (e) {
     toast(e.message, true);
   }
@@ -1212,6 +1432,7 @@ $('#skills').addEventListener('click', async (e) => {
   $('#skill-content').value = s.content;
   $('#btn-skill-save').disabled = false;
   $$('#skills li').forEach((x) => x.classList.toggle('active', x === li));
+  $('.skill-editor').classList.add('on');
 });
 $('#btn-skill-save').onclick = async () => {
   if (!currentSkill) return;
@@ -1239,4 +1460,5 @@ setView('main', 'tele');
 setView('a', 'wide');
 setView('b', 'stack');
 connect();
+layoutBoot();
 
