@@ -232,6 +232,9 @@ body.view-full .only-full, .view-main:fullscreen .only-full { display: inline-fl
 .ctl-row > * { min-width: 0; }
 .ctl-row button { flex: 1 1 auto; }
 input[type=range] { -webkit-appearance: none; appearance: none; }
+/* a native number stepper eats half of a 52px field on WebKit; arrows on the keyboard still step it */
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+input[type=number]::-webkit-outer-spin-button, input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 4px; background: #1a2436; }
 input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 26px; height: 26px; margin-top: -10px; border-radius: 50%; background: var(--accent); border: 2px solid var(--accent-2); }
 input[type=range]::-moz-range-track { height: 6px; border-radius: 4px; background: #1a2436; }

@@ -1212,6 +1212,7 @@ $('#plan').addEventListener('click', (e) => {
 async function loadAlbum() {
   const type = $('#sel-album').value;
   $('#album-page').textContent = state.albumPage + 1;
+  $('#album').innerHTML = '<p class="muted">loading…</p>'; /* the telescope can take ~10s to answer; a void reads as broken */
   try {
     const { counts, items } = await api(`album?type=${type}&page=${state.albumPage}`);
     const names = { 0: 'all', 1: 'photos', 2: 'videos', 3: 'burst', 4: 'astro', 5: 'panorama' };
@@ -1226,9 +1227,9 @@ async function loadAlbum() {
           ${folder ? `<button data-session="${esc(folder)}">⇩ session</button>` : `<button data-file="${esc(m.filePath)}">⇩ library</button>`}
           <button data-ask="${esc(m.filePath)}">ask agent</button></div></div>`;
       })
-      .join('') || '<p class="muted">no media</p>';
+      .join('') || '<p class="muted">Nothing captured yet. Take a Photo from the View screen, or ask the agent for a target.</p>';
   } catch (e) {
-    $('#album').innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+    $('#album').innerHTML = `<p class="muted">${state.telescope?.connected ? esc(e.message) : 'the telescope is offline — reconnect it to read the album'}</p>`;
   }
 }
 $('#sel-album').onchange = () => {
