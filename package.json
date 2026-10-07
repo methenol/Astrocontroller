@@ -13,7 +13,8 @@
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json && node --env-file-if-exists=.env dist/index.js",
     "catalog": "node scripts/fetch-catalog.mjs",
-    "smoke": "node --env-file-if-exists=.env dist/tools/smoke.js"
+    "smoke": "node --env-file-if-exists=.env dist/tools/smoke.js",
+    "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {
     "@alikh/dwarflab-sdk": "^0.1.1",
