@@ -87,6 +87,7 @@ The UI is one page, one screen at a time, sized for gloves and dark skies. Nothi
 - **Tonight** turns the target plan into cards below 760 px, with each target's best time, weather, framing and filter labelled.
 - **Night mode** (the sliders menu in the header, together with Disconnect) puts a red multiply tint over everything, including the live images, and is remembered.
 - **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
+- **Tap targets** are floored at 44 px tall on touch layouts; secondary controls (the view buttons, header chips, small chips under tiles) sit at 38-42 px, and nothing at phone widths is smaller than a gloved fingertip.
 - **Installable**: Add to Home Screen gives a standalone app (manifest + icons, `display_override` falls back to minimal-ui where window controls overlay is not implemented). It honours the notch and home indicator safe areas. Home-screen install and fullscreen need a secure context — plain HTTP on the LAN works fine in a browser tab; put a reverse proxy or Tailscale Serve in front for HTTPS.
 
 ## Imagery library
@@ -178,3 +179,5 @@ npm install && npm run build
 node --env-file=.env dist/index.js     # needs ffmpeg; set AGENT_ENABLED=false if omp isn't installed
 npm run catalog                        # refresh OpenNGC
 ```
+
+The web UI is `public/` served as-is: no build step for HTML/CSS/JS changes, just reload.
