@@ -83,9 +83,9 @@ The UI is one page, one screen at a time, sized for gloves and dark skies. Nothi
 - **Bottom bar**: View · Agent · Tonight · Album · More. Library, Skills and Log live under **More** on a phone and become top-level tabs at desk widths. The screen you were on is remembered.
 - **View**: tap the main view to fill the screen (Fullscreen API where it exists, an in-page mode where it does not — iOS), pinch to zoom, drag to pan, double-tap to zoom to the point you tapped and again to reset, ✕ or Esc to leave. Tapping a small view swaps it into the main slot. Frames are only streamed for the views on screen, so leaving the View screen stops the video and frees the radio.
 - **Capture bar** is pinned under your thumb: camera, Photo, Burst, Record, Stack.
-- **Aim** is a 166 px round pad — press and hold anywhere in it, including the diagonals — with a speed slider and Home / Level / Park. Only Aim and Focus are open at phone widths; System is folded.
+- **Aim** is a nine-button pad — hold any arrow to keep moving, ■ in the middle stops everything — with a speed slider and Home / Level / Park. Cell size follows the viewport (54-68 px) so it stays a thumb target on a small phone and tightens up at desk widths. Only Aim is open at phone widths; Focus, Mode & exposure and System are folded, and all of them open at desk widths.
 - **Tonight** turns the target plan into cards below 760 px, with each target's best time, weather, framing and filter labelled.
-- **Night mode** (⋯ menu) puts a red multiply tint over everything, including the live images, and is remembered.
+- **Night mode** (the sliders menu in the header, together with Disconnect) puts a red multiply tint over everything, including the live images, and is remembered.
 - **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
 - **Installable**: Add to Home Screen gives a standalone app (manifest + icons, `display_override` falls back to minimal-ui where window controls overlay is not implemented). It honours the notch and home indicator safe areas. Home-screen install and fullscreen need a secure context — plain HTTP on the LAN works fine in a browser tab; put a reverse proxy or Tailscale Serve in front for HTTPS.
 
