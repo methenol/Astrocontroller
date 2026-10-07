@@ -174,6 +174,13 @@ async function enterFull() {
   }
 }
 document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) exitFull(); });
+// Esc is promised by the ⛶ button's tooltip and by the README, and it is the only way out of the
+// in-page mode on a keyboard. Topmost thing wins: the lightbox, then the enlarged live view.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#lightbox').hidden) { $('#lightbox').hidden = true; return; }
+  if (fullMode) exitFull();
+});
 
 function attachViewGestures(fig) {
   const pts = new Map();
