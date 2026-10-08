@@ -1,6 +1,11 @@
 services:
   astrocontroller:
-    build: .
+    build:
+      context: .
+      # Build-time RUN steps fetch from apt/npm/bun registries. host keeps those
+      # reachable when the docker bridge has no masquerade (iptables=false) or a
+      # proxy only the host is configured for.
+      network: host
     image: astrocontroller:latest
     container_name: astrocontroller
     restart: unless-stopped
