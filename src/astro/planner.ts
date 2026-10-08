@@ -1,4 +1,4 @@
-import { catalog, TYPE_GROUPS, type DsoObject } from './catalog.js';
+import { catalog, displayName, gotoLabel, TYPE_GROUPS, type DsoObject } from './catalog.js';
 import { visibility, nightWindow, moonState, separationDeg, fmtTime, type Site, altAz } from './sky.js';
 
 export interface PlanOptions {
@@ -18,6 +18,10 @@ export interface PlanOptions {
 
 export interface PlannedTarget {
   name: string;
+  /** what people call it (Messier, Caldwell, then a common name) */
+  displayName: string;
+  /** the name to give goto_target: also what the scope names the session folder */
+  gotoName: string;
   aliases: string[];
   type: string;
   constellation: string;
@@ -44,6 +48,15 @@ export interface PlannedTarget {
 }
 
 const EMISSION = new Set(['HII', 'EmN', 'SNR', 'PN', 'Cl+N']);
+/** never offered unless asked for by type: not imaging targets for a 150 mm lens */
+const ONLY_ON_REQUEST = ['*', '**', 'Nova', 'Other', 'DrkN', 'GClstr'];
+
+/** 0–1 from the magnitude, or from the brightness class (Sharpless, Lynds…) when there is none. */
+function brightness(o: DsoObject): number {
+  if (o.mag !== undefined) return Math.max(0, Math.min(1, (13 - o.mag) / 9));
+  if (o.brightClass !== undefined) return ({ 1: 0.55, 2: 0.35, 3: 0.15 } as Record<number, number>)[o.brightClass] ?? 0.3;
+  return 0.5;
+}
 
 export function suggestFilter(o: DsoObject, moonIllum: number): string {
   if (EMISSION.has(o.type)) return 'Duo-Band (emission nebula — strong Hα/OIII signal, cuts moon and light pollution)';
@@ -75,9 +88,10 @@ export function planNight(site: Site, opts: PlanOptions) {
 
   const candidates = catalog().filter((o) => {
     if (types.size && !types.has(o.type)) return false;
-    if (['*', '**', 'Nova', 'Other', 'DrkN'].includes(o.type) && !types.has(o.type)) return false;
-    const famous = o.aliases.some((a) => /^M \d/.test(a) || /^C \d/.test(a));
-    if (!famous && (o.mag === undefined || o.mag > maxMag)) return false;
+    if (ONLY_ON_REQUEST.includes(o.type) && !types.has(o.type)) return false;
+    const famous = o.aliases.some((a) => /^M \d+$/.test(a) || /^C \d+$/.test(a));
+    // Bright enough: a magnitude within the limit, or (nebulae have none) a bright or moderate class.
+    if (!famous && !(o.mag !== undefined ? o.mag <= maxMag : o.brightClass !== undefined && o.brightClass <= 2)) return false;
     if ((o.majorArcmin ?? 0) < minSize || (o.majorArcmin ?? 0) > maxSize) return false;
     // Quick reject: never rises above min altitude at this latitude.
     return 90 - Math.abs(site.lat - o.decDeg) >= opts.minAltitude;
@@ -89,9 +103,8 @@ export function planNight(site: Site, opts: PlanOptions) {
     if (vis.hoursAboveMin < 0.75) continue;
     const fr = framing(o, opts.fovArcmin);
     const moonSep = separationDeg(o.raHours, o.decDeg, moon.raHours, moon.decDeg);
-    const brightness = o.mag !== undefined ? Math.max(0, Math.min(1, (13 - o.mag) / 9)) : 0.5;
     const moonPenalty = moon.illuminationPercent > 30 && moonSep < 40 && !EMISSION.has(o.type) ? (moon.illuminationPercent / 100) * (1 - moonSep / 40) * 25 : 0;
-    const famous = o.aliases.some((a) => /^M \d/.test(a) || /^C \d/.test(a)) ? 5 : 0;
+    const famous = o.aliases.some((a) => /^M \d+$/.test(a) || /^C \d+$/.test(a)) ? 5 : o.names.length ? 2 : 0;
     // Weather alignment: how good the forecast is during THIS target's best hours. Each 15 min
     // above the minimum altitude is weighted by how well placed the target is then (its altitude
     // above the minimum relative to its own peak, squared, so the hours around the peak dominate),
@@ -125,12 +138,14 @@ export function planNight(site: Site, opts: PlanOptions) {
       (Math.min(vis.hoursAboveMin, 6) / 6) * 35 +
       ((vis.maxAlt - opts.minAltitude) / (90 - opts.minAltitude)) * 15 +
       fr.fit * 25 +
-      brightness * 20 +
+      brightness(o) * 20 +
       famous -
       moonPenalty;
     const score = geometric * (0.35 + 0.65 * alignment);
     out.push({
       name: o.id,
+      displayName: displayName(o),
+      gotoName: gotoLabel(o),
       aliases: o.aliases.slice(0, 4),
       type: o.typeName,
       constellation: o.constellation,
@@ -154,12 +169,21 @@ export function planNight(site: Site, opts: PlanOptions) {
     });
   }
   out.sort((a, b) => b.score - a.score);
+  // One field, one entry: drop a target whose centre lies inside a better-ranked one that is at
+  // least as big (the Maia Nebula inside M 45, a Sharpless region inside an NGC complex).
+  const picked: PlannedTarget[] = [];
+  const size = (t: PlannedTarget) => Number(t.sizeArcmin.split('×')[0]) || 0;
+  for (const t of out) {
+    const host = picked.find((p) => size(p) >= size(t) && separationDeg(p.raHours, p.decDeg, t.raHours, t.decDeg) * 60 < size(p) * 0.4);
+    if (!host) picked.push(t);
+    if (picked.length >= (opts.limit ?? 15)) break;
+  }
   return {
     window: { start: fmtTime(start, opts.timezone), end: fmtTime(end, opts.timezone), hours: Math.round(((end.getTime() - start.getTime()) / 3600e3) * 10) / 10 },
     moon: { illuminationPercent: moon.illuminationPercent, phase: moon.phase },
     minAltitude: opts.minAltitude,
     weather: opts.observability ? 'ranked by how well tonight\'s forecast lines up with each target\'s best hours' : 'no forecast available: ranked on visibility alone',
     candidatesConsidered: candidates.length,
-    targets: out.slice(0, opts.limit ?? 15),
+    targets: picked,
   };
 }

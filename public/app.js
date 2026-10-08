@@ -83,7 +83,7 @@ function applyTabSelection(name) {
 function reflectScreen() {
   const name = screenName();
   document.body.dataset.screen = name;
-  const inMore = name === 'library' || name === 'skills' || name === 'log';
+  const inMore = name === 'database' || name === 'library' || name === 'skills' || name === 'log';
   for (const t of $$('#tabbar .tab')) {
     const on = t.dataset.tab === name || (t.id === 'btn-more' && inMore);
     t.classList.toggle('active', on);
@@ -749,6 +749,7 @@ $$('.tab').forEach((t) =>
       loadTonight();
       loadWeather();
     }
+    if (tab === 'database') loadDatabase();
     if (tab === 'album') loadAlbum();
     if (tab === 'library') {
       loadLibrary();
@@ -1178,11 +1179,11 @@ async function loadTonight() {
     const skyCls = (q) => (q == null ? '' : q >= 60 ? 'ok' : q >= 35 ? 'warn' : 'bad');
     $('#plan').innerHTML = `<p class="muted small">${p.window.start} → ${p.window.end} (${p.window.hours} h) · min altitude ${p.minAltitude}° · Moon ${p.moon.illuminationPercent}% · ${esc(p.weather ?? '')}</p>
       <table class="plan-table"><tr><th>Target</th><th>Best</th><th title="${wx ? 'weather = forecast quality during the target\'s own best hours (weighted toward its peak); clear / up = forecast-weighted hours / hours above the minimum altitude' : 'hours above the minimum altitude'}">${wx ? 'Weather' : 'Hours'}</th><th>Fit / filter</th><th></th></tr>
-      ${p.targets.map((t) => `<tr><td><b>${esc(t.aliases.find((a) => /^M \d/.test(a)) ?? t.name)}</b><small>${esc([t.name, ...t.aliases].filter((a, i, arr) => arr.indexOf(a) === i).slice(0, 3).join(' · '))}</small><small>${esc(t.type)}, ${t.sizeArcmin}′, mag ${t.magnitude ?? '–'}</small></td>
+      ${p.targets.map((t) => `<tr><td><b>${esc(t.displayName ?? t.name)}</b><small>${esc([t.name, ...t.aliases].filter((a, i, arr) => arr.indexOf(a) === i).slice(0, 3).join(' · '))}</small><small>${esc(t.type)}, ${t.sizeArcmin}′, mag ${t.magnitude ?? '–'}</small></td>
         <td data-label="Best time">${esc(t.bestTime ?? '')}<small>max ${t.maxAltitude}°${t.skyAtBest != null ? ` · <span class="sky ${skyCls(t.skyAtBest)}">sky ${t.skyAtBest}</span>` : ''}</small></td>
         <td data-label="${wx ? 'Weather' : 'Hours above minimum'}">${t.weatherAlignment != null ? `<b class="sky ${skyCls(t.weatherAlignment)}">${t.weatherAlignment}/100</b><small>${t.clearHours} clear / ${t.hoursAboveMin} h up</small>` : `${t.hoursAboveMin} h`}</td>
         <td data-label="Framing &amp; filter"><small>${esc(t.framing)}</small><small>${esc(t.suggestedFilter.split(' (')[0])}</small></td>
-        <td><button class="ghost" data-image="${esc(t.aliases.find((a) => /^M \d/.test(a)) ?? t.name)}">Image</button></td></tr>`).join('')}</table>`;
+        <td><button class="ghost" data-image="${esc(t.gotoName ?? t.name)}">Image</button></td></tr>`).join('')}</table>`;
   } catch (e) {
     $('#plan').innerHTML = `<span class="muted">${esc(e.message)}</span>`;
   }
@@ -1214,6 +1215,235 @@ $('#plan').addEventListener('click', (e) => {
   $('.tab[data-tab=chat]').click();
   $('#prompt').focus();
 });
+
+// ------------------------------------------------------------------ database
+//
+// Search and filter the whole object catalog. Every filter change re-queries the server (typing
+// is debounced); the filters are remembered per browser. A row opens in place to show the
+// object's designations, tonight's altitude curve and GoTo / ask-the-agent buttons.
+const DB_GROUPS = [
+  ['galaxy', 'galaxies'], ['nebula', 'nebulae'], ['emission', 'emission nebulae'], ['reflection', 'reflection nebulae'], ['dark', 'dark nebulae'],
+  ['planetary', 'planetary nebulae'], ['supernova_remnant', 'supernova remnants'], ['cluster', 'star clusters'], ['open_cluster', 'open clusters'],
+  ['globular', 'globular clusters'], ['galaxy_cluster', 'galaxy groups & clusters'], ['star', 'stars'],
+];
+const DB_FIELDS = ['q', 'type', 'catalog', 'con', 'up', 'sort', 'maxmag', 'minsize', 'maxsize', 'minalt', 'named'];
+const db = { meta: null, items: [], total: 0, seq: 0, open: null };
+const dbEl = (f) => $(`#db-${f}`);
+const dbVal = (f) => (dbEl(f).type === 'checkbox' ? (dbEl(f).checked ? '1' : '') : dbEl(f).value.trim());
+
+function dbSaveFilters() {
+  try { localStorage.setItem('db-filters', JSON.stringify(Object.fromEntries(DB_FIELDS.map((f) => [f, dbVal(f)])))); } catch {}
+}
+function dbRestoreFilters() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('db-filters') || '{}'); } catch {}
+  for (const f of DB_FIELDS) {
+    if (saved[f] === undefined) continue;
+    if (dbEl(f).type === 'checkbox') dbEl(f).checked = saved[f] === '1';
+    else dbEl(f).value = saved[f];
+  }
+  // a stale saved option (e.g. a catalog that no longer exists) falls back to the default
+  for (const f of ['type', 'catalog', 'con', 'up', 'sort']) if (dbEl(f).selectedIndex < 0) dbEl(f).selectedIndex = 0;
+  if (['maxmag', 'minsize', 'maxsize', 'minalt', 'named'].some((f) => dbVal(f))) dbEl('more-filters').open = true;
+}
+
+async function loadDatabase() {
+  if (!db.meta) {
+    try {
+      db.meta = await api('catalog/meta');
+    } catch (e) {
+      $('#db-count').textContent = `database unavailable: ${e.message}`;
+      return;
+    }
+    const m = db.meta;
+    const groupCount = Object.fromEntries(m.groups.map((g) => [g.key, g.count]));
+    dbEl('type').insertAdjacentHTML('beforeend', DB_GROUPS.filter(([k]) => groupCount[k]).map(([k, label]) => `<option value="${k}">${label} (${groupCount[k].toLocaleString()})</option>`).join(''));
+    dbEl('catalog').insertAdjacentHTML('beforeend', [...m.lists.map((l) => [l.key, l.title, l.count]), ...m.sources.map((s) => [s.key, s.title, s.objects])].map(([k, t, n]) => `<option value="${k}">${esc(t)} (${n.toLocaleString()})</option>`).join(''));
+    dbEl('con').insertAdjacentHTML('beforeend', [...m.constellations].sort((a, b) => a.name.localeCompare(b.name)).map((c) => `<option value="${c.abbr}">${esc(c.name)} (${c.count.toLocaleString()})</option>`).join(''));
+    dbEl('q').placeholder = `Search ${m.total.toLocaleString()} objects: M 31, Sh2-155, Veil, Vega…`;
+    dbEl('minalt').placeholder = String(state.config?.minAltitude ?? 20);
+    $('#db-sources').innerHTML = `<p class="muted">${m.total.toLocaleString()} objects merged from ${m.sources.length} catalogs${m.built ? ` (built ${esc(m.built)})` : ''}. An object in several catalogs is one entry with all its designations. Positions are J2000.</p>
+      <ul class="db-src">${m.sources.map((s) => `<li><b>${esc(s.title)}</b> · ${s.objects.toLocaleString()}<br><span class="muted">${esc(s.cite)}</span></li>`).join('')}</ul>`;
+    dbRestoreFilters();
+  }
+  dbSearch();
+}
+
+async function dbSearch(append = false) {
+  const seq = ++db.seq;
+  const p = new URLSearchParams();
+  const set = (k, v) => v && p.set(k, v);
+  set('q', dbVal('q'));
+  set('types', dbVal('type'));
+  set('catalog', dbVal('catalog'));
+  set('constellation', dbVal('con'));
+  set('up', dbVal('up'));
+  set('sort', dbVal('sort') === 'relevance' ? '' : dbVal('sort'));
+  set('maxMag', dbVal('maxmag'));
+  set('minSize', dbVal('minsize'));
+  set('maxSize', dbVal('maxsize'));
+  set('minAlt', dbVal('minalt'));
+  set('named', dbVal('named'));
+  p.set('offset', String(append ? db.items.length : 0));
+  p.set('limit', '50');
+  if (!append) $('#db-count').textContent = 'searching…';
+  try {
+    const r = await api(`catalog/search?${p}`);
+    if (seq !== db.seq) return; // a newer search has started
+    db.items = append ? [...db.items, ...r.items] : r.items;
+    db.total = r.total;
+    db.minAlt = r.window?.minAltitude ?? state.config?.minAltitude ?? 20;
+    const win = r.window ? ` · tonight ${r.window.start} → ${r.window.end}, above ${r.window.minAltitude}°` : '';
+    $('#db-count').textContent = `${r.total.toLocaleString()} ${r.total === 1 ? 'object' : 'objects'}${win}`;
+    renderDatabase(append);
+  } catch (e) {
+    if (seq === db.seq) $('#db-count').textContent = e.message;
+  }
+}
+
+const fmtSize = (o) => (o.majorArcmin ? `${o.majorArcmin < 1 ? `${Math.round(o.majorArcmin * 60)}″` : `${+o.majorArcmin.toFixed(1)}′`}${o.minorArcmin && o.minorArcmin !== o.majorArcmin ? `×${o.minorArcmin < 1 ? `${Math.round(o.minorArcmin * 60)}″` : `${+o.minorArcmin.toFixed(1)}′`}` : ''}` : '');
+const BRIGHT_CLASS = { 1: 'bright', 2: 'moderate', 3: 'faint' };
+const fmtRa = (h) => `${Math.floor(h)}h ${String(Math.floor((h % 1) * 60)).padStart(2, '0')}m ${String(Math.round((((h % 1) * 60) % 1) * 60) % 60).padStart(2, '0')}s`;
+const fmtDec = (d) => `${d < 0 ? '−' : '+'}${Math.floor(Math.abs(d))}° ${String(Math.floor((Math.abs(d) % 1) * 60)).padStart(2, '0')}′`;
+
+function dbRow(o) {
+  const others = o.aliases.filter((a) => a !== o.name).slice(0, 3);
+  const ids = [o.id !== o.name ? o.id : null, ...others.filter((a) => a !== o.id)].filter(Boolean).slice(0, 3);
+  const facts = [o.typeName, o.constellation, fmtSize(o), o.mag != null ? `mag ${o.mag}` : o.brightClass ? BRIGHT_CLASS[o.brightClass] : ''].filter(Boolean);
+  const up = o.altitudeNow != null && o.altitudeNow >= db.minAlt;
+  const alt = o.altitudeNow == null ? '' : `<span class="db-alt ${up ? 'up' : o.altitudeNow > 0 ? 'low' : 'down'}" title="altitude now">${o.altitudeNow > 0 ? `${o.altitudeNow}°` : 'set'}</span>`;
+  const tonight = o.hoursUpTonight ? `${o.hoursUpTonight} h up · best ${esc((o.bestTime ?? '').split(', ').pop())}` : o.hoursUpTonight === 0 ? 'not up tonight' : '';
+  return `<div class="db-item${db.open === o.id ? ' open' : ''}" data-id="${esc(o.id)}">
+    <button type="button" class="db-row" aria-expanded="${db.open === o.id}">
+      <span class="db-main"><b>${esc(o.name)}</b>${ids.length ? `<small>${esc(ids.join(' · '))}</small>` : ''}<small>${esc(facts.join(' · '))}</small></span>
+      <span class="db-vis">${alt}<small>${tonight}</small></span>
+    </button>
+    <div class="db-detail"${db.open === o.id ? '' : ' hidden'}></div>
+  </div>`;
+}
+
+function renderDatabase(append) {
+  const list = $('#db-results');
+  if (!db.items.length) list.innerHTML = '<p class="muted">Nothing matches these filters.</p>';
+  else if (append) list.insertAdjacentHTML('beforeend', db.items.slice(list.querySelectorAll('.db-item').length).map(dbRow).join(''));
+  else list.innerHTML = db.items.map(dbRow).join('');
+  $('#db-load').hidden = db.items.length >= db.total;
+  $('#db-load').textContent = `Show more (${(db.total - db.items.length).toLocaleString()} left)`;
+  if (!append) list.closest('.panel').scrollTop = 0;
+  if (db.open) {
+    const el = $(`.db-item[data-id="${CSS.escape(db.open)}"] .db-detail`);
+    if (el) dbDetail(db.open, el);
+  }
+}
+
+/** Tonight's altitude across the dark window, with the minimum altitude and "now". */
+function altitudeChart(t) {
+  const W = 320, H = 96, pad = 2;
+  const n = t.curve.length;
+  if (n < 2) return '';
+  const x = (i) => pad + (i / (n - 1)) * (W - 2 * pad);
+  const y = (a) => H - 14 - (Math.max(0, a) / 90) * (H - 22);
+  const line = t.curve.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.alt).toFixed(1)}`).join('');
+  const area = `${line}L${x(n - 1).toFixed(1)},${y(0)}L${x(0).toFixed(1)},${y(0)}Z`;
+  const t0 = Date.parse(t.curve[0].t), t1 = Date.parse(t.curve[n - 1].t), now = Date.now();
+  const nowX = now >= t0 && now <= t1 ? pad + ((now - t0) / (t1 - t0)) * (W - 2 * pad) : null;
+  const mid = Math.floor((n - 1) / 2);
+  const tick = (i) => esc((t.curve[i].local ?? '').split(', ').pop());
+  return `<svg class="db-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Altitude tonight, peaking at ${t.maxAltitude}° at ${esc(t.bestTime ?? '')}">
+    <line class="ax" x1="0" x2="${W}" y1="${y(0)}" y2="${y(0)}"/>
+    <line class="min" x1="0" x2="${W}" y1="${y(t.minAltitude).toFixed(1)}" y2="${y(t.minAltitude).toFixed(1)}"/>
+    <path class="area" d="${area}"/><path class="ln" d="${line}"/>
+    ${nowX != null ? `<line class="now" x1="${nowX.toFixed(1)}" x2="${nowX.toFixed(1)}" y1="0" y2="${y(0)}"/>` : ''}
+    <text x="${pad}" y="${H - 2}">${tick(0)}</text><text x="${W / 2}" y="${H - 2}" text-anchor="middle">${tick(mid)}</text><text x="${W - pad}" y="${H - 2}" text-anchor="end">${tick(n - 1)}</text>
+    <text x="${W - pad}" y="${(y(t.minAltitude) - 3).toFixed(1)}" text-anchor="end" class="minl">${t.minAltitude}°</text>
+  </svg>`;
+}
+
+async function dbDetail(id, el) {
+  el.innerHTML = '<span class="muted small">loading…</span>';
+  try {
+    const d = await api(`catalog/object?id=${encodeURIComponent(id)}`);
+    const t = d.tonight;
+    const rows = [
+      ['Type', `${d.typeName} in ${d.constellation}`],
+      ['RA / Dec (J2000)', `${fmtRa(d.raHours)} · ${fmtDec(d.decDeg)}`],
+      ['Size', fmtSize(d) ? `${fmtSize(d)}${d.posAngle != null ? ` · PA ${d.posAngle}°` : ''}${d.fitsTeleFov ? ` · ${d.fitsTeleFov}` : ''}` : 'unknown'],
+      ['Brightness', d.mag != null ? `mag ${d.mag}${d.surfaceBrightness != null ? ` · surface ${d.surfaceBrightness} mag/arcmin²` : ''}` : d.brightClass ? `${BRIGHT_CLASS[d.brightClass]} (catalog class; no magnitude)` : 'unknown'],
+      ['Now', d.altitudeNow != null ? `altitude ${d.altitudeNow}° · azimuth ${d.azimuthNow}°` : '–'],
+      t ? ['Tonight', t.hoursAboveMin ? `${t.hoursAboveMin} h above ${t.minAltitude}° (${esc(t.from?.split(', ').pop() ?? '')} → ${esc(t.until?.split(', ').pop() ?? '')}), peaks at ${t.maxAltitude}° at ${esc(t.bestTime?.split(', ').pop() ?? '')} · Moon ${t.moonIllumination}%, ${t.moonSeparationDeg}° away` : `stays below ${t.minAltitude}° (peaks at ${t.maxAltitude}°)`] : null,
+      ['Catalogs', d.sourceTitles.join(' · ')],
+    ].filter(Boolean);
+    el.innerHTML = `${t ? altitudeChart(t) : ''}
+      <div class="db-facts">${rows.map(([k, v]) => `<div><span>${k}</span>${k === 'Catalogs' || k === 'Tonight' ? v : esc(v)}</div>`).join('')}</div>
+      ${d.aliases.length ? `<div class="db-aliases">${d.aliases.map((a) => `<span>${esc(a)}</span>`).join('')}</div>` : ''}
+      <div class="ctl-row db-actions">
+        <button type="button" class="primary" data-db-goto="${esc(d.id)}" data-label="${esc(d.gotoName)}"${d.altitudeNow != null && d.altitudeNow < 5 ? ' disabled title="below the horizon"' : ''}>GoTo ${esc(d.gotoName)}</button>
+        <button type="button" data-db-agent="${esc(d.gotoName)}">Ask the agent to image it</button>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<span class="muted small">${esc(e.message)}</span>`;
+  }
+}
+
+$('#db-results').addEventListener('click', async (e) => {
+  const go = e.target.closest('[data-db-goto]');
+  if (go) {
+    if (!confirm(`Slew the telescope to ${go.dataset.label}? (calibrates first, then GoTo and tracking)`)) return;
+    go.disabled = true;
+    go.classList.add('busy');
+    toast(`GoTo ${go.dataset.label}: calibrating and slewing…`);
+    await control({ action: 'goto', name: go.dataset.dbGoto }, `GoTo ${go.dataset.label}`);
+    go.disabled = false;
+    go.classList.remove('busy');
+    return;
+  }
+  const ask = e.target.closest('[data-db-agent]');
+  if (ask) {
+    $('#prompt').value = `Plan and capture ${ask.dataset.dbAgent} tonight: check visibility and conditions, choose filter/exposure/gain, then calibrate, GoTo, focus and start live stacking. Keep me posted on progress.`;
+    showScreen('chat');
+    $('#prompt').focus();
+    return;
+  }
+  const row = e.target.closest('.db-row');
+  if (!row) return;
+  const item = row.closest('.db-item');
+  const id = item.dataset.id;
+  const wasOpen = db.open === id;
+  for (const other of $$('.db-item.open')) {
+    other.classList.remove('open');
+    $('.db-row', other).setAttribute('aria-expanded', 'false');
+    $('.db-detail', other).hidden = true;
+  }
+  db.open = wasOpen ? null : id;
+  if (wasOpen) return;
+  item.classList.add('open');
+  row.setAttribute('aria-expanded', 'true');
+  const detail = $('.db-detail', item);
+  detail.hidden = false;
+  dbDetail(id, detail);
+});
+
+let dbTimer;
+const dbChanged = (delay = 0) => {
+  dbSaveFilters();
+  clearTimeout(dbTimer);
+  dbTimer = setTimeout(() => dbSearch(), delay);
+};
+$('#db-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  dbEl('q').blur(); // a phone keyboard covers half the results
+  dbChanged();
+});
+$('#db-form').addEventListener('input', (e) => dbChanged(e.target.matches('input[type=search], input[type=number]') ? 300 : 0));
+$('#db-reset').onclick = () => {
+  for (const f of DB_FIELDS) {
+    if (dbEl(f).type === 'checkbox') dbEl(f).checked = false;
+    else if (dbEl(f).tagName === 'SELECT') dbEl(f).selectedIndex = 0;
+    else dbEl(f).value = '';
+  }
+  dbChanged();
+};
+$('#db-load').onclick = () => dbSearch(true);
 
 // ------------------------------------------------------------------ album
 async function loadAlbum() {

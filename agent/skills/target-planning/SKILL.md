@@ -5,7 +5,7 @@ description: Choosing what to image tonight — visibility windows, Moon, framin
 # Target planning
 
 1. `sky_conditions` → darkness window, Moon phase/rise/set, planets. `weather_forecast` → is it worth setting up, and when is the clear window? Plan targets that are well placed *during the clear window*.
-2. `plan_targets` (optionally `types=["emission"]`, `["galaxy"]`, …, `min_altitude`, `start`/`end`). The score already weights hours above minimum altitude, peak altitude, framing, brightness and Moon separation.
+2. `plan_targets` (optionally `types=["emission"]`, `["galaxy"]`, …, `min_altitude`, `start`/`end`). The score already weights hours above minimum altitude, peak altitude, framing, brightness and Moon separation. For anything the plan doesn't surface (a specific catalog, constellation, size range, "what Sharpless nebulae are up tonight"), use `search_catalog`: it filters the full ~45k-object database and returns tonight's hours and best time per object.
 3. Sanity-check the top picks:
    - **Framing**: tele field is 177′ × 100′. Objects under ~8′ look tiny. Objects larger than the field need a mosaic or the wide camera.
    - **Altitude**: in Alt-Az plan each target's slot in the **30–65°** band. Below that, haze and extinction; above ~65° field rotation trails the frame edges even at 15 s (table in acquisition-profiles). East/west of the meridian rotates least. In EQ mode only the low limit matters.

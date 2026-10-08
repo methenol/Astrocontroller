@@ -57,6 +57,7 @@
     <nav class="tabs tabs-top" id="tabs-top" role="tablist" aria-label="Sections">
       <button class="tab active" data-tab="chat" role="tab" aria-selected="true" aria-controls="panel-chat">Agent</button>
       <button class="tab" data-tab="tonight" role="tab" aria-selected="false" aria-controls="panel-tonight">Tonight</button>
+      <button class="tab" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database">Database</button>
       <button class="tab" data-tab="album" role="tab" aria-selected="false" aria-controls="panel-album">Album</button>
       <button class="tab" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library">Library</button>
       <button class="tab" data-tab="skills" role="tab" aria-selected="false" aria-controls="panel-skills">Skills</button>
@@ -251,6 +252,40 @@
       <div id="plan">–</div>
     </section>
 
+    <!-- ========== Database: the object catalog ========== -->
+    <section class="panel" id="panel-database" role="tabpanel" aria-label="Object database">
+      <form class="db-search" id="db-form" role="search" autocomplete="off">
+        <input type="search" id="db-q" enterkeyhint="search" placeholder="Search: M 31, Sh2-155, Veil, Vega, Arp 273…" aria-label="Search the object database">
+        <div class="db-filters">
+          <select id="db-type" aria-label="Object type"><option value="">all types</option></select>
+          <select id="db-catalog" aria-label="Catalog"><option value="">all catalogs</option></select>
+          <select id="db-con" aria-label="Constellation"><option value="">all constellations</option></select>
+          <select id="db-up" aria-label="Visibility">
+            <option value="">any time</option><option value="now">up now</option><option value="tonight">up tonight</option>
+          </select>
+          <select id="db-sort" aria-label="Sort by">
+            <option value="relevance">best match</option><option value="name">name</option><option value="mag">brightest</option><option value="size">largest</option>
+            <option value="altitude">highest now</option><option value="hours">longest up tonight</option><option value="transit">best time tonight</option><option value="ra">right ascension</option>
+          </select>
+        </div>
+        <details class="db-more-filters" id="db-more-filters">
+          <summary>More filters</summary>
+          <div class="db-filters">
+            <label>mag ≤ <input type="number" id="db-maxmag" step="0.5" min="-2" max="20" inputmode="decimal" placeholder="any"></label>
+            <label>size ≥ <input type="number" id="db-minsize" step="1" min="0" inputmode="decimal" placeholder="0">′</label>
+            <label>size ≤ <input type="number" id="db-maxsize" step="1" min="0" inputmode="decimal" placeholder="any">′</label>
+            <label>above <input type="number" id="db-minalt" step="5" min="0" max="85" inputmode="numeric" placeholder="–">°</label>
+            <label class="db-check"><input type="checkbox" id="db-named"> named only</label>
+            <button type="button" class="ghost" id="db-reset">Reset</button>
+          </div>
+        </details>
+      </form>
+      <div class="row-head"><span class="muted small" id="db-count">–</span></div>
+      <div class="db-list" id="db-results"></div>
+      <button type="button" class="ghost db-load" id="db-load" hidden>Show more</button>
+      <details class="card db-about" id="db-about"><summary class="muted small">About the database</summary><div id="db-sources" class="small"></div></details>
+    </section>
+
     <!-- ========== Album ========== -->
     <section class="panel" id="panel-album" role="tabpanel" aria-label="Album">
       <div class="row-head">
@@ -309,6 +344,7 @@
   <div class="sheet" id="sheet-more" hidden>
     <div class="sheet-scrim" data-close></div>
     <div class="sheet-card" role="group" aria-label="More sections">
+      <button class="tab sheet-item" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><b>Database</b><small>search 45,000 objects, filter by what is up</small></button>
       <button class="tab sheet-item" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library"><b>Library</b><small>transfers, processing, sessions, captures</small></button>
       <button class="tab sheet-item" data-tab="skills" role="tab" aria-selected="false" aria-controls="panel-skills"><b>Skills</b><small>the agent's playbooks</small></button>
       <button class="tab sheet-item" data-tab="log" role="tab" aria-selected="false" aria-controls="panel-log"><b>Log</b><small>server events and errors</small></button>

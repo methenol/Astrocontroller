@@ -10,7 +10,8 @@ import * as http from '../dwarf/http.js';
 import { DwarfCommandError } from '../dwarf/link.js';
 import type { StreamHub } from '../media/streams.js';
 import { loadImage, crop as cropImage, autoStretch, toJpeg, analyze, type FloatImage } from '../media/images.js';
-import { findObject, searchObjects, describe as describeObject } from '../astro/catalog.js';
+import { findObject, searchObjects, gotoLabel, describe as describeObject } from '../astro/catalog.js';
+import { queryCatalog } from '../astro/catalog-search.js';
 import { planNight } from '../astro/planner.js';
 import * as sky from '../astro/sky.js';
 import * as weather from '../astro/weather.js';
@@ -441,7 +442,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     'plan_targets',
     'Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera. Each target gets a visibility score (hours above the minimum altitude, peak altitude, size vs field of view, brightness, Moon separation), scaled by weatherAlignment: how good the hourly forecast (clouds, rain, wind, dew, seeing, transparency) is during that target\'s own best hours, weighted toward its peak. The best targets are those whose optimal time coincides with good weather. bestTime is the target\'s own peak; skyAtBest is the forecast then; clearHours are its forecast-weighted hours up. Use before choosing what to image, and schedule each target around its bestTime.',
     {
-      types: z.array(z.string()).optional().describe('galaxy, nebula, emission, planetary, cluster, globular, open_cluster, supernova_remnant, reflection'),
+      types: z.array(z.string()).optional().describe('galaxy, nebula, emission, planetary, cluster, globular, open_cluster, supernova_remnant, reflection, dark, galaxy_cluster'),
       min_altitude: z.number().optional(),
       max_magnitude: z.number().optional().describe('default 11'),
       min_size_arcmin: z.number().optional().describe('default 4'),
@@ -473,7 +474,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'find_target',
-    'Look up a target by name (M31, NGC 7000, IC 1396, C 33, Sh2-155, "Orion Nebula", Jupiter, Moon…): J2000 coordinates, type, size, magnitude, current altitude/azimuth and tonight\'s visibility.',
+    'Look up a target by name (M31, NGC 7000, IC 1396, C 33, Sh2-155, LBN 437, vdB 142, B 33, Abell 39, UGC 12889, HCG 92, Vega, "alpha Lyr", "Orion Nebula", Jupiter, Moon…): J2000 coordinates, type, size, magnitude, other designations, current altitude/azimuth and tonight\'s visibility. goto_name is the name to give goto_target.',
     { name: z.string() },
     async ({ name }) => {
       const s = site();
@@ -490,6 +491,10 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       const fov = dwarf.state.fov.tele ?? { h: 2.95, v: 1.66 };
       return text({
         summary: describeObject(o),
+        goto_name: gotoLabel(o),
+        designations: o.aliases.slice(0, 12),
+        brightnessClass: o.brightClass,
+        catalogs: o.sources,
         raHoursJ2000: round(o.raHours, 5),
         decDegJ2000: round(o.decDeg, 4),
         ra: sky.hoursToHms(o.raHours),
@@ -499,6 +504,49 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         tonight: vis ? { maxAltitude: vis.maxAlt, at: sky.fmtTime(vis.maxAltAt, tz), hoursAboveMinAlt: vis.hoursAboveMin, from: sky.fmtTime(vis.firstAbove, tz), until: sky.fmtTime(vis.lastAbove, tz) } : null,
         fitsTeleFov: o.majorArcmin ? `${round((o.majorArcmin / (fov.h * 60)) * 100, 0)}% of frame width` : 'unknown size',
       });
+    },
+  );
+
+  tool(
+    'search_catalog',
+    'Search and filter the object database (~45,000 objects: NGC/IC/Messier/Caldwell, Sharpless, LBN/LDN, Barnard, vdB, Cederblad, RCW, planetary nebulae, supernova remnants, open/globular clusters, RC3 galaxies, Arp, Hickson, Abell clusters, bright stars with IAU names). Use it to find candidates plan_targets does not rank (dark nebulae, faint Sharpless regions, a constellation\'s galaxies, what is up right now). Each result has its altitude now, peak altitude, hours above min_altitude and best time tonight.',
+    {
+      query: z.string().optional().describe('name or designation, substring match ("veil", "sh2-1", "arp")'),
+      types: z.array(z.string()).optional().describe('groups: galaxy, galaxy_cluster, nebula, emission, planetary, cluster, globular, open_cluster, supernova_remnant, reflection, dark, star; or type codes (G, HII, RfN, DrkN, PN, OCl, GCl, SNR…)'),
+      constellation: z.string().optional().describe('IAU abbreviation, e.g. Cyg'),
+      catalog: z.string().optional().describe('messier, caldwell, or a source: openngc, sh2, lbn, ldn, barnard, vdb, ced, rcw, pn, green, dias, harris, rc3, arp, hcg, aco, bsc, iau'),
+      max_magnitude: z.number().optional(),
+      min_size_arcmin: z.number().optional(),
+      max_size_arcmin: z.number().optional(),
+      named: z.boolean().optional().describe('only objects with a common name'),
+      up: z.enum(['now', 'tonight']).optional().describe('now: above min_altitude now; tonight: at least min_hours above it during darkness'),
+      min_altitude: z.number().optional(),
+      min_hours: z.number().optional().describe('with up=tonight; default 1'),
+      sort: z.enum(['relevance', 'name', 'mag', 'size', 'altitude', 'hours', 'transit', 'ra']).optional(),
+      limit: z.number().int().min(1).max(100).optional().describe('default 25'),
+      offset: z.number().int().min(0).optional(),
+    },
+    async (a) => {
+      return text(queryCatalog(
+        {
+          q: a.query,
+          types: a.types,
+          constellation: a.constellation,
+          catalog: a.catalog,
+          maxMag: a.max_magnitude,
+          minSize: a.min_size_arcmin,
+          maxSize: a.max_size_arcmin,
+          named: a.named,
+          up: a.up,
+          minAlt: a.min_altitude ?? config.observer.minAltitudeDeg,
+          minHours: a.min_hours,
+          sort: a.sort,
+          offset: a.offset,
+          limit: a.limit ?? 25,
+        },
+        site(),
+        tz,
+      ));
     },
   );
 
@@ -532,10 +580,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!o) throw new Error(`"${name}" not found; use find_target or give coordinates`);
       const alt = sky.altAz(site(), o.raHours, o.decDeg).altitude;
       if (alt < 5) throw new Error(`${o.id} is below the horizon (altitude ${alt.toFixed(1)}°)`);
-      // The scope names the session folder after this, so use the DWARF app's choice (Messier, then
-      // Caldwell, then the catalog id: its sessions are "C 20", "C 33", "NGC 281") so that nights
-      // captured with the app and with us carry the same target name and stack together.
-      const label = o.aliases.find((a) => /^M \d/.test(a)) ?? o.aliases.find((a) => /^C \d/.test(a)) ?? o.id;
+      // The scope names the session folder after this (see gotoLabel): the DWARF app's choice, so
+      // nights captured with the app and with us carry the same target name and stack together.
+      const label = gotoLabel(o);
       try {
         return text(await dwarf.withPointingRecovery('GoTo', () => dwarf.gotoRaDec(o.raHours, o.decDeg, label, oneClick)));
       } catch (err) {

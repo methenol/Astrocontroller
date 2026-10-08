@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json && node --env-file-if-exists=.env dist/index.js",
-    "catalog": "node scripts/fetch-catalog.mjs",
+    "catalog": "tsc -p tsconfig.json && node dist/tools/build-catalog.js",
     "smoke": "node --env-file-if-exists=.env dist/tools/smoke.js",
     "icons": "node scripts/make-icons.mjs"
   },

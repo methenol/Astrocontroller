@@ -126,7 +126,7 @@ h3 { margin: 0 0 8px; font-size: 14px; }
 #panel-view { padding: 0; overflow: hidden; gap: 0; }
 .screen-body { display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 10px; }
 #panel-chat { overflow: hidden; padding: 8px 10px 0; }
-#panel-tonight, #panel-album, #panel-library, #panel-skills, #panel-log { padding: 10px; }
+#panel-tonight, #panel-database, #panel-album, #panel-library, #panel-skills, #panel-log { padding: 10px; }
 
 /* ---------- bottom navigation ---------- */
 .tabbar {
@@ -445,6 +445,56 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 #proc-queue-box summary { cursor: pointer; margin-top: 8px; min-height: 30px; }
 
 /* ================= tablet: use the width for the live views ================= */
+/* ---------- database ---------- */
+.db-search { display: flex; flex-direction: column; gap: 8px; }
+.db-search input[type=search] { width: 100%; }
+.db-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.db-filters select { flex: 1 1 140px; min-width: 0; }
+.db-filters label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 13px; }
+.db-filters input[type=number] { width: 4.5em; }
+.db-check input { width: 18px; height: 18px; }
+.db-more-filters summary { color: var(--muted); font-size: 13px; cursor: pointer; padding: 4px 0; }
+.db-more-filters[open] summary { margin-bottom: 6px; }
+.db-list { display: flex; flex-direction: column; gap: 4px; }
+.db-item { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); overflow: hidden; }
+.db-item.open { border-color: var(--line-2); }
+.db-row {
+  all: unset; box-sizing: border-box; cursor: pointer;
+  display: flex; gap: 10px; align-items: center; width: 100%;
+  min-height: var(--tap); padding: 8px 10px;
+}
+.db-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.db-main { display: flex; flex-direction: column; gap: 1px; flex: 1 1 auto; min-width: 0; }
+.db-main b { font-weight: 600; }
+.db-main small, .db-vis small { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-vis { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex: 0 0 auto; text-align: right; }
+.db-alt { font-family: var(--mono); font-size: 13px; }
+.db-alt.up { color: var(--ok); }
+.db-alt.low { color: var(--warn); }
+.db-alt.down { color: var(--muted); }
+.db-detail { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.db-chart { width: 100%; max-width: 560px; height: auto; display: block; background: var(--panel-2); border-radius: 8px; }
+.db-chart .ax { stroke: var(--line-2); stroke-width: 1; }
+.db-chart .min { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.db-chart .area { fill: rgba(147, 197, 253, .14); }
+.db-chart .ln { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.db-chart .now { stroke: var(--ok); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.db-chart text { fill: var(--muted); font-size: 10px; }
+.db-chart .minl { fill: var(--warn); }
+.db-facts { display: grid; gap: 4px; font-size: 13px; }
+.db-facts > div { display: grid; grid-template-columns: 9em 1fr; gap: 8px; }
+.db-facts span { color: var(--muted); }
+.db-aliases { display: flex; flex-wrap: wrap; gap: 4px; }
+.db-aliases span { font-size: 12px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
+.db-actions { flex-wrap: wrap; }
+.db-load { align-self: center; }
+.db-src { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 6px; }
+@media (max-width: 699px) {
+  .db-filters select { flex-basis: calc(50% - 3px); }
+  .db-facts > div { grid-template-columns: 1fr; gap: 0; }
+  .db-actions button { flex: 1 1 100%; }
+}
+
 @media (min-width: 700px) {
   .views { grid-template-columns: minmax(0, 2.6fr) minmax(0, 1fr); }
   #view-main { align-self: start; } /* keep its 16:9 height; the side column then matches it */

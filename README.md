@@ -2,7 +2,7 @@
 
 An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Docker and has three parts:
 
-- **An MCP server** with 50 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
+- **An MCP server** with 51 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
 - **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs. It is mobile-first: the same page is a thumb-driven single-screen app on a phone at the scope and a two-column desk layout on a laptop.
 
@@ -80,11 +80,12 @@ An LLM turn ends when the model stops calling tools, and nothing happens after t
 
 The UI is one page, one screen at a time, sized for gloves and dark skies. Nothing scrolls the page itself; each screen scrolls inside its own body, so the header, the capture bar and the tab bar never move.
 
-- **Bottom bar**: View · Agent · Tonight · Album · More. Library, Skills and Log live under **More** on a phone and become top-level tabs at desk widths. The screen you were on is remembered.
+- **Bottom bar**: View · Agent · Tonight · Album · More. Database, Library, Skills and Log live under **More** on a phone and become top-level tabs at desk widths. The screen you were on is remembered.
 - **View**: tap the main view to fill the screen (Fullscreen API where it exists, an in-page mode where it does not — iOS), pinch to zoom, drag to pan, double-tap to zoom to the point you tapped and again to reset, ✕ or Esc to leave. Tapping a small view swaps it into the main slot. Frames are only streamed for the views on screen, so leaving the View screen stops the video and frees the radio.
 - **Capture bar** is pinned under your thumb: camera, Photo, Burst, Record, Stack.
 - **Aim** is a nine-button pad — hold any arrow to keep moving, ■ in the middle stops everything — with a speed slider and Home / Level / Park. Cell size follows the viewport (54-68 px) so it stays a thumb target on a small phone and tightens up at desk widths. Only Aim is open at phone widths; Focus, Mode & exposure and System are folded, and all of them open at desk widths.
 - **Tonight** turns the target plan into cards below 760 px, with each target's best time, weather, framing and filter labelled.
+- **Database** searches and filters the whole object catalog: free-text search over every designation and common name, then type, catalog, constellation, magnitude, size, "named only", and "up now" / "up tonight" above a chosen altitude. Results can be sorted by match, name, brightness, size, current altitude, hours up tonight, best time or RA. Tap a result to see all its designations, tonight's altitude curve against your minimum altitude, Moon separation, and GoTo / ask-the-agent buttons. Your filters are remembered.
 - **Night mode** (the sliders menu in the header, together with Disconnect) puts a red multiply tint over everything, including the live images, and is remembered.
 - **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
 - **Tap targets** are floored at 44 px tall on touch layouts; secondary controls (the view buttons, header chips, small chips under tiles) sit at 38-42 px, and nothing at phone widths is smaller than a gloved fingertip.
@@ -139,7 +140,7 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 | Status/system | `telescope_status`, `telescope_device_info`, `telescope_reconnect`, `sync_time_and_location`, `power`, `raw_command` |
 | Camera | `set_shooting_mode`, `get_camera_settings`, `set_camera_setting`, `take_photo`, `video_recording`, `timelapse`, `view_camera` |
 | Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `focus_step`, `focus_position` (incl. infinity) |
-| Planning | `sky_conditions`, `weather_forecast`, `plan_targets`, `find_target` |
+| Planning | `sky_conditions`, `weather_forecast`, `plan_targets`, `find_target`, `search_catalog` |
 | Astro | `calibrate`, `goto_target`, `stop_goto`, `live_stacking`, `stacking_status`, `wait`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
 | Images & data | `list_album`, `view_image`, `analyze_image`, `analyze_subs`, `dark_frames`, `delete_album_items`, `list_device_sessions`, `transfer_session`, `transfer_files`, `jobs`, `list_library` |
@@ -152,7 +153,7 @@ For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `nod
 - **Control**: WebSocket `:9900`, protobuf `WsPacket`s. The protobuf definitions, packet codec and command registry come from [`@alikh/dwarflab-sdk`](https://github.com/alikh31/dwarflab-sdk) (MIT). `src/dwarf/protocol.ts` adds commands and message variants the SDK lacks (motor run-to/reset/position, one-click GoTo `goto_only`, EQ solving results, …), and the firmware error table comes from [`dwarf_python_api`](https://github.com/stevejcl/dwarf_python_api) (MIT).
 - **Live views**: RTSP `:554/ch0|ch1/stream0` (H.265 1080p30) → ffmpeg → MJPEG, on demand. **Stack preview**: the scope's own MJPEG on `:8092/mainstream`.
 - **HTTP** `:8082`: device info, album, and the per-mode parameter schema (exposure tables, gain lists, param IDs). **Files**: HTTP `:80` and anonymous FTP `:21`.
-- **Catalog**: [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) plus a nickname table. GoTo coordinates are J2000, which I verified against coordinates the DWARF app recorded on this device.
+- **Catalog**: about 45,000 objects in `catalog/objects.tsv`, built by `npm run catalog` (`src/tools/build-catalog.ts`). The sources are [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) and these VizieR catalogs: Sharpless, LBN, Cederblad, RCW, van den Bergh, Barnard, LDN, Strasbourg-ESO planetary nebulae, Green SNRs, Dias open clusters, Harris globulars, RC3 galaxies, Arp, Hickson, Abell clusters and the Bright Star Catalogue. The IAU star names are added, plus a user-editable nickname table (`catalog/nicknames.csv`). An object listed in several catalogs is merged into one entry with all its designations. Merging matches designations and cross-identifications first, then position and size for extended objects. `catalog/sources.json` lists each source, with its citation and how many records it added or merged; the Database tab shows the same list. GoTo coordinates are J2000, which I verified against coordinates the DWARF app recorded on this device.
 - **Weather**: [Open-Meteo](https://open-meteo.com) (clouds by layer, rain, wind, dew point) + [7Timer!](https://www.7timer.info) (seeing and transparency).
 
 ## Validation status (Dwarf 3, firmware 1.5.3, 2026-10-02)
@@ -177,7 +178,7 @@ Firmware quirks found along the way: several commands are acted on but never ack
 ```bash
 npm install && npm run build
 node --env-file=.env dist/index.js     # needs ffmpeg; set AGENT_ENABLED=false if omp isn't installed
-npm run catalog                        # refresh OpenNGC
+npm run catalog                        # rebuild catalog/objects.tsv (downloads cached in catalog/.cache; --fresh to re-download)
 ```
 
 The web UI is `public/` served as-is: no build step for HTML/CSS/JS changes, just reload.

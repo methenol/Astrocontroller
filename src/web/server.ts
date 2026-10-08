@@ -18,7 +18,8 @@ import * as studio from '../processing/studio.js';
 import * as sky from '../astro/sky.js';
 import { planNight } from '../astro/planner.js';
 import * as weather from '../astro/weather.js';
-import { findObject } from '../astro/catalog.js';
+import { findObject, gotoLabel } from '../astro/catalog.js';
+import { queryCatalog, catalogMeta, objectDetails, type CatalogQuery } from '../astro/catalog-search.js';
 
 const log = logger('web');
 
@@ -130,6 +131,41 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
     const site = { lat: loc.lat, lon: loc.lon, elev: loc.elev };
     const observability = (await weather.observabilityAt(site, config.observer.timezone)) ?? undefined;
     return planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, limit: 20, fovArcmin: { w: fov.h * 60, h: fov.v * 60 }, timezone: config.observer.timezone, observability });
+  }));
+
+  // ---------------------------------------------------------------- object database
+  const observerSite = () => {
+    const loc = dwarf.location();
+    return loc ? { lat: loc.lat, lon: loc.lon, elev: loc.elev } : null;
+  };
+  api.get('/catalog/meta', route(async () => catalogMeta()));
+  api.get('/catalog/search', route(async (req) => {
+    const q = req.query;
+    const str = (k: string) => (typeof q[k] === 'string' && q[k] !== '' ? (q[k] as string) : undefined);
+    const num = (k: string) => (str(k) !== undefined && Number.isFinite(Number(str(k))) ? Number(str(k)) : undefined);
+    const query: CatalogQuery = {
+      q: str('q'),
+      types: str('types')?.split(','),
+      constellation: str('constellation'),
+      catalog: str('catalog'),
+      maxMag: num('maxMag'),
+      minSize: num('minSize'),
+      maxSize: num('maxSize'),
+      named: str('named') === '1',
+      up: str('up') === 'now' || str('up') === 'tonight' ? (str('up') as 'now' | 'tonight') : undefined,
+      minAlt: num('minAlt') ?? config.observer.minAltitudeDeg,
+      minHours: num('minHours'),
+      sort: str('sort') as CatalogQuery['sort'],
+      offset: num('offset'),
+      limit: num('limit'),
+    };
+    return queryCatalog(query, observerSite(), config.observer.timezone);
+  }));
+  api.get('/catalog/object', route(async (req) => {
+    const o = findObject(String(req.query.id ?? ''));
+    if (!o) throw new Error(`"${req.query.id}" is not in the database`);
+    const fov = dwarf.state.fov.tele ?? { h: 2.95, v: 1.66 };
+    return objectDetails(o, observerSite(), config.observer.timezone, { minAlt: config.observer.minAltitudeDeg, fovArcmin: { w: fov.h * 60, h: fov.v * 60 } });
   }));
 
   // ---------------------------------------------------------------- album & library
@@ -256,6 +292,17 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
       case 'find': {
         const o = findObject(String(b.name ?? ''));
         return o ?? { error: 'not found' };
+      }
+      case 'goto': {
+        // GoTo from the Database tab: a catalog object by name, one-click (calibrate + GoTo).
+        const o = findObject(String(b.name ?? ''));
+        if (!o) throw new Error(`"${b.name}" is not in the database`);
+        const loc = dwarf.requireLocation();
+        const alt = sky.altAz({ lat: loc.lat, lon: loc.lon, elev: loc.elev }, o.raHours, o.decDeg).altitude;
+        if (alt < 5) throw new Error(`${o.id} is below the horizon (altitude ${alt.toFixed(1)}°)`);
+        const label = gotoLabel(o);
+        duty.event(`the user started a GoTo to ${label} from the web UI`, true);
+        return { result: await dwarf.withPointingRecovery('GoTo', () => dwarf.gotoRaDec(o.raHours, o.decDeg, label, b.oneClick !== false)) };
       }
       default:
         throw new Error(`unknown action ${b.action}`);
