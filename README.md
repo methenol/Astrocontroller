@@ -24,7 +24,7 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 
 | Variable | Purpose |
 |---|---|
-| `DWARF_HOST` | Telescope IP (STA mode), e.g. `10.0.0.196`. AP mode is `192.168.88.1`. |
+| `DWARF_HOST` | Telescope IP (STA mode), e.g. `10.0.0.196`. AP mode is `192.168.88.1`. Can be changed from the web UI (View → System → Telescope IP); that setting is kept in `data/telescope.json` and wins over this one until you clear the field. |
 | `DWARF_AUTO_SYNC_TIME_LOCATION` | Push time, timezone and location on every connect (default `true`). |
 | `OBSERVER_LATITUDE` / `OBSERVER_LONGITUDE` / `OBSERVER_ELEVATION_M` | Site. Needed for planning, calibration, GoTo, polar alignment and weather. |
 | `OBSERVER_TIMEZONE` | IANA zone (e.g. `America/New_York`). All reported times use it. |

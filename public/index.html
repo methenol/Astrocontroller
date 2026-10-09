@@ -164,6 +164,12 @@
                 <button class="warn" data-power="reboot" title="Reboot the telescope (fixes a hung camera service); it reconnects in about a minute">Reboot</button>
                 <button class="warn" data-power="shutdown" title="Shut the telescope down">Shut down</button>
               </div>
+              <form class="ctl-row host-row" id="host-form">
+                <label for="inp-host" class="small muted">Telescope IP</label>
+                <input id="inp-host" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" placeholder="192.168.88.1" title="IP address or host name of the telescope. Leave empty to use DWARF_HOST from .env." aria-label="Telescope IP address">
+                <button type="submit" id="btn-host">Set</button>
+              </form>
+              <p class="small muted" id="host-note"></p>
             </div>
           </details>
         </div>

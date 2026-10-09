@@ -4,7 +4,7 @@ import type http from 'node:http';
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import sharp from 'sharp';
-import { config } from '../config.js';
+import { config, setTelescopeHost, telescopeHostInfo } from '../config.js';
 import { logger, logBus, recentLogs, errMsg } from '../log.js';
 import type { Dwarf, CameraName } from '../dwarf/device.js';
 import * as dhttp from '../dwarf/http.js';
@@ -78,6 +78,20 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
     hub.release();
     duty.event('the user released the telescope (Disconnect in the web UI): no telescope commands until they press Connect', true);
     return { released: true, cancelledTransfers: cancelled };
+  }));
+
+  // Telescope address (overrides DWARF_HOST, persisted in the data folder). Empty = back to .env.
+  api.post('/telescope-host', route(async (req) => {
+    const before = config.dwarf.host;
+    const host = setTelescopeHost(String(req.body?.host ?? ''));
+    if (host !== before) {
+      thumbCache.clear();
+      dwarf.setHost(host);
+      duty.event(`the user changed the telescope address from ${before} to ${host} in the web UI`, true);
+    }
+    const cfg = publicConfig(dwarf);
+    broadcast({ type: 'config', config: cfg });
+    return cfg;
   }));
 
   // Duty loop (closed-loop control of the agent)
@@ -454,6 +468,7 @@ function publicConfig(dwarf: Dwarf) {
   const loc = dwarf.location();
   return {
     telescope: config.dwarf.host,
+    telescopeHost: telescopeHostInfo(),
     observer: loc ? { ...loc, timezone: config.observer.timezone } : null,
     llm: { baseUrl: config.llm.baseUrl, model: config.llm.model, reasoningEffort: config.llm.reasoningEffort, vision: config.llm.vision },
     library: config.paths.library,

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 function str(name: string, fallback = ''): string {
@@ -117,6 +118,47 @@ export const config = {
 };
 
 export type Config = typeof config;
+
+// ---------------------------------------------------------------------------
+// Telescope address set from the web UI: kept in DATA_DIR/telescope.json and wins over DWARF_HOST.
+// ---------------------------------------------------------------------------
+
+const envHost = config.dwarf.host;
+const hostFile = path.join(dataDir, 'telescope.json');
+
+try {
+  const saved = JSON.parse(fs.readFileSync(hostFile, 'utf8'))?.host;
+  if (typeof saved === 'string' && validHost(saved)) config.dwarf.host = saved;
+} catch {
+  /* no override saved */
+}
+
+function validHost(h: string): boolean {
+  return h.length <= 253 && /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/.test(h);
+}
+
+/** Where the telescope address comes from: the web UI override, or .env (DWARF_HOST). */
+export function telescopeHostInfo(): { host: string; source: 'ui' | 'env'; envHost: string } {
+  return { host: config.dwarf.host, source: fs.existsSync(hostFile) ? 'ui' : 'env', envHost };
+}
+
+/**
+ * Change the telescope address and remember it across restarts. An empty value drops the
+ * override and goes back to DWARF_HOST. Returns the address now in use.
+ */
+export function setTelescopeHost(input: string): string {
+  const host = input.trim();
+  if (host === '' || host === envHost) {
+    fs.rmSync(hostFile, { force: true });
+    config.dwarf.host = envHost;
+    return envHost;
+  }
+  if (!validHost(host)) throw new Error(`"${host}" is not an IP address or host name`);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(hostFile, JSON.stringify({ host, since: Date.now() }));
+  config.dwarf.host = host;
+  return host;
+}
 
 export function observerLocation(): { lat: number; lon: number; elev: number } | null {
   const { latitude, longitude, elevationM } = config.observer;

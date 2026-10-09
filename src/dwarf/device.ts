@@ -174,6 +174,15 @@ export class Dwarf extends EventEmitter {
     this.changed();
   }
 
+  /** Telescope address changed in the web UI: drop what we knew about the old device and reconnect there. */
+  setHost(host: string): void {
+    log.info(`telescope address set to ${host}${gate.released ? ' (released: connects when Connect is pressed)' : ''}`);
+    this.state.device = {};
+    this.state.storage = undefined;
+    this.link.retarget(host);
+    this.changed();
+  }
+
   private motorTimer: NodeJS.Timeout | null = null;
 
   stop(): void {

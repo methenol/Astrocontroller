@@ -231,6 +231,9 @@ body.view-full .only-full, .view-main:fullscreen .only-full { display: inline-fl
 .ctl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; min-width: 0; }
 .ctl-row > * { min-width: 0; }
 .ctl-row button { flex: 1 1 auto; }
+.host-row input { flex: 1 1 10em; }
+.host-row button { flex: 0 0 auto; }
+#host-note { margin: 4px 0 0; }
 input[type=range] { -webkit-appearance: none; appearance: none; }
 /* a native number stepper eats half of a 52px field on WebKit; arrows on the keyboard still step it */
 input[type=number] { -moz-appearance: textfield; appearance: textfield; }

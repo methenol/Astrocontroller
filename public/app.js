@@ -286,6 +286,7 @@ function handle(m) {
       state.history = m.history ?? [];
       (m.jobs ?? []).forEach((j) => state.jobs.set(j.id, j));
       renderTelescope(m.telescope);
+      renderHost();
       renderAgentStatus(m.agent);
       renderDuty(m.duty);
       renderChat();
@@ -297,6 +298,10 @@ function handle(m) {
       break;
     case 'telescope':
       renderTelescope(m.state);
+      break;
+    case 'config':
+      state.config = m.config;
+      renderHost();
       break;
     case 'agentStatus':
       renderAgentStatus(m.status);
@@ -642,6 +647,34 @@ $('#btn-link').onclick = async () => {
     toast(released ? 'Connecting…' : `Telescope released${r.cancelledTransfers ? `, ${r.cancelledTransfers} transfer(s) cancelled` : ''}`);
   } catch (e) {
     toast(e.message, true);
+  }
+};
+
+// ---- telescope address
+function renderHost() {
+  const h = state.config?.telescopeHost;
+  if (!h) return;
+  const inp = $('#inp-host');
+  if (document.activeElement !== inp) inp.value = h.host;
+  $('#host-note').textContent = h.source === 'ui' ? `Set here (overrides DWARF_HOST ${h.envHost}; clear the field to go back to it).` : 'From DWARF_HOST in .env.';
+}
+$('#host-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const host = $('#inp-host').value.trim();
+  const target = host || state.config?.telescopeHost?.envHost;
+  if (target === state.config?.telescopeHost?.host && (host || state.config?.telescopeHost?.source === 'env')) return toast(`Already using ${target}`);
+  const busy = state.telescope?.stacking?.tele?.state === 'running' ? ' Live stacking is running and will be interrupted.' : '';
+  if (state.telescope?.connected && !confirm(`Connect to the telescope at ${target}?${busy} The current connection is closed.`)) return;
+  $('#btn-host').disabled = true;
+  try {
+    state.config = await api('telescope-host', { host });
+    $('#inp-host').blur();
+    renderHost();
+    toast(state.telescope?.released ? `Address set to ${state.config.telescope} (press Connect)` : `Connecting to ${state.config.telescope}…`);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    $('#btn-host').disabled = false;
   }
 };
 

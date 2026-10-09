@@ -68,7 +68,7 @@ export class DwarfLink extends EventEmitter {
   connected = false;
 
   constructor(
-    private readonly host: string,
+    private host: string,
     private readonly port: number,
   ) {
     super();
@@ -93,6 +93,21 @@ export class DwarfLink extends EventEmitter {
     this.reconnectTimer = null;
     this.teardown(new Error('reconnecting'));
     this.backoff = 1000;
+    this.open();
+  }
+
+  /** Point the link at another address (set from the web UI); reconnects at once unless stopped. */
+  retarget(host: string): void {
+    if (host === this.host) return;
+    this.host = host;
+    if (this.stopped) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const wasConnected = this.connected;
+    this.teardown(new Error(`telescope address changed to ${host}`));
+    if (wasConnected) this.emit('disconnected');
+    this.backoff = 1000;
+    this.shortLived = 0;
     this.open();
   }
 
