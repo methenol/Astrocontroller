@@ -405,6 +405,7 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .wx-h.fair .sc { color: var(--warn); }
 .wx-h.poor .sc { color: var(--err); }
 .wx-verdict { font-size: 13px; }
+.wx-age { color: var(--warn); }
 .wx-h .rain { color: var(--muted); }
 .wx-h .rain.mid { color: var(--warn); }
 .wx-h .rain.high { color: var(--err); font-weight: 600; }

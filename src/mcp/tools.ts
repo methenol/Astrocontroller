@@ -426,12 +426,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       const s = site();
       if (!period || period === 'tonight') {
         const t = await weather.tonight(s, tz);
-        return text({ ...t, hours: t.hours.map(compactHour) });
+        return text({ ...t, hours: t.hours.map(compactHour), ...forecastStaleness(t) });
       }
-      const { hours, current } = await weather.forecast(s, tz);
+      const f = await weather.forecast(s, tz);
       const now = Date.now() - 3600e3;
       const n = period === 'next24' ? 24 : 72;
-      return text({ current, hours: hours.filter((h) => new Date(h.time).getTime() >= now).slice(0, n).map(compactHour) });
+      return text({ fetchedAt: f.fetchedAt, ageMin: f.ageMin, stale: f.stale, current: f.current, hours: f.hours.filter((h) => new Date(h.time).getTime() >= now).slice(0, n).map(compactHour), ...forecastStaleness(f) });
     },
   );
 
@@ -1142,5 +1142,17 @@ function compactHour(h: weather.HourForecast) {
     seeing: h.seeing,
     transparency: h.transparency,
     issues: h.issues.length ? h.issues : undefined,
+  };
+}
+
+/**
+ * Weather is cached and the last good forecast is kept when a refresh fails (see astro/weather.ts),
+ * so the numbers can be minutes or hours old. Say so out loud: the agent must not report a cached
+ * forecast as if it had just asked the providers.
+ */
+function forecastStaleness(f: { stale: boolean; ageMin: number; staleError?: string }) {
+  if (!f.stale) return {};
+  return {
+    forecastWarning: `this forecast is ${f.ageMin} min old${f.staleError ? `; every refresh since has failed (${f.staleError})` : ''}. Say it is ${f.ageMin} min old rather than current, and call weather_forecast again before acting on it.`,
   };
 }

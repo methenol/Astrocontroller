@@ -1250,24 +1250,42 @@ async function loadTonight() {
 }
 $('#sel-plan-type').onchange = loadTonight;
 
+// The last forecast that actually rendered. A failed refresh must not blank the card: the server
+// holds the last forecast it did fetch and serves that flagged stale, and if even that is gone the
+// numbers already on screen stay there, with the reason for the failure next to them.
+let wxLast = null;
+function renderWeather(w, refreshError) {
+  const c = w.current ?? {};
+  // One amber note says it all: when the reload itself just failed, that is the fresher fact and the
+  // card says it in full; the cached copy then only states its age.
+  const age = w.stale ? `<span class="wx-age"> · cached ${w.ageMin} min ago${w.staleError && !refreshError ? ' — the refresh since has failed' : ''}</span>` : '';
+  const why = refreshError ? `<span class="wx-age"> · not reloaded: ${esc(refreshError)}</span>` : '';
+  $('#chip-wx').textContent = `☁ ${c.cloudCover ?? '–'}% · tonight ${w.averageScore}/100`;
+  $('#chip-wx').title = w.verdict;
+  $('#weather').innerHTML = `<h3>Weather & observability</h3>
+    <div class="wx-verdict">${esc(w.verdict)}</div>
+    <div class="muted small">now: ${c.cloudCover}% cloud · ${c.temperatureC}°C · RH ${c.humidity}% · dew point ${c.dewPointC}°C · wind ${c.windKmh}/${c.gustKmh} km/h${w.commonIssues.length ? ` · watch: ${esc(w.commonIssues.slice(0, 4).join(', '))}` : ''}${age}${why}</div>
+    <div class="wx-strip">${w.hours.map((h) => `<div class="wx-h ${h.rating}" title="${esc(`${h.local}: ${h.issues.join('; ') || 'clear'}${h.seeing ? ` · seeing ${h.seeing}, transparency ${h.transparency}` : ''}`)}">
+      <div>${esc(h.local.split(', ')[1] ?? h.local)}</div><div class="sc">${h.score}</div><div>☁${h.cloudTotal}</div><div class="rain ${h.precipProbability >= 50 ? 'high' : h.precipProbability >= 25 ? 'mid' : ''}" title="${esc(`rain chance ${h.precipProbability}% · expected ${h.precipMm ?? 0} mm`)}">🌧${h.precipProbability}%${h.precipMm >= 0.1 ? `<br>${h.precipMm.toFixed(1)}mm` : ''}</div><div>💧${h.dewSpreadC}°</div><div>🌬${Math.round(h.gustKmh)}</div></div>`).join('')}</div>
+    <div class="muted small">score 0–100 · ☁ cloud % · 🌧 rain chance (and mm expected) · 💧 dew-point spread · 🌬 gusts km/h · Open-Meteo + 7Timer</div>`;
+}
+
 async function loadWeather() {
   try {
-    const w = await api('weather');
-    const c = w.current ?? {};
-    $('#chip-wx').textContent = `☁ ${c.cloudCover ?? '–'}% · tonight ${w.averageScore}/100`;
-    $('#chip-wx').title = w.verdict;
-    $('#weather').innerHTML = `<h3>Weather & observability</h3>
-      <div class="wx-verdict">${esc(w.verdict)}</div>
-      <div class="muted small">now: ${c.cloudCover}% cloud · ${c.temperatureC}°C · RH ${c.humidity}% · dew point ${c.dewPointC}°C · wind ${c.windKmh}/${c.gustKmh} km/h${w.commonIssues.length ? ` · watch: ${esc(w.commonIssues.slice(0, 4).join(', '))}` : ''}</div>
-      <div class="wx-strip">${w.hours.map((h) => `<div class="wx-h ${h.rating}" title="${esc(`${h.local}: ${h.issues.join('; ') || 'clear'}${h.seeing ? ` · seeing ${h.seeing}, transparency ${h.transparency}` : ''}`)}">
-        <div>${esc(h.local.split(', ')[1] ?? h.local)}</div><div class="sc">${h.score}</div><div>☁${h.cloudTotal}</div><div class="rain ${h.precipProbability >= 50 ? 'high' : h.precipProbability >= 25 ? 'mid' : ''}" title="${esc(`rain chance ${h.precipProbability}% · expected ${h.precipMm ?? 0} mm`)}">🌧${h.precipProbability}%${h.precipMm >= 0.1 ? `<br>${h.precipMm.toFixed(1)}mm` : ''}</div><div>💧${h.dewSpreadC}°</div><div>🌬${Math.round(h.gustKmh)}</div></div>`).join('')}</div>
-      <div class="muted small">score 0–100 · ☁ cloud % · 🌧 rain chance (and mm expected) · 💧 dew-point spread · 🌬 gusts km/h · Open-Meteo + 7Timer</div>`;
+    wxLast = await api('weather');
+    renderWeather(wxLast);
   } catch (e) {
-    $('#weather').innerHTML = `<span class="muted">weather unavailable: ${esc(e.message)}</span>`;
+    // Only reached when the server has no forecast to hand back at all (it keeps the last one it
+    // fetched right through a dead connection). Keep what is up; say it is not current.
+    if (wxLast) renderWeather(wxLast, e.message);
+    else $('#weather').innerHTML = `<span class="muted">weather unavailable: ${esc(e.message)}</span>`;
   }
 }
 setTimeout(loadWeather, 1500);
-setInterval(loadWeather, 15 * 60 * 1000);
+// Polled faster than the forecast is refetched (15 min server-side): such a poll is a cache hit and
+// costs nothing upstream, and a refresh that failed is tried again in five minutes rather than
+// waiting for the next quarter-hour — which is how the card used to sit blank for a whole period.
+setInterval(loadWeather, 5 * 60 * 1000);
 $('#plan').addEventListener('click', (e) => {
   const b = e.target.closest('[data-image]');
   if (!b) return;
