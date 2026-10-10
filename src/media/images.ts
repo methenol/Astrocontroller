@@ -33,6 +33,9 @@ export interface Crop {
 /** Plate scale assumptions (full 3840-px sensor width). */
 const FOV_DEG = { tele: 2.95, wide: 45.06 };
 
+/** Arcsec per pixel for a frame of this width taken with this lens; the pixel size a star is measured in. */
+export const plateScaleArcsecPerPx = (camera: 'tele' | 'wide', widthPx: number): number => (FOV_DEG[camera] * 3600) / widthPx;
+
 function guessCamera(src: string): 'tele' | 'wide' | undefined {
   const s = src.toLowerCase();
   if (s === 'tele' || s.includes('tele') || s.includes('cam_0')) return 'tele';
@@ -361,7 +364,7 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
   found.sort((p, q) => q.peak - p.peak);
   const med = (arr: number[]) => (arr.length ? [...arr].sort((p, q) => p - q)[Math.floor(arr.length / 2)] : undefined);
   const camera = cameraHint ?? img.camera;
-  const plate = camera ? (FOV_DEG[camera] * 3600) / img.width : undefined;
+  const plate = camera ? plateScaleArcsecPerPx(camera, img.width) : undefined;
   const medHfr = med(found.slice(0, 200).map((s) => s.hfr));
   const medRound = med(found.slice(0, 200).map((s) => s.round));
 

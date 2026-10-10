@@ -21,6 +21,19 @@ const MOTOR_OVERTIME = new Set([-14510, -14511, -14512, -14513, -14514, -14515, 
 const opState = (n: unknown) => OPERATION_STATE[Number(n ?? 0)] ?? `state_${n}`;
 const astroState = (n: unknown) => ASTRO_STATE[Number(n ?? 0)] ?? `state_${n}`;
 
+/** Progress of a star-sharpness measurement or star-focus sweep, for the web UI. */
+export interface FocusTune {
+  running: boolean;
+  action: 'measure' | 'sweep';
+  startedAt: number;
+  finishedAt?: number;
+  total?: number;
+  index?: number;
+  position?: number;
+  best?: { position: number; hfrPx: number; score: number };
+  message?: string;
+}
+
 export interface StackingInfo {
   state: string;
   target?: string;
@@ -78,6 +91,8 @@ export interface TelescopeState {
   ndLock?: { since: number; note: string } | null;
   eqSolving: { state: string; result?: { azimuthErrorDeg: number; altitudeErrorDeg: number; at: number } };
   autofocus: { state: string; astro?: string };
+  /** a star-sharpness measurement or focus sweep in progress (media/focus.ts publishes its progress here) */
+  focusTune?: FocusTune;
   capture: { photo?: string; burst?: string; record?: string; timelapse?: string; panorama?: string; burstProgress?: string };
   sentry?: { state: string; objectType?: number };
   trackResult?: Record<string, unknown>;
@@ -207,6 +222,12 @@ export class Dwarf extends EventEmitter {
       this.emitPending = false;
       this.emit('state', this.state);
     }, 150);
+  }
+
+  /** Publish a state change made outside the notification path (a long operation's progress) to the UI. */
+  publishState(patch: Partial<TelescopeState>): void {
+    Object.assign(this.state, patch);
+    this.changed();
   }
 
   request(cmd: number, params: Record<string, unknown> = {}, opts?: RequestOptions) {

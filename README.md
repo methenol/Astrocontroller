@@ -2,7 +2,7 @@
 
 An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Docker and has three parts:
 
-- **An MCP server** with 51 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
+- **An MCP server** with 53 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
 - **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs. It is mobile-first: the same page is a thumb-driven single-screen app on a phone at the scope and a two-column desk layout on a laptop.
 
@@ -75,6 +75,7 @@ An LLM turn ends when the model stops calling tools, and nothing happens after t
 
 - **Disconnect / Connect** releases the telescope without stopping the container. It closes the control link, the video readers and the stack preview, cancels transfers, and refuses every command until you press Connect (e.g. to use the DWARFLAB app). It survives a restart. On a phone it is in the ⋯ menu; at desk widths it sits in the top bar.
 - **Reboot / Shut down** are in the System group of the controls (with confirmation). On a phone the whole System group is folded behind the ⋯ menu.
+- **Star focus** lives in the Focus group: **Sharpness ★** takes one tele frame and scores how sharp the stars are at the current focus (median star half-flux radius → `1000 ÷ HFR″`), **Tune ★** steps the focuser ± 15/30/60 units around it, scores every stop and leaves it on the sharpest. The line under the buttons shows the last reading, and during a sweep which sample it is on; the focus buttons lock while it runs. Exposure and gain are put back afterwards. The agent runs the same code as `star_sharpness` / `star_focus`.
 
 ## On a phone or tablet
 
@@ -139,7 +140,7 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 |---|---|
 | Status/system | `telescope_status`, `telescope_device_info`, `telescope_reconnect`, `sync_time_and_location`, `power`, `raw_command` |
 | Camera | `set_shooting_mode`, `get_camera_settings`, `set_camera_setting`, `take_photo`, `video_recording`, `timelapse`, `view_camera` |
-| Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `focus_step`, `focus_position` (incl. infinity) |
+| Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `star_sharpness`, `star_focus`, `focus_step`, `focus_position` (incl. infinity) |
 | Planning | `sky_conditions`, `weather_forecast`, `plan_targets`, `find_target`, `search_catalog` |
 | Astro | `calibrate`, `goto_target`, `stop_goto`, `live_stacking`, `stacking_status`, `wait`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
@@ -169,7 +170,7 @@ For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `nod
 - Live-stacking start/stop/progress and the stack-preview stream, in forced preview mode.
 - Weather, planning and target lookup; the agent end to end with tool calls and vision on your vLLM endpoint.
 
-**Implemented from the protocol, not yet run against the sky** (I validated indoors, so no stars): plate-solve `calibrate`, `goto_target` / one-click GoTo, real live-stacking captures, astro autofocus, `polar_alignment` (EQ solving), sentry mode, Sun/Moon tracking, timelapse. The first clear night will exercise these, and the agent is told to record what it learns in its skills.
+**Implemented from the protocol, not yet run against the sky** (I validated indoors, so no stars): plate-solve `calibrate`, `goto_target` / one-click GoTo, real live-stacking captures, astro autofocus, `polar_alignment` (EQ solving), sentry mode, Sun/Moon tracking, timelapse, and the new star-focus pair. `star_sharpness` is checked against synthetic star fields (PSF accuracy, invariance to exposure, gain, sky glow and frame size, same reading from any crop of the same sky, sensitivity to trailing, rejection of hot pixels and flat placeholder frames) and the `star_focus` sweep against a simulated focuser with a known optimum (peak search, the between-samples fit, camera restore, failures, the one-at-a-time lock); neither has seen the real sky yet. The first clear night will exercise these, and the agent is told to record what it learns in its skills.
 
 Firmware quirks found along the way: several commands are acted on but never acknowledged (single-step focus, track start, RGB/power), motor run-to replies only when the motion completes, and a forced stack without GoTo is preview-only (no FITS saved). These are all handled in code.
 

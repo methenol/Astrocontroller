@@ -10,6 +10,7 @@ import * as http from '../dwarf/http.js';
 import { DwarfCommandError } from '../dwarf/link.js';
 import type { StreamHub } from '../media/streams.js';
 import { loadImage, crop as cropImage, autoStretch, toJpeg, analyze, type FloatImage } from '../media/images.js';
+import { measureTele, starFocusSweep } from '../media/focus.js';
 import { findObject, searchObjects, gotoLabel, describe as describeObject } from '../astro/catalog.js';
 import { queryCatalog } from '../astro/catalog-search.js';
 import { planNight } from '../astro/planner.js';
@@ -311,14 +312,62 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // ------------------------------------------------------------------ focus
   tool(
     'autofocus',
-    'Run autofocus. normal = contrast AF for daytime/Moon/planets at a point (x,y in 1920×1080 tele frame, default centre). astro = star-based AF for deep sky (needs stars in view, takes ~1-3 min). Returns when the telescope reports AF finished, and says so plainly if it never did.',
+    'Run the telescope\'s own autofocus. normal = contrast AF for daytime/Moon/planets at a point (x,y in 1920×1080 tele frame, default centre). astro = star-based AF for deep sky (needs stars in view, takes ~1-3 min). Returns when the telescope reports AF finished, and says so plainly if it never did. This is the FINDER: it searches the whole range and gets you close. At night, run it first, then tune what it found with star_focus (a fine search around the result) and check the number with star_sharpness.',
     { mode: z.enum(['normal', 'astro']), x: z.number().optional(), y: z.number().optional() },
     async ({ mode, x, y }) => text(await dwarf.autofocus(mode, x, y)),
   );
 
   tool(
+    'star_sharpness',
+    'Measure how sharp the stars are in one tele frame and get the focus number: median star half-flux radius (HFR) in px and arcsec, and `score` = 1000 ÷ HFR(arcsec), higher = sharper (on this scope ~250-450 is sharp, <120 is soft). Every part of it is flux-weighted per star against that star\'s own local sky, so it does not move with exposure, gain, cloud thickness, sky glow or the camera\'s tone curve — two scores from minutes apart are comparable, which is what makes it usable as a trend. It only measures; it does not focus. Order of work: autofocus (the finder) → star_focus (a fine sweep that also moves the focuser) → star_sharpness to confirm; or focus_step + this to nudge by hand. Run it after autofocus, between focus_step moves, and once per target as the night\'s baseline. By default it takes the reading from a short (0.5 s) snapshot when the camera sits on auto or a long exposure, then puts the setting back — a long exposure writes star trails into the number. Raise gain if the stars are too faint to measure.',
+    {
+      exposure_s: z.number().min(0.05).max(60).optional().describe('take the ONE still at this exposure instead of the default short snapshot; the camera setting is restored afterwards either way'),
+      gain: z.number().min(0).max(240).optional().describe('gain for that still, restored afterwards'),
+      crop: cropSchema.describe('measure one region (fractions 0..1); give every frame you compare the same region'),
+    },
+    async ({ exposure_s, gain, crop }) => {
+      const { img, sharp } = await measureTele({ dwarf, hub }, { exposureS: exposure_s, gain, crop });
+      const jpeg = await toJpeg(img.linear ? autoStretch(img) : img, 1024);
+      const saved = saveCapture(jpeg, 'star_sharpness');
+      const report = { focusPosition: dwarf.state.focusPosition, captured: capturedLine(img) || undefined, ...sharp, image: `captures/${saved}` };
+      const body = JSON.stringify(report, null, 1);
+      return { content: config.llm.vision ? [{ type: 'image', data: jpeg.toString('base64'), mimeType: 'image/jpeg' }, { type: 'text', text: body }] : [{ type: 'text', text: body }] };
+    },
+  );
+
+  tool(
+    'star_focus',
+    'Fine-tune the tele focus on the stars. Sweeps the focuser up and down around its current position, takes a tele still at every position, scores its stars (the star_sharpness measurement) and leaves the focuser on the sharpest position, refined by fitting the curve through the samples around the best one. Run autofocus (mode=astro) FIRST to get close — autofocus is the whole-range finder, this is the narrow-range tuner; with no stars in view at all start from focus_position action=infinity instead. Use it after autofocus, after >5 °C of cooling, and whenever star_sharpness or analyze_subs says the HFR has grown. Camera exposure/gain are restored afterwards; ~10 s per sample (default 13 samples ≈ 2-3 min). Refuses while live stacking, a GoTo or calibration runs.',
+    {
+      center: z.number().int().min(0).optional().describe("focus units to centre the search on; default the focuser's current position"),
+      range: z.number().int().min(5).max(400).optional().describe('focus units to cover on each side of the centre (default 30)'),
+      step: z.number().int().min(1).max(50).optional().describe('focus units between samples (default 5)'),
+      exposure_s: z.number().min(0.05).max(15).optional().describe("exposure of the measurement stills; default the camera's current one when it is ≤ 1 s, else 0.5 s"),
+      gain: z.number().min(0).max(240).optional().describe('gain for the measurement stills, restored afterwards'),
+      crop: cropSchema.describe('score only this region of every frame; the same region for all samples'),
+      repeats: z.number().int().min(1).max(3).optional().describe('frames averaged per position when the sky is unsteady (default 1)'),
+      apply: z.boolean().optional().describe('false = measure only: the focuser goes back to the centre of the range it searched (where the sweep started); default leaves it on the sharpest position'),
+    },
+    async ({ center, range, step, exposure_s, gain, crop, repeats, apply }) => {
+      const r = await starFocusSweep({ dwarf, hub }, { center, range, step, exposureS: exposure_s, gain, crop, repeats, apply });
+      const table = r.samples
+        .map((s) => `${String(s.position).padStart(4)}  ${s.error ? `FAILED: ${s.error}` : `score ${String(s.score).padStart(4)}  HFR ${String(s.hfrArcsec ?? s.hfrPx).padStart(5)}${s.hfrArcsec ? '″' : 'px'} ±${s.hfrUncertaintyPx}  ${String(s.stars).padStart(3)} stars  ${s.seconds}s`}`)
+        .join('\n');
+      const lines = [r.verdict, ...r.notes.map((x) => `note: ${x}`), '', `settings: ${r.settings}`, r.final ? `final position ${r.finalPosition}: HFR ${r.final.hfrArcsec ?? r.final.hfrPx}${r.final.hfrArcsec ? '″' : 'px'}, score ${r.final.score}` : '', `samples (${r.elapsedS} s):`, table];
+      const cautions = [...new Set([r.best, r.final].filter(Boolean).flatMap((s) => s!.cautions ?? []))];
+      if (cautions.length) lines.push('', `cautions: ${cautions.join(' | ')}`);
+      let jpeg: Buffer | undefined;
+      if (r.finalImage) {
+        jpeg = await toJpeg(r.finalImage.linear ? autoStretch(r.finalImage) : r.finalImage, 1024);
+        lines.push(`final frame: captures/${saveCapture(jpeg, `star_focus_${r.finalPosition}`)}`);
+      }
+      return { content: [...(config.llm.vision && jpeg ? [{ type: 'image' as const, data: jpeg.toString('base64'), mimeType: 'image/jpeg' }] : []), { type: 'text' as const, text: lines.join('\n') }] };
+    },
+  );
+
+  tool(
     'focus_step',
-    'Move the tele focuser manually. direction near (closer objects) or far (towards infinity); steps 1-200. Check sharpness with analyze_image between moves.',
+    'Move the tele focuser manually. direction near (closer objects) or far (towards infinity); steps 1-200. Check the effect with star_sharpness (the star focus number) between moves — for stars that is the right meter, not analyze_image sharpness. For a whole search in one call use star_focus instead.',
     { direction: z.enum(['near', 'far']), steps: z.number().int().min(1).max(200) },
     async ({ direction, steps }) => text(await dwarf.focusStep(direction, steps)),
   );

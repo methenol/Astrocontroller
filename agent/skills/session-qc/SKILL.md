@@ -15,17 +15,17 @@ AstroPhoto Studio does the rest later and better: it grades every sub (stars, FW
 - `analyze_subs count=3`: the newest raw subs from the SD card: stars, hfrPx, roundness (1 = round), background, saturation, sensor °C, rejectedByScope. This is the primary measurement.
 - `stacking_status`: taken vs stacked → the scope's reject rate.
 - `view_camera source=stack stretch=true`: a quick look; not for numbers.
-- `sky_check` / `weather_forecast` when clouds are suspected.
+- `star_sharpness`: one tele frame, one focus number (median star HFR, score = 1000 ÷ HFR″). The only reading that is comparable across exposures and cloud, so it is what you trend over a night. Takes ~10 s; it measures, it does not move the focuser.
 
 ## Baseline: the first cohort
 After 12 subs (< 60 s) or 20 subs (60 s), that is two dither blocks: `analyze_subs count=4`. Record the baseline in the session log: median stars, hfrPx, roundness, background, sensor °C.
-- Few stars, or hfrPx far above the last nights (NOTES.md) → focus or dew; run astro autofocus and check again.
+- Few stars, or hfrPx far above the last nights (NOTES.md) → focus or dew; run astro autofocus, tune with `star_focus`, and check again with `star_sharpness`.
 - Roundness well below the last nights → wind, balance or trailing; check the altitude (field rotation table in acquisition-profiles).
 - Thresholds are **relative to this scope's normal**. Accepted 15 s Alt-Az subs here have elongation ≈ 1.2, measured by AstroPhoto Studio on NGC 281 2026-10-01; its rejected trailed subs were ≈ 2.0. Do not act on absolute textbook numbers (e.g. "axis ratio > 1.2").
 
 ## Every check (on each duty sample while the stack runs)
 1. `stacking_status`, then `analyze_subs count=3`.
-2. **Focus:** hfrPx > baseline × 1.15 on three consecutive checks, with the star count steady (not cloud), or the sensor ≥ 5 °C colder than at autofocus → `autofocus mode=astro`, then reset the baseline. Ignore single spikes (seeing).
+2. **Focus:** hfrPx > baseline × 1.15 on three consecutive checks, with the star count steady (not cloud), or the sensor ≥ 5 °C colder than at autofocus → `autofocus mode=astro` (the finder), then `star_focus` to tune it finely — `star_focus` refuses while live stacking, so stop the stack first when the drift is worth the lost cohort — then `star_sharpness` and reset the baseline from it. Ignore single spikes (seeing).
 3. **Trailing:** roundness falling ≥ 0.1 below baseline over two checks → check wind and altitude. EQ-60 → switch to EQ-30. Alt-Az above ~65° → the target is near the zenith; move on to the next target, or accept the loss until it descends.
 4. **Clouds:** star count < 50 % of baseline, or the background jumps, with `sky_check` / the forecast agreeing → do not change exposure or gain; stop stacking if useful data has collapsed for > 10 min, and resume when stars return. Thin passing cloud: keep going (the Studio masks it per tile).
 5. **Dew:** stars fading and the background softening while the sky is clear and the dew-point spread is < 2 °C → tell the user (dew heater); nothing to change in settings.

@@ -123,14 +123,22 @@
           </details>
 
           <details class="group" id="grp-focus">
-            <summary>Focus<span class="grp-hint">autofocus · manual</span></summary>
+            <summary>Focus<span class="grp-hint">autofocus · stars · manual</span></summary>
             <div class="group-body">
               <div class="ctl-row">
-                <button data-act="autofocus" title="Contrast autofocus on the live view">AF</button>
-                <button data-act="autofocus-astro" title="Star-based autofocus (needs stars in view)">AF ★</button>
+                <button data-act="autofocus" title="Contrast autofocus on the live view (daytime, Moon, planets)">AF</button>
+                <button data-act="autofocus-astro" title="The telescope's own star autofocus: searches the whole range, needs stars in view (1-3 min)">AF ★</button>
                 <button data-focus="near" title="Focus nearer">F−</button>
                 <button data-focus="far" title="Focus farther">F+</button>
               </div>
+              <div class="ctl-row">
+                <button id="btn-star-measure" title="Take one tele frame and score how sharp the stars are at the current focus">Sharpness ★</button>
+                <button id="btn-star-tune" title="Step the focuser up and down around its position, score the stars at each step and stop on the sharpest">Tune ★</button>
+                <select id="sel-tune-range" title="How far either side of the current focus to search" aria-label="Star tune search range">
+                  <option value="15">±15</option><option value="30" selected>±30</option><option value="60">±60</option>
+                </select>
+              </div>
+              <p class="small muted" id="focus-note">AF ★ finds focus on the stars over the whole range; <strong>Tune ★</strong> then searches ± the chosen range and stops on the sharpest. <strong>Sharpness ★</strong> only measures the current focus.</p>
             </div>
           </details>
 

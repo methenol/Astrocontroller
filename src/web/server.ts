@@ -12,6 +12,7 @@ import type { StreamHub } from '../media/streams.js';
 import type { AgentBridge } from '../agent/omp.js';
 import type { DutyLoop } from '../agent/duty.js';
 import { toolEvents } from '../mcp/tools.js';
+import { measureTele, starFocusSweep, sharpnessLine } from '../media/focus.js';
 import * as library from '../library/transfer.js';
 import * as processing from '../processing/queue.js';
 import * as studio from '../processing/studio.js';
@@ -278,6 +279,22 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
         return { result: await dwarf.autofocus(b.mode === 'astro' ? 'astro' : 'normal') };
       case 'focus':
         return { result: await dwarf.focusStep(b.direction === 'near' ? 'near' : 'far', Number(b.steps ?? 1)) };
+      case 'star_measure': {
+        // One tele frame measured for star sharpness; the camera's exposure is restored by the helper.
+        const { sharp } = await measureTele({ dwarf, hub }, { exposureS: b.exposureS !== undefined ? Number(b.exposureS) : undefined });
+        return { result: sharpnessLine(sharp), focusPosition: dwarf.state.focusPosition, ...sharp };
+      }
+      case 'star_sweep': {
+        // The search writes its own plain-language verdict; the UI toasts it and the progress arrives
+        // over the state socket, so the response only has to be the summary.
+        const r = await starFocusSweep({ dwarf, hub }, {
+          center: b.center !== undefined ? Number(b.center) : undefined,
+          range: b.range !== undefined ? Number(b.range) : undefined,
+          step: b.step !== undefined ? Number(b.step) : undefined,
+          apply: b.apply !== false,
+        });
+        return { result: [r.verdict, ...r.notes].join(' — '), ...r };
+      }
       case 'mode':
         return dwarf.setShootingMode(String(b.mode));
       case 'setting':

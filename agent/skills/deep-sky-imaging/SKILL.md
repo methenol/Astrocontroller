@@ -19,9 +19,12 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 - Verify: `view_camera source=tele` (stretch=true). The target should be roughly centred.
 
 ## 3. Focus
-- Start from the stored infinity position: `focus_position action=infinity` (seconds, no stars needed).
-- Then `autofocus mode=astro` once per night, and again if the temperature drops > 5 °C.
-- Check it: `analyze_image source=tele` → median HFR. Good: ≲ 2.5 px at 1280-px preview width. If it's soft, run astro AF again. Once subs arrive, `analyze_subs` gives the real numbers.
+Two tools, in this order: autofocus finds it, star focus tunes it.
+- No stars yet: `focus_position action=infinity` (seconds, gets you on the scale).
+- `autofocus mode=astro` once per night, and again if the temperature drops > 5 °C. This is the finder: it searches the whole range and returns where the firmware thinks focus is.
+- Then `star_focus`: it steps the focuser ± 30 units around that, takes a tele still at every stop, scores the stars in each and leaves the focuser on the sharpest position (a fit between the samples decides the exact stop). ~2-3 min, and it puts your exposure and gain back afterwards. If it reports the best was at the edge of its range, run it again centred there.
+- The meter is `star_sharpness` (median star HFR; score = 1000 ÷ HFR in arcsec). Take a reading after `star_focus` and again per target so the night has a trend to compare against. Once subs are running, `analyze_subs` gives the HFR of the data you are actually keeping.
+Manual tuning works too: `focus_step` then `star_sharpness`, repeat; `star_focus apply=false` measures a range without moving the focuser in the end.
 
 ## 4. Exposure, gain and filter: read **acquisition-profiles**
 - Choose a qualified profile: Alt-Az → **ALTAZ-15** (15 s, gain 60); EQ → **EQ-30**, or **EQ-60** for faint Duo-Band emission. The firmware requires EQ mode for ≥ 30 s.
@@ -30,7 +33,7 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 
 ## 5. Monitor: follow **session-qc**
 - After the first cohort (12 subs; 20 at 60 s) take the baseline with `analyze_subs`, then check it on every duty sample (`stacking_status`, `analyze_subs`) along with the other night work (sky checks for the next target, hourly forecast). Between samples end your turn; the duty loop wakes you.
-- Refocus on sustained HFR growth or ≥ 5 °C cooling. EQ-60 → EQ-30 on trailing. Pause for clouds without touching settings.
+- Refocus on sustained HFR growth or ≥ 5 °C cooling: `autofocus mode=astro` then `star_focus`, and re-take the `star_sharpness` baseline. EQ-60 → EQ-30 on trailing. Pause for clouds without touching settings.
 - Stop if: target below ~25° altitude, dawn within 20 min, battery < 10%, SD < 2 GB, or the stack stops growing.
 - With a multi-target plan, check the time against the plan at every check, and move on when a target's slot ends (or its altitude window closes), not only when something goes wrong.
 - Dew: a dew-point spread < 2 °C means dew on the lens is likely. Warn the user (a dew heater helps); falling star counts at constant cloud cover usually mean dew.

@@ -379,6 +379,7 @@ function renderTelescope(t) {
   ];
   if (state.config?.observer) g.push(['Observer', `${state.config.observer.lat.toFixed(3)}, ${state.config.observer.lon.toFixed(3)}`]);
   $('#status-grid').innerHTML = g.map(([k, v]) => `<div><span>${k}</span>${esc(v)}</div>`).join('');
+  renderFocusTune(t);
 
   updateTeleBox();
   const recording = /running/.test(t.capture?.record ?? '');
@@ -400,6 +401,7 @@ function renderTelescope(t) {
   if (s && (s.state === 'running' || s.state === 'stopping' || s.currentCount)) {
     bar.hidden = false;
     $('#stack-target').textContent = `${s.state === 'running' ? 'Stacking' : 'Stack'} · ${s.target ?? 'target'}`;
+
     const pct = s.totalCount ? Math.min(100, (100 * (s.currentCount ?? 0)) / s.totalCount) : 0;
     $('#stack-progress').style.width = `${pct}%`;
     $('#stack-text').textContent = `${s.stackedCount ?? 0} stacked / ${s.currentCount ?? 0} taken${s.totalCount && s.totalCount < 999 ? ` of ${s.totalCount}` : ''}`;
@@ -409,6 +411,15 @@ function renderTelescope(t) {
   } else {
     bar.hidden = true;
   }
+}
+
+/** The Focus group's readout line: what the last measurement said, or where a search has got to. */
+function renderFocusTune(t) {
+  const ft = t?.focusTune;
+  $$('#grp-focus button').forEach((b) => (b.disabled = !!ft?.running));
+  if (!ft?.message) return;
+  const when = new Date(ft.finishedAt ?? ft.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  $('#focus-note').textContent = ft.running ? `Star tune: ${ft.message}` : `${when} · ${ft.message}`;
 }
 
 // ------------------------------------------------------------------ live views
@@ -623,6 +634,22 @@ $$('[data-act]').forEach((b) =>
     }
   }),
 );
+
+// Stars and focus: Sharpness measures the current focus, Tune searches around it. The search takes a
+// couple of minutes; its per-step progress arrives over the state socket (renderFocusTune).
+$('#btn-star-measure').onclick = () => control({ action: 'star_measure' }, 'Star sharpness');
+$('#btn-star-tune').onclick = async () => {
+  const range = Number($('#sel-tune-range').value);
+  const b = $('#btn-star-tune');
+  const at = state.telescope?.focusPosition;
+  if (!confirm(`Tune the focus on the stars?\n\nThe focuser steps ±${range} around ${at ?? 'where it is now'} and takes a tele photo at every step — about ${Math.round((range / 5) * 2 + 1)} photos, a couple of minutes — then stops on the sharpest. Run autofocus first if you have not tonight; it is the wide search, this is the fine one. Your camera exposure is restored afterwards.`)) return;
+  b.classList.add('busy');
+  try {
+    await control({ action: 'star_sweep', range }, 'Star tune');
+  } finally {
+    b.classList.remove('busy');
+  }
+};
 $$('[data-power]').forEach((b) =>
   b.addEventListener('click', async () => {
     const act = b.dataset.power;
