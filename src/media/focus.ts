@@ -590,12 +590,21 @@ function fitMinimum(samples: FocusSample[], bestIndex: number): number | null {
  * best position (`apply`, the default) or back at the centre it was swept around.
  */
 export async function starFocusSweep(deps: { dwarf: Dwarf; hub: StreamHub }, o: FocusSweepOptions = {}): Promise<FocusSweepResult> {
-  const { dwarf, hub } = deps;
+  const { dwarf } = deps;
   if (sweepRunning) throw new Error('a star-focus sweep is already running (the agent or the web UI started one); wait for it to finish');
   const busy = dwarf.isBusy();
   if (busy) throw new Error(`refusing to sweep focus while ${busy} is running — stop it first (a refocus takes the tele camera out of a stack)`);
   dwarf.assertNoNdLock('a star-focus sweep');
   sweepRunning = true;
+  try {
+    return await dwarf.exclusive('sweeping focus', () => sweep(deps, o));
+  } finally {
+    sweepRunning = false;
+  }
+}
+
+async function sweep(deps: { dwarf: Dwarf; hub: StreamHub }, o: FocusSweepOptions): Promise<FocusSweepResult> {
+  const { dwarf, hub } = deps;
   const startedAt = Date.now();
   const notes: string[] = [];
 

@@ -1,3 +1,4 @@
+import { wireLines } from '../dwarf/wirelog.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type http from 'node:http';
@@ -69,6 +70,8 @@ export function mountWeb(app: Express, server: http.Server, ctx: Ctx): void {
   // Disconnect: free the telescope for another client (the DWARFLAB app) without stopping the
   // container. Closes the control link, the video readers and the stack preview, cancels transfers,
   // and blocks every HTTP/FTP call until Connect.
+  // Everything recently exchanged with the telescope (the full log is data/telescope-wire.log).
+  api.get('/wire', route(async (req) => ({ lines: wireLines(Math.min(400, Number(req.query.n ?? 200)), { notifications: req.query.notifications !== 'false' }) })));
   api.post('/link', route(async (req) => {
     if (req.body?.connect) {
       dwarf.connectLink();

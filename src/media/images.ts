@@ -67,6 +67,7 @@ export async function loadImage(source: string, hub: StreamHub, opts: { fullRes?
   if ((source === 'tele' || source === 'wide') && opts.exposureS !== undefined) {
     const dwarf = hub.dwarf;
     const cam = hub.get(source) as import('./streams.js').CameraSource;
+    dwarf.assertNoOperation('a still with its own exposure');
     // the still stops this camera's live video: tell the stream supervisor, and reconnect it after
     cam.expectPause(opts.exposureS * 1000 + 20000);
     const before = await dwarf.exposureSeconds(source).catch(() => null);

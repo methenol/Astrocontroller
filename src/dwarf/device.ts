@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import Long from 'long';
 import { config, observerLocation, requireObserverLocation } from '../config.js';
 import { logger, errMsg } from '../log.js';
-import { DwarfLink, DwarfCommandError, type Notification, type RequestOptions } from './link.js';
+import { DwarfLink, DwarfCommandError, isLinkFailure, type LinkHealth, type Notification, type RequestOptions } from './link.js';
 import { Cmd, OPERATION_STATE, ASTRO_STATE, SOLAR_SYSTEM_INDEX, errorText, protoTypeByName } from './protocol.js';
 import * as http from './http.js';
 import { listDir } from './ftp.js';
@@ -50,9 +51,14 @@ export interface StackingInfo {
 }
 
 export interface TelescopeState {
+  /** connected AND the telescope is executing commands (see link for why not) */
   connected: boolean;
+  /** control-link health: connected / connecting / unresponsive (hung, needs a power cycle) / contended (another client) / released */
+  link?: LinkHealth;
   /** the user released the telescope from the web UI (Disconnect): no traffic until Connect */
   released?: boolean;
+  /** The long operation the controller is running (calibration, GoTo, homing, …), if any. */
+  operation?: string;
   device: { name?: string; serial?: string; firmware?: string; ip?: string };
   battery?: number;
   charging?: boolean;
@@ -136,14 +142,23 @@ export class Dwarf extends EventEmitter {
     this.link.on('notification', (n: Notification) => this.onNotification(n));
     this.loadNdLock();
     this.link.on('connected', () => {
-      this.state.connected = true;
-      this.changed();
+      this.syncLink();
+      if (this.link.usable) void this.onConnected();
+    });
+    this.link.on('disconnected', () => this.syncLink());
+    this.link.on('health', () => this.syncLink());
+    // Back from a hang (after a power cycle): resync like a fresh connection.
+    this.link.on('responsive', () => {
+      this.syncLink();
       void this.onConnected();
     });
-    this.link.on('disconnected', () => {
-      this.state.connected = false;
-      this.changed();
-    });
+  }
+
+  /** Mirror the link into the published state; `connected` only while commands are executed. */
+  private syncLink(): void {
+    this.state.connected = this.link.usable;
+    this.state.link = this.link.health();
+    this.changed();
   }
 
   private releasedFile = path.join(config.paths.data, 'released.json');
@@ -155,12 +170,21 @@ export class Dwarf extends EventEmitter {
     if (gate.released) log.warn('the telescope is released (Disconnect in the web UI): not connecting until Connect is pressed');
     else this.link.start();
     this.stateTimer = setInterval(() => {
-      if (this.link.connected) void this.refreshState().catch(() => {});
+      if (this.link.usable && !this.quietPeriod()) void this.refreshState().catch(() => {});
+      // keep the published link health (ages, counts) current for the UI and the agent
+      this.state.link = this.link.health();
     }, 30000);
     // Keep the reported mount angles current (they change during GoTo/tracking without notifications).
+    // Not during operations: they read the positions themselves, and the firmware is busy moving.
+    // During a capture (stacking, tracking) the angles change slowly: once a minute is plenty.
+    let lastMotorPoll = 0;
     this.motorTimer = setInterval(() => {
-      if (this.link.connected) void this.readMotorPositions().catch(() => {});
-    }, 10000);
+      if (!this.link.usable || this.quietPeriod()) return;
+      if ((this.isBusy() || this.isTracking()) && Date.now() - lastMotorPoll < 60000) return;
+      lastMotorPoll = Date.now();
+      void this.readMotorPositions().catch(() => {});
+    }, 15000);
+    this.syncLink();
     if (!gate.released) void this.refreshDeviceInfo();
   }
 
@@ -173,7 +197,7 @@ export class Dwarf extends EventEmitter {
     fs.writeFileSync(this.releasedFile, JSON.stringify({ since: Date.now() }));
     this.link.stop();
     this.state.released = true;
-    this.state.connected = false;
+    this.syncLink();
     log.info('telescope released by the user: control link closed, no traffic until Connect');
     this.emit('released');
     this.changed();
@@ -186,7 +210,7 @@ export class Dwarf extends EventEmitter {
     this.state.released = false;
     log.info('connecting to the telescope (Connect pressed)');
     this.link.start();
-    this.changed();
+    this.syncLink();
   }
 
   /** Telescope address changed in the web UI: drop what we knew about the old device and reconnect there. */
@@ -237,8 +261,19 @@ export class Dwarf extends EventEmitter {
   private async onConnected(): Promise<void> {
     try {
       await this.refreshState();
-      if (config.dwarf.autoSyncTimeLocation) await this.syncTimeLocation().catch((e) => log.warn(`time/location sync failed: ${errMsg(e)}`));
+      // The telescope reports a running stack/GoTo in the notifications that follow a connect.
+      await sleep(3000);
       await this.readMotorPositions().catch(() => {});
+      // (Un-homed motors alone are not a reason: a freshly powered telescope has them too and needs the sync.)
+      const busy = this.isBusy() ?? (this.isTracking() ? 'tracking' : null);
+      if (busy) {
+        // Reconnected in the middle of a capture or an operation: only read. Re-arming the cameras or
+        // setting the clock under a running stack or tracking mount could disturb it.
+        log.info(`connected while ${busy}: resync limited to reading the state (time/location not pushed)`);
+        await this.refreshDeviceInfo();
+        return;
+      }
+      if (config.dwarf.autoSyncTimeLocation) await this.syncTimeLocation().catch((e) => log.warn(`time/location sync failed: ${errMsg(e)}`));
       await this.refreshDeviceInfo();
       // Entering the camera makes the telescope (re)start its RTSP previews and broadcast every
       // current camera parameter, which primes our live settings cache.
@@ -443,6 +478,10 @@ export class Dwarf extends EventEmitter {
       case 'powerOff':
         log.warn('telescope is powering off');
         break;
+      case 'hostSlaveMode':
+        // mode 1 = another client is the host and our commands are only observed
+        log.info(`session role: ${Number(d.mode ?? 0) === 1 ? 'SLAVE (another client controls the telescope)' : 'host'}${d.lock ? ', locked' : ''}`);
+        break;
     }
     this.emit('notification', n);
     this.changed();
@@ -493,7 +532,12 @@ export class Dwarf extends EventEmitter {
   async power(action: 'reboot' | 'shutdown' | 'rgb_on' | 'rgb_off' | 'indicator_on' | 'indicator_off'): Promise<void> {
     const map = { reboot: 13505, shutdown: 13502, rgb_on: 13500, rgb_off: 13501, indicator_on: 13503, indicator_off: 13504 };
     // These commands are acted on but not acknowledged by fw 1.5.3.
-    await this.request(map[action], {}, { bestEffort: true, timeout: 3000 });
+    try {
+      await this.request(map[action], {}, { bestEffort: true, timeout: 3000 });
+    } catch (err) {
+      // a reboot or shutdown closes the connection: that is the command working
+      if (!((action === 'reboot' || action === 'shutdown') && /connection closed/.test(errMsg(err)))) throw err;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -501,6 +545,7 @@ export class Dwarf extends EventEmitter {
   // -------------------------------------------------------------------------
 
   async setShootingMode(nameOrId: string | number): Promise<http.ShootingModeDef> {
+    this.assertNoOperation('changing the shooting mode');
     const mode = await http.resolveShootingMode(nameOrId);
     await this.send(Cmd.TASK_MANAGER_SWITCH_SHOOTING_MODE, { mode: mode.id }, `switching to ${mode.name} mode`, {
       timeout: 20000,
@@ -530,7 +575,60 @@ export class Dwarf extends EventEmitter {
     return this.state.shootingMode?.id ?? 1;
   }
 
+  /**
+   * Long operations the controller runs on the telescope (calibration, GoTo, homing, a motor move,
+   * autofocus, polar alignment). One at a time: a second one is refused, not interleaved. While one
+   * runs the controller sends nothing else on its own (no polls, no live-view or exposure fixes),
+   * so the telescope's firmware has its command service to itself — background commands landing in
+   * the middle of a calibration were the leading suspect for the command service hanging
+   * (2026-10-10 03:04: calibration stuck after its first plate solve, hung until a power cycle).
+   */
+  private readonly opContext = new AsyncLocalStorage<string>();
+  private activeOp: { label: string; since: number } | null = null;
+
+  /** Run `fn` as the one long operation; nested calls (a move that homes first) run inside it. */
+  async exclusive<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    if (this.opContext.getStore() !== undefined) return fn();
+    if (this.activeOp) {
+      throw new Error(`refused: the telescope is busy ${this.activeOp.label} (started ${Math.round((Date.now() - this.activeOp.since) / 1000)} s ago); wait for it to finish or stop it first — commands interleaved with a running operation can hang the telescope's command service`);
+    }
+    this.activeOp = { label, since: Date.now() };
+    this.state.operation = label;
+    this.changed();
+    try {
+      return await this.opContext.run(label, fn);
+    } finally {
+      this.activeOp = null;
+      this.state.operation = undefined;
+      this.lastOpEndedAt = Date.now();
+      this.changed();
+    }
+  }
+
+  /** Refuse `what` while another caller's operation runs (from inside the operation it is allowed). */
+  assertNoOperation(what: string): void {
+    if (this.activeOp && this.opContext.getStore() === undefined) {
+      throw new Error(`refused: the telescope is busy ${this.activeOp.label}; ${what} now would interfere — wait for it to finish`);
+    }
+  }
+
+  /** The long operation the controller is running, if any. */
+  get operation(): string | null {
+    return this.activeOp?.label ?? null;
+  }
+
+  /** Inside an operation (or just after one): the controller's own background traffic waits. */
+  quietPeriod(): boolean {
+    if (this.activeOp) return true;
+    const busy = this.isBusy();
+    if (busy && busy !== 'live stacking') return true;
+    return Date.now() - this.lastOpEndedAt < 5000;
+  }
+
+  private lastOpEndedAt = 0;
+
   isBusy(): string | null {
+    if (this.activeOp) return this.activeOp.label;
     const s = this.state;
     if (s.stacking.tele.state === 'running' || s.stacking.wide.state === 'running') return 'live stacking';
     if (['running', 'plate_solving'].includes(s.calibration.state)) return 'calibration';
@@ -604,6 +702,7 @@ export class Dwarf extends EventEmitter {
    * device advertises for the mode.
    */
   async setSetting(camera: CameraName, setting: string, value: string | number | boolean, modeId?: number): Promise<string> {
+    this.assertNoOperation('changing camera settings');
     const mode = modeId ?? (await this.currentModeId());
     const schema = await http.getParamSchema(mode);
     const defs = schema.cameras[camId(camera)] ?? {};
@@ -714,11 +813,13 @@ export class Dwarf extends EventEmitter {
 
   /** Take a still photo and return the album entry it produced. */
   async takePhoto(camera: CameraName): Promise<http.MediaItem | null> {
+    this.assertNoOperation('taking a photo');
     const started = Math.floor(Date.now() / 1000) - 2;
     // a long exposure answers only after it is read out: allow for it, then the album is the proof
     const expS = (await this.exposureSeconds(camera).catch(() => null)) ?? 0;
     const budget = Math.round(expS * 1000) + 30000;
     const done = this.link.waitFor((n) => n.name === 'photoState' && (n.data.state ?? 0) === 0 && (((n.data.cameraType as number) ?? 0) === camId(camera)), budget + 10000);
+    done.catch(() => {}); // observed below; never an unhandled rejection if the command throws
     const cmd = camera === 'tele' ? Cmd.CAMERA_TELE_PHOTOGRAPH : Cmd.CAMERA_WIDE_PHOTOGRAPH;
     const r = await this.request(cmd, {}, { timeout: budget, bestEffort: true, allowError: true });
     if (r && Number(r.code ?? 0) < 0) {
@@ -740,11 +841,13 @@ export class Dwarf extends EventEmitter {
   }
 
   async burst(camera: CameraName, count: number): Promise<string> {
+    this.assertNoOperation('a burst');
     await this.setShootingTech('burst');
     const schema = await http.getParamSchema(await this.currentModeId());
     const def = schema.techSettings.burstCount;
     if (def) await this.request(Cmd.PARAM_SET_GENERAL_INT_PARAM, { paramId: Long.fromString(String(def.paramId)), value: count });
     const done = this.link.waitFor((n) => n.name === 'burstState' && (n.data.state ?? 0) === 0, 60000 + count * 5000);
+    done.catch(() => {});
     await this.send(camera === 'tele' ? Cmd.CAMERA_TELE_BURST : Cmd.CAMERA_WIDE_BURST, { count }, 'burst');
     const ok = await done.then(() => true).catch(() => false);
     return ok
@@ -777,7 +880,8 @@ export class Dwarf extends EventEmitter {
   async readMotorPositions(): Promise<{ rotationDeg?: number; pitchDeg?: number; homed: boolean }> {
     const out: { rotationDeg?: number; pitchDeg?: number; homed: boolean } = { homed: true };
     for (const [id, key] of [[1, 'rotationDeg'], [2, 'pitchDeg']] as const) {
-      const r = await this.request(Cmd.STEP_MOTOR_GET_POSITION, { id }, { allowError: true, timeout: 8000 });
+      // replies carry the axis id: never take the other axis's (late) reply for this one
+      const r = await this.request(Cmd.STEP_MOTOR_GET_POSITION, { id }, { allowError: true, timeout: 8000, match: (x) => x.id === undefined || Number(x.id) === id });
       if (r && typeof r.code === 'number' && r.code === -14520) out.homed = false;
       else if (r && typeof r.position === 'number') out[key] = round(r.position, 2);
     }
@@ -852,6 +956,10 @@ export class Dwarf extends EventEmitter {
    * from where it stopped.
    */
   async homeMotors(): Promise<string> {
+    return this.exclusive('homing the motors', () => this.homeMotorsNow());
+  }
+
+  private async homeMotorsNow(): Promise<string> {
     this.assertNoNdLock('homing the motors');
     await this.releaseMotors();
     const notes: string[] = [];
@@ -928,6 +1036,10 @@ export class Dwarf extends EventEmitter {
    * or was left un-homed by an astro routine is released and homed first, so a move always works.
    */
   async moveTo(target: { rotationDeg?: number; pitchDeg?: number }, speedDegPerS = 10): Promise<string> {
+    return this.exclusive('moving the motors', () => this.moveToNow(target, speedDegPerS));
+  }
+
+  private async moveToNow(target: { rotationDeg?: number; pitchDeg?: number }, speedDegPerS: number): Promise<string> {
     this.assertNoNdLock('moving the motors');
     const speed = Math.max(0.1, Math.min(30, speedDegPerS));
     const [pMin, pMax] = Dwarf.PITCH_RANGE;
@@ -965,6 +1077,7 @@ export class Dwarf extends EventEmitter {
    */
   async nudge(angleDeg: number, speed: number, durationMs: number): Promise<void> {
     this.assertNoNdLock('slewing');
+    this.assertNoOperation('slewing');
     const fwAngle = (((90 - angleDeg) % 360) + 360) % 360;
     const len = Math.max(0.01, Math.min(1, speed));
     const end = Date.now() + Math.max(100, Math.min(30000, durationMs));
@@ -994,6 +1107,10 @@ export class Dwarf extends EventEmitter {
    * does not always answer the start command). A run that never reports its end is said so.
    */
   async autofocus(kind: 'normal' | 'astro', x = 960, y = 540): Promise<string> {
+    return this.exclusive('autofocus', () => this.autofocusNow(kind, x, y));
+  }
+
+  private async autofocusNow(kind: 'normal' | 'astro', x: number, y: number): Promise<string> {
     const astro = kind === 'astro';
     const limitMs = astro ? 480000 : 90000;
     const names = astro ? ['astroAutoFocusState', 'astroAutoFocusFastState'] : ['autoFocusState'];
@@ -1005,6 +1122,7 @@ export class Dwarf extends EventEmitter {
       if (st === 1) ran = true;
       return ran && (st === 0 || st === 3);
     }, limitMs);
+    done.catch(() => {});
     const cmd = astro ? Cmd.FOCUS_START_ASTRO_AUTO_FOCUS : Cmd.FOCUS_AUTO_FOCUS;
     const r = await this.request(cmd, astro ? { mode: 0 } : { mode: 0, centerX: Math.round(x), centerY: Math.round(y) }, { timeout: 30000, bestEffort: true, allowError: true });
     if (r && Number(r.code ?? 0) < 0) {
@@ -1099,6 +1217,7 @@ export class Dwarf extends EventEmitter {
         clearTimeout(timer);
         if (endTimer) clearTimeout(endTimer);
         this.link.off('notification', onNotify);
+        this.link.off('unresponsive', onDead);
         if (err) return reject(err);
         const r = this.state.calibration.result;
         resolve(`calibration complete in ${Math.round((Date.now() - t0) / 1000)} s${r ? ` (azimuth ${r.azimuth.toFixed(2)}°, altitude ${r.altitude.toFixed(2)}°)` : ''}; plate solves: ${this.state.calibration.plateSolvingTimes ?? '?'}`);
@@ -1116,7 +1235,10 @@ export class Dwarf extends EventEmitter {
         }
       };
       const timer = setTimeout(() => finish((this.state.calibration.at ?? 0) >= t0 ? null : new Error(`calibration did not finish within 7 min (state ${this.state.calibration.state}, ${this.state.calibration.plateSolvingTimes ?? 0} plate solve(s))`)), 420000);
+      // a hung telescope never ends the operation: fail now with the reason, not after 7-10 min
+      const onDead = (e: Error) => finish(e);
       this.link.on('notification', onNotify);
+      this.link.on('unresponsive', onDead);
       this.request(cmd, { lon: loc.lon, lat: loc.lat }, { timeout: 420000, bestEffort: true, allowError: true }).then(
         (r) => {
           const code = Number(r?.code ?? 0);
@@ -1135,10 +1257,19 @@ export class Dwarf extends EventEmitter {
    * return to the pointing we had before, then rethrow with an explanation.
    */
   async withPointingRecovery<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    return this.exclusive(label, () => this.withPointingRecoveryNow(label, fn));
+  }
+
+  private async withPointingRecoveryNow<T>(label: string, fn: () => Promise<T>): Promise<T> {
     const before = await this.readMotorPositions().catch(() => null);
     try {
       return await fn();
     } catch (err) {
+      // The telescope is unreachable or hung: every recovery command would fail too, and moving a
+      // scope we cannot see could undo a GoTo that the telescope is still carrying out. Report only.
+      if (isLinkFailure(err) || !this.link.usable) {
+        throw new Error(`${errMsg(err)}. No pointing recovery was attempted (the telescope is not executing commands); once it answers again, check telescope_status before deciding what happened.`);
+      }
       // A GoTo that ends up tracking reached its target: leave the scope exactly where it is
       // (tracking also makes the motors report "not homed", which is not a failure).
       if (this.isTracking()) {
@@ -1239,6 +1370,7 @@ export class Dwarf extends EventEmitter {
         clearTimeout(timer);
         if (endTimer) clearTimeout(endTimer);
         this.link.off('notification', onNotify);
+        this.link.off('unresponsive', onDead);
         if (err) reject(err);
         else resolve(`GoTo ${name} complete in ${Math.round((Date.now() - t0) / 1000)} s; now tracking ${name}`);
       };
@@ -1254,7 +1386,10 @@ export class Dwarf extends EventEmitter {
         }
       };
       const timer = setTimeout(() => finish(this.isTracking() ? null : new Error(`GoTo ${name} did not reach tracking within 10 minutes (GoTo state ${this.state.goto.state})`)), 600000);
+      // a hung telescope never ends the operation: fail now with the reason, not after 7-10 min
+      const onDead = (e: Error) => finish(e);
       this.link.on('notification', onNotify);
+      this.link.on('unresponsive', onDead);
       this.request(cmd, params, { timeout: 600000, bestEffort: true, allowError: true }).then(
         (r) => {
           const code = Number(r?.code ?? 0);
@@ -1319,11 +1454,15 @@ export class Dwarf extends EventEmitter {
         clearTimeout(timer);
         this.link.off('reply', onReply);
         this.link.off('notification', onNotify);
+        this.link.off('unresponsive', onDead);
         if (err) reject(err);
         else resolve(`one-click GoTo ${name} complete in ${Math.round((Date.now() - t0) / 1000)} s (${steps.join(' → ')}); now tracking ${name}`);
       };
       this.link.on('reply', onReply);
+      // a hung telescope never ends the operation: fail now with the reason, not after 7-10 min
+      const onDead = (e: Error) => finish(e);
       this.link.on('notification', onNotify);
+      this.link.on('unresponsive', onDead);
       this.request(cmd, params, { bestEffort: true, timeout: 600000, allowError: true }).catch((e) => finish(e));
     });
   }
@@ -1345,6 +1484,7 @@ export class Dwarf extends EventEmitter {
   }
 
   async startStacking(camera: CameraName, opts: { filterIndex?: number; force?: boolean } = {}): Promise<string> {
+    this.assertNoOperation('starting live stacking');
     this.assertNoNdLock('live stacking');
     if (camera === 'tele') {
       let ir = opts.filterIndex;
@@ -1408,6 +1548,10 @@ export class Dwarf extends EventEmitter {
 
   /** EQ-mode polar alignment measurement. Returns the polar axis error. */
   async measurePolarAlignment(): Promise<{ azimuthErrorDeg: number; altitudeErrorDeg: number }> {
+    return this.exclusive('polar alignment', () => this.measurePolarAlignmentNow());
+  }
+
+  private async measurePolarAlignmentNow(): Promise<{ azimuthErrorDeg: number; altitudeErrorDeg: number }> {
     this.assertNoNdLock('polar alignment');
     const loc = this.requireLocation();
     const reply = await this.request(Cmd.ASTRO_START_EQ_SOLVING, { lon: loc.lon, lat: loc.lat }, { timeout: 600000 });

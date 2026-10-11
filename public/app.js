@@ -348,14 +348,25 @@ function setConn(ok, text) {
 function renderTelescope(t) {
   if (!t) return;
   state.telescope = t;
-  setConn(t.connected, t.connected ? (t.device?.name ?? 'connected') : t.released ? 'released' : 'telescope offline');
+  const ls = t.link?.state;
+  const connText = t.connected ? (t.device?.name ?? 'connected')
+    : t.released ? 'released'
+    : ls === 'unresponsive' ? '⚠ telescope not responding'
+    : ls === 'contended' ? '⚠ another app has the telescope'
+    : 'telescope offline';
+  setConn(t.connected, connText);
+  $('#chip-conn').title = t.link?.detail ?? '';
+  // the user has to act on these: say so once per episode
+  if ((ls === 'unresponsive' || ls === 'contended') && state.linkAlert !== ls) toast(t.link.detail, true);
+  state.linkAlert = ls === 'unresponsive' || ls === 'contended' ? ls : null;
   const lb = $('#btn-link');
   lb.textContent = t.released ? 'Connect' : 'Disconnect';
   lb.classList.toggle('primary', !!t.released);
   lb.classList.toggle('ghost', !t.released);
   $('#chip-battery').textContent = t.battery == null ? '🔋 –' : `🔋 ${t.battery}%${t.charging ? ' ⚡' : ''}`;
   $('#chip-temp').textContent = t.temperatureC == null ? '🌡 –' : `🌡 ${t.temperatureC}° body · ${t.cmosTempC?.tele ?? '–'}° sensor`;
-  $('#chip-mode').textContent = t.shootingMode?.name ?? 'mode –';
+  $('#chip-mode').textContent = `${t.shootingMode?.name ?? 'mode –'}${t.operation ? ` · ${t.operation}…` : ''}`;
+  $('#chip-mode').title = t.operation ? `The telescope is busy ${t.operation}; other commands wait until it finishes.` : '';
   const m = t.motors ?? {};
   const mount = t.bodyMode === 'eq' ? 'EQ' : t.bodyMode === 'altaz' ? 'Alt-Az' : 'mount';
   $('#chip-mount').textContent = m.homed === false ? `${mount} · not homed` : m.pitchDeg != null ? `${mount} · rot ${m.rotationDeg}° pitch ${m.pitchDeg}°` : mount;

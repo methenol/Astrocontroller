@@ -352,7 +352,9 @@ export class DutyLoop extends EventEmitter {
       out.push(`- time ${this.clock(now)}`);
     }
     if (d.released) out.push('- telescope: RELEASED by the user (Disconnect in the web UI); nothing can be sent until they press Connect');
-    else if (!d.connected) out.push('- telescope: NOT CONNECTED');
+    else if (d.link?.state === 'unresponsive') out.push(`- telescope: NOT RESPONDING — ${d.link.detail}`);
+    else if (d.link?.state === 'contended') out.push(`- telescope: TAKEN BY ANOTHER CLIENT — ${d.link.detail}`);
+    else if (!d.connected) out.push(`- telescope: NOT CONNECTED${d.link?.detail ? ` (${d.link.detail})` : ''}`);
     else {
       const m = d.motors;
       out.push(`- telescope: connected; battery ${d.battery ?? '?'}%${d.charging ? ' (charging)' : ''}; mode ${d.shootingMode?.name ?? '?'}; ${this.dwarf.isTracking() ? 'tracking' : 'not tracking'}; motors ${m.homed ? `rotation ${m.rotationDeg}°, pitch ${m.pitchDeg}°` : 'no reference (normal while tracking)'}; SD ${d.storage ? `${d.storage.availableGB.toFixed(1)} GB free` : '?'}; sensor ${d.cmosTempC.tele ?? '?'} °C`);
@@ -383,6 +385,7 @@ export class DutyLoop extends EventEmitter {
     let stack = { tele: d.state.stacking.tele.state, wide: d.state.stacking.wide.state };
     let dark = d.state.darkCapture?.state;
     let connected = d.state.connected;
+    let linkState = d.state.link?.state;
     let charging = d.state.charging;
     let batteryBand = band(d.state.battery);
     let cameraHung = false;
@@ -407,7 +410,17 @@ export class DutyLoop extends EventEmitter {
         this.event(dc === 'done' ? `dark master saved: ${x.master} (${x.exposureS} s, gain ${x.gain}, ${x.frames} frames)` : `dark capture ${x.exposureS} s ended: ${dc}${x.error ? ` — ${x.error}` : ''}`);
       }
       dark = dc;
-      if (connected !== s.connected && !s.released) {
+      const ls = s.link?.state;
+      const prevLs = linkState;
+      if (ls !== linkState && !s.released) {
+        // a hung or contended telescope matters on duty or not: the user has to act
+        if (ls === 'unresponsive') this.event(`the telescope STOPPED RESPONDING: ${s.link!.detail} Tell the user now; do not send telescope commands until it answers again (you will get an event).`);
+        else if (ls === 'contended') this.event(`the telescope is being TAKEN BY ANOTHER CLIENT: ${s.link!.detail} Tell the user now.`);
+        else if (ls === 'connected' && (linkState === 'unresponsive' || linkState === 'contended')) this.event('the telescope is answering commands again: check telescope_status (after a power cycle: motors_home, then sync_time_and_location) and carry on');
+      }
+      linkState = ls;
+      const special = (x?: string) => x === 'unresponsive' || x === 'contended';
+      if (connected !== s.connected && !s.released && !special(ls) && !special(prevLs)) {
         this.event(s.connected ? 'the telescope connection is back' : 'the telescope connection was lost', true);
       }
       connected = s.connected;

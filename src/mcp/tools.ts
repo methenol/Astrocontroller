@@ -1,3 +1,4 @@
+import { wireLines } from '../dwarf/wirelog.js';
 import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
@@ -121,7 +122,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     'Current telescope state: connection, battery, temperatures, storage, shooting mode, Alt-Az/EQ mode, motor angles, focus, calibration/GoTo/tracking, live-stacking progress, polar-alignment result, observer location and local time, and health (camera service responding or hung, live video per camera). Call this first, whenever unsure, and after any timeout.',
     { refresh: z.boolean().optional().describe('re-query the device instead of using the cached state (default true)') },
     async ({ refresh }) => {
-      if (refresh !== false && dwarf.link.connected) {
+      // During an operation the cached state is kept current by the telescope's own notifications:
+      // no extra queries in the middle of it.
+      if (refresh !== false && dwarf.link.usable && !dwarf.quietPeriod()) {
         await dwarf.refreshState().catch(() => {});
         await dwarf.readMotorPositions().catch(() => {});
       }
@@ -134,6 +137,8 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         observer: loc ? { ...loc, timezone: tz } : 'NOT CONFIGURED — set OBSERVER_LATITUDE/OBSERVER_LONGITUDE',
         localTime: new Date().toLocaleString('en-US', { timeZone: tz }),
         busyWith: dwarf.isBusy(),
+        // the latest commands to the telescope (> sent, < reply, x unanswered, ! link event)
+        recentCommands: wireLines(15, { notifications: false }),
         health: {
           ...http.apiHealth(),
           video: Object.fromEntries((['tele', 'wide'] as const).map((n) => {
@@ -150,10 +155,29 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     return text({ ...info, firmware: fw?.version, shootingModes: modes.map((m) => ({ id: m.id, name: m.name, parent: m.parentId, techniques: m.shootingTechnology.map((t) => http.SHOOTING_TECH_NAMES[t.id] ?? t.id) })) });
   });
 
-  tool('telescope_reconnect', 'Drop and re-open the control connection. Use if commands time out. Note: the official DWARFLAB app must be closed or it takes over the session. Does nothing while the user has released the telescope (Disconnect in the web UI).', {}, async () => {
+  let lastReconnectAt = 0;
+  tool('telescope_reconnect', 'Re-open the control connection if it is not working, then check that the telescope answers. Rarely needed: the link detects dead connections and hangs by itself and recovers on its own (telescope_status.link). A healthy connection is checked, never dropped. At most once every 2 minutes; refused while an operation runs or while another app holds the telescope (reconnecting then knocks one of you off). It does NOT clear a stuck calibration/GoTo (use stop_goto) and cannot fix a hung telescope (that needs a power cycle). Does nothing while the user has released the telescope (Disconnect in the web UI).', {}, async () => {
+    dwarf.assertNoOperation('reconnecting');
+    const health = dwarf.link.health();
+    if (health.state === 'connected') {
+      const ok = await dwarf.refreshState().then(() => true, () => false);
+      if (ok) return text('the connection is healthy and the telescope is answering commands: nothing to do (it was not dropped)');
+    }
+    if (health.state === 'contended') throw new Error(`not reconnecting: ${health.detail}`);
+    const wait = 120_000 - (Date.now() - lastReconnectAt);
+    if (wait > 0) throw new Error(`a reconnect was done ${Math.round((Date.now() - lastReconnectAt) / 1000)} s ago; repeated reconnects make things worse. Current link: ${health.detail}. Try again in ${Math.ceil(wait / 1000)} s if it is still not answering.`);
+    lastReconnectAt = Date.now();
     dwarf.link.reconnect();
     await dwarf.link.waitConnected(15000);
-    return text('reconnected');
+    // a connection is only useful if the command service answers
+    const end = Date.now() + 20000;
+    let answered = false;
+    while (Date.now() < end && !answered) {
+      answered = await dwarf.refreshState().then(() => true, () => false);
+      if (!answered && dwarf.state.link?.state === 'unresponsive') break;
+    }
+    if (!answered) throw new Error(`reconnected, but the telescope does not answer commands: ${dwarf.link.health().detail}`);
+    return text('reconnected; the telescope is answering commands');
   });
 
   tool(

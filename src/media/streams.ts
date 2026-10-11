@@ -310,6 +310,14 @@ export class CameraSource extends Source {
       this.learnedNoRtsp = null;
     }
     // tele in a mode without RTSP: the astro preview instead
+    // Mode not known yet (just connected): opening the tele RTSP in DSO mode hangs the session, so wait.
+    if (this.fallback && mode === null) {
+      if (this.proc) this.stopReader('shooting mode unknown');
+      this.setPreview(false);
+      this.phase = 'backoff';
+      this.note = 'waiting for the telescope to report its shooting mode';
+      return;
+    }
     if (this.fallback && mode !== null && mode !== 1 && (this.noRtspModes.has(mode) || this.learnedNoRtsp === mode)) {
       if (this.proc) this.stopReader(`${st.shootingMode?.name} mode has no tele RTSP`);
       this.setPreview(true);
@@ -332,6 +340,13 @@ export class CameraSource extends Source {
         }
         this.closing = null;
       }
+      // No new session while the telescope runs an operation: it stops the video anyway, and the
+      // firmware is better left alone until it is done.
+      if (this.dwarf.quietPeriod()) {
+        this.phase = 'backoff';
+        this.note = 'live video paused while the telescope works; it resumes afterwards';
+        return;
+      }
       if (now >= this.nextAttemptAt) this.connect();
       else this.phase = 'backoff';
       return;
@@ -342,8 +357,7 @@ export class CameraSource extends Source {
     const limit = fresh ? CameraSource.STALL_MS : CameraSource.FIRST_FRAME_MS;
     if (quiet < limit) return;
     // GoTo / calibration / polar alignment take over the cameras for a while (not stacking: that runs for hours)
-    const busy = this.dwarf.isBusy();
-    const pausing = now < this.pauseUntil || (!!busy && busy !== 'live stacking') || now - this.dwarf.lastMotionAt < 4000;
+    const pausing = now < this.pauseUntil || this.dwarf.quietPeriod() || now - this.dwarf.lastMotionAt < 4000;
     if (pausing) {
       this.note = 'live video paused while the telescope works; it resumes afterwards';
       return;
@@ -594,6 +608,9 @@ export class StreamHub {
     // In DSO/astro modes the telescope serves the tele preview on :8092 instead of RTSP.
     this.tele.fallback = this.stack;
     this.tele.noRtspModes.add(2); // DSO: verified, tele RTSP not served (opening it hangs the session)
+    // Milky Way and Star Trail are astro modes like DSO: use the preview, never probe RTSP there.
+    this.tele.noRtspModes.add(4);
+    this.tele.noRtspModes.add(5);
     this.stack.allowed = () => dwarf.state.connected && !dwarf.state.released;
     // The link coming back: reconnect right away.
     let wasConnected = dwarf.state.connected;
