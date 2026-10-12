@@ -147,6 +147,9 @@ export class AgentBridge extends EventEmitter {
         if (f === 'SYSTEM.md') fs.copyFileSync(src, dest + '.shipped');
       }
     }
+    // Owner-compliance rules appended to the system prompt: mandatory, so replaced every start.
+    const append = path.join(tmpl, 'APPEND.md');
+    if (fs.existsSync(append)) fs.copyFileSync(append, path.join(ws, '.omp', 'APPEND.md'));
   }
 
   async start(mcpUrl: string): Promise<void> {
@@ -172,6 +175,7 @@ export class AgentBridge extends EventEmitter {
       '--session-dir', config.paths.sessions,
       '--continue',
       '--system-prompt', path.join(ws, '.omp', 'SYSTEM.md'),
+      '--append-system-prompt', path.join(ws, '.omp', 'APPEND.md'),
       '--tools', 'read,write,edit,grep,glob,bash,todo',
       '--no-lsp',
       '--no-title',

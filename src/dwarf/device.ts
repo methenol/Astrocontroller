@@ -145,7 +145,10 @@ export class Dwarf extends EventEmitter {
       this.syncLink();
       if (this.link.usable) void this.onConnected();
     });
-    this.link.on('disconnected', () => this.syncLink());
+    this.link.on('disconnected', () => {
+      this.lastDropAt = Date.now();
+      this.syncLink();
+    });
     this.link.on('health', () => this.syncLink());
     // Back from a hang (after a power cycle): resync like a fresh connection.
     this.link.on('responsive', () => {
@@ -477,6 +480,7 @@ export class Dwarf extends EventEmitter {
         break;
       case 'powerOff':
         log.warn('telescope is powering off');
+        this.lastDropAt = Date.now();
         break;
       case 'hostSlaveMode':
         // mode 1 = another client is the host and our commands are only observed
@@ -626,6 +630,8 @@ export class Dwarf extends EventEmitter {
   }
 
   private lastOpEndedAt = 0;
+  /** Last time the connection dropped or the telescope announced a power-off (ends motor routines). */
+  private lastDropAt = 0;
 
   isBusy(): string | null {
     if (this.activeOp) return this.activeOp.label;
@@ -962,44 +968,58 @@ export class Dwarf extends EventEmitter {
   private async homeMotorsNow(): Promise<string> {
     this.assertNoNdLock('homing the motors');
     await this.releaseMotors();
+    const started = Date.now();
     const notes: string[] = [];
-    const reset = async (id: 1 | 2, direction: boolean) => {
-      const r = await this.request(Cmd.STEP_MOTOR_RESET, { id, direction }, { timeout: 240000, allowError: true, bestEffort: true });
-      const code = Number(r?.code ?? 0);
-      if (!r) notes.push(`${id === 1 ? 'rotation' : 'pitch'} reset: no reply within 4 min`);
-      else if (MOTOR_OVERTIME.has(code)) notes.push(`${id === 1 ? 'rotation' : 'pitch'} reset stopped at the firmware's time limit (${errorText(code)}); reset again from there`);
-      else if (code < 0 && code !== -14520) throw new DwarfCommandError(Cmd.STEP_MOTOR_RESET, code, r ?? {});
+    // A power-off or a lost connection ends the routine: resetting through a shutdown left the
+    // pitch with a wrong reference (2026-10-11 02:48: 323°, outside its travel).
+    const stillThere = () => {
+      if (this.lastDropAt >= started) throw new Error('homing stopped: the telescope powered off or the connection dropped during it, so nothing more was sent. Once it is back, call motors_home once.');
     };
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      // Pitch to its bottom reference. After a failed calibration the firmware ignores resets
-      // for a while, and a long way down can hit the time limit: repeat until it is really there.
-      for (let i = 0; i < 5; i++) {
-        await reset(2, true);
-        const pp = await this.readMotorPositions().catch(() => null);
-        if (pp?.pitchDeg !== undefined && pp.pitchDeg < 20) break;
+    const [pMin, pMax] = Dwarf.PITCH_RANGE;
+    const [rMin, rMax] = Dwarf.ROTATION_RANGE;
+    /**
+     * One axis. The firmware's reset finds the axis's reference switch and then drives it back to
+     * where it started (verified 2026-10-10/11 on fw 1.5.3: pitch 136 → 136, 153 → 153, 90 → 90),
+     * so a valid position afterwards means homed, wherever it is. Resetting again only repeats
+     * the trip; retried only when the reset did not give a position (time limit, no reply).
+     */
+    const homeAxis = async (id: 1 | 2, direction: boolean): Promise<number> => {
+      const axis = id === 1 ? 'rotation' : 'pitch';
+      const [lo, hi] = id === 1 ? [rMin, rMax] : [pMin, pMax];
+      let last = '';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        stillThere();
+        const r = await this.request(Cmd.STEP_MOTOR_RESET, { id, direction }, { timeout: 240000, allowError: true, bestEffort: true });
+        stillThere();
+        const code = Number(r?.code ?? 0);
+        if (r && code < 0 && code !== -14520 && !MOTOR_OVERTIME.has(code)) throw new DwarfCommandError(Cmd.STEP_MOTOR_RESET, code, r);
+        const p = await this.readMotorPositions().catch(() => null);
+        const v = id === 1 ? p?.rotationDeg : p?.pitchDeg;
+        if (v !== undefined) {
+          if (v < lo - 5 || v > hi + 5) {
+            throw new Error(`${axis} reports ${v}° after its reset, outside its ${lo}–${hi}° travel: the motor controller has a wrong reference (seen after the telescope was powered off in the middle of a reset). Nothing more was moved. Fix: power the telescope off, let it finish shutting down, power it on, then call motors_home once.`);
+          }
+          if (attempt > 1) notes.push(`${axis} needed ${attempt} resets (${last})`);
+          return v;
+        }
+        last = !r ? 'no reply within 4 min' : MOTOR_OVERTIME.has(code) ? `stopped at the firmware's time limit (${errorText(code)})` : 'still no reference (-14520)';
         await sleep(3000);
       }
-      // Rotation reference switch at ≈12° (direction=true has no switch → -14520).
-      for (let i = 0; i < 3; i++) {
-        await reset(1, false);
-        const pr = await this.readMotorPositions().catch(() => null);
-        if (pr?.homed && pr.rotationDeg !== undefined) break;
-        await sleep(3000);
-      }
-      this.lastMotionAt = Date.now();
-      const p = await this.readMotorPositions();
-      if (p.homed && p.pitchDeg !== undefined && p.rotationDeg !== undefined && p.pitchDeg < 20) {
-        // Park rotation at the centre of travel so every session starts from the same frame.
-        await this.runAxis(1, 159, 20, p.rotationDeg);
-        const q = await this.readMotorPositions();
-        return `homed: rotation ${q.rotationDeg}° (centre of travel), pitch ${q.pitchDeg}° (pointing down; raise with move_motors, e.g. pitch 160 ≈ 70° altitude)${notes.length ? `. Notes: ${notes.join('; ')}` : ''}`;
-      }
-      if (attempt === 3) {
-        throw new Error(`homing did not complete after 3 rounds: motors report ${p.homed ? `rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°` : 'still not homed (-14520)'}${notes.length ? ` (${notes.join('; ')})` : ''}. Power-cycling the telescope resets its motor controller.`);
-      }
-      await sleep(5000);
-    }
-    return 'unreachable';
+      throw new Error(`homing failed: ${axis} has no reference after 3 resets (${last}). Power-cycling the telescope resets its motor controller.`);
+    };
+    await homeAxis(2, true);
+    // Rotation reference switch at ≈12° (direction=true has no switch → -14520).
+    const rot = await homeAxis(1, false);
+    this.lastMotionAt = Date.now();
+    // Park in the standard pose: rotation at the centre of travel, pitch down.
+    stillThere();
+    if (Math.abs(rot - 159) > 0.5) await this.runAxis(1, 159, 20, rot);
+    const mid = await this.readMotorPositions();
+    stillThere();
+    if (mid.pitchDeg !== undefined && mid.pitchDeg > 3) await this.runAxis(2, 2.5, 20, mid.pitchDeg);
+    this.lastMotionAt = Date.now();
+    const q = await this.readMotorPositions();
+    return `homed: rotation ${q.rotationDeg}° (centre of travel), pitch ${q.pitchDeg}° (pointing down; raise with move_motors, e.g. pitch 160 ≈ 70° altitude)${notes.length ? `. Notes: ${notes.join('; ')}` : ''}`;
   }
 
   /**

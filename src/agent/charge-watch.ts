@@ -65,7 +65,7 @@ export function watchCharging(dwarf: Dwarf, agent: AgentBridge): void {
       '2. transfer_session for each of those sessions. Processing in AstroPhoto Studio queues itself after each transfer.',
       '3. Follow the transfers with jobs until all are done. If one fails, retry it once; if it fails again, do NOT shut down: report it and stop.',
       '4. Check processing_status that the sessions are queued or processing.',
-      '5. Shut the telescope down: power action=shutdown (approved by this setting).',
+      '5. Shut the telescope down: power action=shutdown.',
       '6. Write a short summary: what was transferred, processing profile and ETA.',
     ].join('\n');
     try {

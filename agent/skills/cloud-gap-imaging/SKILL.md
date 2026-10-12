@@ -9,7 +9,7 @@ Goal: collect clean subs in the clear gaps without filling the stack with cloudy
 ## Before starting
 - `weather_forecast` → hours with the best scores and cloud layers. **High** cloud (thin cirrus) still lets bright targets through; **low/mid** cloud blocks everything.
 - Pick a target that is high (> 45°) during the hoped-for gaps, and bright. Emission nebulae with Duo-Band tolerate haze better than galaxies.
-- Waiting for gaps leaves the scope idle, and the Dwarf may **auto-power-off** when idle. `autoShutdown` is a device-wide setting (shown under `deviceSettings` in `get_camera_settings`). With the user's OK: `set_camera_setting camera=tele setting=autoShutdown value=false`; the tool reads it back and reports "verified on device". Restore it (`value=true`) at the end if the user wants.
+- Waiting for gaps leaves the scope idle, and the Dwarf may **auto-power-off** when idle. `autoShutdown` is a device-wide setting (shown under `deviceSettings` in `get_camera_settings`). Turn it off yourself: `set_camera_setting camera=tele setting=autoShutdown value=false`; the tool reads it back and reports "verified on device". Restore it (`value=true`) at the end of the session.
 
 ## Is the sky clear right now?
 - **`sky_check`** (one call: wide still at 2.5 s / gain 60, camera settings restored afterwards) → verdict, star count, background, image. Point above ~60° altitude (pitch > 150) first. This is the clear-sky meter; don't hand-set wide exposure/gain for it. Note the star count on a known-clear moment in `NOTES.md` to calibrate ("clear ≈ N stars").

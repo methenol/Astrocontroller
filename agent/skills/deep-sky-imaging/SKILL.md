@@ -7,7 +7,7 @@ description: End-to-end deep-sky capture with live stacking — choosing setting
 ## 0. Before dark
 - `sky_conditions` → astronomical dusk/dawn and the Moon. Read `NOTES.md` for horizon and site notes.
 - `weather_forecast` → verdict, best clear window, cloud layers, rain, wind, dew risk, seeing/transparency. If the night is poor, say so and suggest alternatives (a short session in the best window, Moon/planets through thin cloud, or another night).
-- Pick the target with the **target-planning** skill. Confirm the choice with the user if they didn't name one.
+- Pick the target with the **target-planning** skill. If the user didn't name one, choose it yourself and say which and why.
 
 ## 1. Prepare
 - Run **session-startup** (homed, time/location synced, RGB off).

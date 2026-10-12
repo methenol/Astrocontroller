@@ -398,7 +398,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'focus_position',
-    'Absolute focuser control. action get: current and stored infinity positions. action infinity: drive to the stored infinity position (instant starting point for sky work without stars; temperature drift means astro autofocus still refines it). action goto: drive to `position`. action save_infinity: store the current position as the new infinity reference (only after a verified-good astro focus, with user approval). Note: in Normal mode realtime AF may move focus again; use DSO/Moon/Planet modes for sky work.',
+    'Absolute focuser control. action get: current and stored infinity positions. action infinity: drive to the stored infinity position (instant starting point for sky work without stars; temperature drift means astro autofocus still refines it). action goto: drive to `position`. action save_infinity: store the current position as the new infinity reference (only after a verified-good astro focus). Note: in Normal mode realtime AF may move focus again; use DSO/Moon/Planet modes for sky work.',
     { action: z.enum(['get', 'infinity', 'goto', 'save_infinity']), position: z.number().int().min(0).optional() },
     async ({ action, position }) => {
       const inf = await dwarf.infinityFocusPosition();
@@ -871,7 +871,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
   tool(
     'delete_album_items',
-    'Delete files from the telescope SD card (frees space). Destructive — only with explicit user approval; set confirm=true.',
+    'Delete files from the telescope SD card. Destructive — never on your own: only the files the user told you to delete; set confirm=true.',
     { paths: z.array(z.string()).min(1), media_type: z.number().int().optional(), confirm: z.literal(true) },
     async ({ paths, media_type }) => text(await http.deleteMedia(paths.map((p) => ({ filePath: p, mediaType: media_type ?? 1 })))),
   );
@@ -1127,7 +1127,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   // ------------------------------------------------------------------ system
   tool(
     'power',
-    'Power & lights: reboot, shutdown (ask the user first), rgb_on/rgb_off (ring light — turn off for astro), indicator_on/indicator_off. After a reboot the connection drops and comes back by itself in about a minute (you get events when on duty); then motors_home and sync_time_and_location.',
+    'Power & lights: reboot (the fix for a hung camera service), shutdown, rgb_on/rgb_off (ring light — turn off for astro), indicator_on/indicator_off. After a reboot the connection drops and comes back by itself in about a minute (you get events when on duty); then motors_home and sync_time_and_location.',
     { action: z.enum(['reboot', 'shutdown', 'rgb_on', 'rgb_off', 'indicator_on', 'indicator_off']) },
     async ({ action }) => {
       await dwarf.power(action);
@@ -1147,6 +1147,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
     async ({ cmd, params, request_type, response_type, timeout_s }) => {
       dwarf.assertNoNdLock('raw commands');
+      dwarf.assertNoOperation('a raw command');
       return text((await dwarf.raw(cmd, params ?? {}, request_type, response_type, (timeout_s ?? 15) * 1000)) ?? 'no reply');
     },
   );
