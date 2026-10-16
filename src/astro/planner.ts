@@ -1,5 +1,5 @@
-import { catalog, displayName, gotoLabel, TYPE_GROUPS, type DsoObject } from './catalog.js';
-import { visibility, nightWindow, moonState, separationDeg, fmtTime, type Site, altAz } from './sky.js';
+import { catalog, displayName, gotoLabel, typeGroup, type DsoObject } from './catalog.js';
+import { nightWindow, moonState, separationDeg, fmtTime, type Site, altAz } from './sky.js';
 
 export interface PlanOptions {
   start?: Date;
@@ -51,10 +51,12 @@ const EMISSION = new Set(['HII', 'EmN', 'SNR', 'PN', 'Cl+N']);
 /** never offered unless asked for by type: not imaging targets for a 150 mm lens */
 const ONLY_ON_REQUEST = ['*', '**', 'Nova', 'Other', 'DrkN', 'GClstr'];
 
+const BRIGHT_CLASS: Readonly<Record<number, number>> = { 1: 0.55, 2: 0.35, 3: 0.15 };
+
 /** 0–1 from the magnitude, or from the brightness class (Sharpless, Lynds…) when there is none. */
 function brightness(o: DsoObject): number {
   if (o.mag !== undefined) return Math.max(0, Math.min(1, (13 - o.mag) / 9));
-  if (o.brightClass !== undefined) return ({ 1: 0.55, 2: 0.35, 3: 0.15 } as Record<number, number>)[o.brightClass] ?? 0.3;
+  if (o.brightClass !== undefined) return BRIGHT_CLASS[o.brightClass] ?? 0.3;
   return 0.5;
 }
 
@@ -74,22 +76,133 @@ function framing(o: DsoObject, fov: { w: number; h: number }): { text: string; f
   return { text: `small (${maj}') — only ${Math.round(frac * 100)}% of the frame; will look tiny at 150mm`, fit: 0.25 };
 }
 
-export function planNight(site: Site, opts: PlanOptions) {
-  const now = new Date();
+/** Defaults of the plan's filters. */
+const DEFAULT_MAX_MAG = 11;
+const DEFAULT_MIN_SIZE = 4;
+const DEFAULT_MAX_SIZE = 600;
+const DEFAULT_LIMIT = 15;
+/** No darkness known (polar summer): this many hours from the start. */
+const DEFAULT_NIGHT_H = 8;
+/** A plan covers one night: a longer window is refused (it would also sample the catalog for days). */
+const MAX_WINDOW_H = 24;
+const MAX_LIMIT = 200;
+/** Altitude is sampled every this many hours across the window. */
+const STEP_H = 0.25;
+/** A target up for less than this is not worth a session. */
+const MIN_HOURS_UP = 0.75;
+/** Hours above the minimum count up to this many toward the score. */
+const HOURS_CAP = 6;
+/** The Moon matters to broadband targets brighter than this, within this many degrees. */
+const MOON_BRIGHT_PCT = 30;
+const MOON_NEAR_DEG = 40;
+/** Score weights (they add up to 100 before the bonus and the Moon). */
+const W = { hours: 35, altitude: 15, framing: 25, brightness: 20, moon: 25 } as const;
+/** With a forecast, the geometric score is scaled by FLOOR + (1 − FLOOR) × alignment. */
+const WEATHER_FLOOR = 0.35;
+/** A target whose centre is within this fraction of a better one's size is the same field. */
+const SAME_FIELD = 0.4;
+const FAMOUS = /^[MC] \d+$/;
+
+/** A forecast observability (0–100) as a weight 0–1; no (or an unusable) forecast counts as clear. */
+function clearness(obs: number | undefined): number {
+  return obs === undefined || !Number.isFinite(obs) ? 1 : Math.max(0, Math.min(1, obs / 100));
+}
+
+interface Sampled {
+  maxAlt: number;
+  maxAltAt: Date;
+  hoursAboveMin: number;
+  firstAbove: Date | null;
+  lastAbove: Date | null;
+  /** weighted forecast over the hours up (see alignment), and forecast-weighted hours up */
+  alignment: number;
+  clearHours: number;
+}
+
+/**
+ * One pass over the window: visibility, and the weather alignment — how good the forecast is
+ * during THIS target's best hours. Each sample above the minimum altitude is weighted by how well
+ * placed the target is then (its altitude above the minimum relative to its own peak, squared, so
+ * the hours around the peak dominate), and the forecast is averaged with those weights: 1 = clear
+ * at its peak, 0 = clouded out when it matters. Without a forecast the alignment is 1.
+ */
+function sample(site: Site, o: DsoObject, start: Date, end: Date, minAlt: number, observability?: (t: Date) => number | undefined): Sampled {
+  // each sample stands for the step that follows it, up to the end of the window (the last stands for none)
+  const pts: Array<{ t: Date; alt: number; h: number }> = [];
+  for (let t = start.getTime(); t <= end.getTime(); t += STEP_H * 3600e3) {
+    const d = new Date(t);
+    pts.push({ t: d, alt: altAz(site, o.raHours, o.decDeg, d).altitude, h: Math.min(STEP_H, (end.getTime() - t) / 3600e3) });
+  }
+  let maxAlt = -90;
+  let maxAltAt = start;
+  let up = 0;
+  let firstAbove: Date | null = null;
+  let lastAbove: Date | null = null;
+  for (const p of pts) {
+    if (p.alt > maxAlt) {
+      maxAlt = p.alt;
+      maxAltAt = p.t;
+    }
+    if (p.alt >= minAlt) {
+      up += p.h;
+      firstAbove ??= p.t;
+      lastAbove = p.t;
+    }
+  }
+  const span = Math.max(1, maxAlt - minAlt);
+  let wg = 0;
+  let g = 0;
+  let clear = 0;
+  for (const p of pts) {
+    if (p.alt < minAlt) continue;
+    const w = clearness(observability?.(p.t));
+    const q = ((p.alt - minAlt) / span) ** 2;
+    wg += w * q;
+    g += q;
+    clear += p.h * w;
+  }
+  return {
+    maxAlt: Math.round(maxAlt * 10) / 10,
+    maxAltAt,
+    hoursAboveMin: Math.round(up * 10) / 10,
+    firstAbove,
+    lastAbove,
+    alignment: observability && g > 0 ? wg / g : 1,
+    clearHours: clear,
+  };
+}
+
+export interface NightPlan {
+  window: { start: string | null; end: string | null; hours: number };
+  moon: { illuminationPercent: number; phase: string };
+  minAltitude: number;
+  weather: string;
+  candidatesConsidered: number;
+  targets: PlannedTarget[];
+}
+
+export function planNight(site: Site, opts: PlanOptions & { now?: Date }): NightPlan {
+  const now = opts.now ?? new Date();
   const win = nightWindow(site, now);
   const start = opts.start ?? (win.darkStart && win.darkStart > now ? win.darkStart : now);
-  const end = opts.end ?? win.darkEnd ?? new Date(start.getTime() + 8 * 3600e3);
+  const end = opts.end ?? (win.darkEnd && win.darkEnd > start ? win.darkEnd : new Date(start.getTime() + DEFAULT_NIGHT_H * 3600e3));
+  if (!(end.getTime() > start.getTime())) throw new Error(`the planning window must end after it starts (${start.toISOString()} → ${end.toISOString()})`);
+  if (end.getTime() - start.getTime() > MAX_WINDOW_H * 3600e3) throw new Error(`the planning window is one night, at most ${MAX_WINDOW_H} h (${start.toISOString()} → ${end.toISOString()})`);
+  if (!(opts.minAltitude >= 0 && opts.minAltitude < 90)) throw new Error(`minAltitude must be from 0 to below 90° (got ${opts.minAltitude})`);
+  if (!(opts.fovArcmin.w > 0 && opts.fovArcmin.h > 0)) throw new Error(`the field of view must be positive (got ${opts.fovArcmin.w}×${opts.fovArcmin.h}')`);
+  if (opts.limit !== undefined && !(opts.limit >= 1)) throw new Error(`limit must be at least 1 (got ${opts.limit})`);
   const moon = moonState(site, new Date((start.getTime() + end.getTime()) / 2));
   const types = new Set<string>();
-  for (const t of opts.types ?? []) for (const code of TYPE_GROUPS[t.toLowerCase()] ?? [t]) types.add(code);
-  const maxMag = opts.maxMagnitude ?? 11;
-  const minSize = opts.minSizeArcmin ?? 4;
-  const maxSize = opts.maxSizeArcmin ?? 600;
+  for (const t of opts.types ?? []) for (const code of typeGroup(t) ?? [t]) types.add(code);
+  const maxMag = opts.maxMagnitude ?? DEFAULT_MAX_MAG;
+  const minSize = opts.minSizeArcmin ?? DEFAULT_MIN_SIZE;
+  const maxSize = opts.maxSizeArcmin ?? DEFAULT_MAX_SIZE;
+  const limit = Math.min(MAX_LIMIT, Math.floor(opts.limit ?? DEFAULT_LIMIT));
 
   const candidates = catalog().filter((o) => {
     if (types.size && !types.has(o.type)) return false;
     if (ONLY_ON_REQUEST.includes(o.type) && !types.has(o.type)) return false;
-    const famous = o.aliases.some((a) => /^M \d+$/.test(a) || /^C \d+$/.test(a));
+    const famous = o.aliases.some((a) => FAMOUS.test(a));
     // Bright enough: a magnitude within the limit, or (nebulae have none) a bright or moderate class.
     if (!famous && !(o.mag !== undefined ? o.mag <= maxMag : o.brightClass !== undefined && o.brightClass <= 2)) return false;
     if ((o.majorArcmin ?? 0) < minSize || (o.majorArcmin ?? 0) > maxSize) return false;
@@ -97,93 +210,69 @@ export function planNight(site: Site, opts: PlanOptions) {
     return 90 - Math.abs(site.lat - o.decDeg) >= opts.minAltitude;
   });
 
-  const out: PlannedTarget[] = [];
+  const hasWx = !!opts.observability;
+  const scored: Array<{ t: PlannedTarget; size: number }> = [];
   for (const o of candidates) {
-    const vis = visibility(site, o.raHours, o.decDeg, start, end, opts.minAltitude, 15);
-    if (vis.hoursAboveMin < 0.75) continue;
+    const vis = sample(site, o, start, end, opts.minAltitude, opts.observability);
+    if (vis.hoursAboveMin < MIN_HOURS_UP) continue;
     const fr = framing(o, opts.fovArcmin);
     const moonSep = separationDeg(o.raHours, o.decDeg, moon.raHours, moon.decDeg);
-    const moonPenalty = moon.illuminationPercent > 30 && moonSep < 40 && !EMISSION.has(o.type) ? (moon.illuminationPercent / 100) * (1 - moonSep / 40) * 25 : 0;
-    const famous = o.aliases.some((a) => /^M \d+$/.test(a) || /^C \d+$/.test(a)) ? 5 : o.names.length ? 2 : 0;
-    // Weather alignment: how good the forecast is during THIS target's best hours. Each 15 min
-    // above the minimum altitude is weighted by how well placed the target is then (its altitude
-    // above the minimum relative to its own peak, squared, so the hours around the peak dominate),
-    // and the forecast is averaged with those weights: 1 = clear at its peak, 0 = clouded out
-    // when it matters. The geometric score is then scaled by it, so the best targets are those
-    // whose own optimal time coincides with good weather. Without a forecast the factor is 1.
-    let wg = 0;
-    let g = 0;
-    let clear = 0;
-    let wPeak: number | undefined;
-    const stepH = 0.25;
-    const span = Math.max(1, vis.maxAlt - opts.minAltitude);
-    for (let t = start.getTime(); t <= end.getTime(); t += stepH * 3600e3) {
-      const d = new Date(t);
-      const alt = altAz(site, o.raHours, o.decDeg, d).altitude;
-      if (alt < opts.minAltitude) continue;
-      const obs = opts.observability?.(d);
-      const w = obs === undefined ? 1 : obs / 100;
-      const q = ((alt - opts.minAltitude) / span) ** 2;
-      wg += w * q;
-      g += q;
-      clear += stepH * w;
-    }
-    if (opts.observability) {
-      const o2 = opts.observability(vis.maxAltAt);
-      wPeak = o2 === undefined ? undefined : o2 / 100;
-    }
-    const hasWx = !!opts.observability;
-    const alignment = hasWx && g > 0 ? wg / g : 1;
+    const moonPenalty = moon.illuminationPercent > MOON_BRIGHT_PCT && moonSep < MOON_NEAR_DEG && !EMISSION.has(o.type) ? (moon.illuminationPercent / 100) * (1 - moonSep / MOON_NEAR_DEG) * W.moon : 0;
+    const bonus = o.aliases.some((a) => FAMOUS.test(a)) ? 5 : o.names.length ? 2 : 0;
     const geometric =
-      (Math.min(vis.hoursAboveMin, 6) / 6) * 35 +
-      ((vis.maxAlt - opts.minAltitude) / (90 - opts.minAltitude)) * 15 +
-      fr.fit * 25 +
-      brightness(o) * 20 +
-      famous -
+      (Math.min(vis.hoursAboveMin, HOURS_CAP) / HOURS_CAP) * W.hours +
+      ((vis.maxAlt - opts.minAltitude) / (90 - opts.minAltitude)) * W.altitude +
+      fr.fit * W.framing +
+      brightness(o) * W.brightness +
+      bonus -
       moonPenalty;
-    const score = geometric * (0.35 + 0.65 * alignment);
-    out.push({
-      name: o.id,
-      displayName: displayName(o),
-      gotoName: gotoLabel(o),
-      aliases: o.aliases.slice(0, 4),
-      type: o.typeName,
-      constellation: o.constellation,
-      sizeArcmin: o.majorArcmin ? `${o.majorArcmin}×${o.minorArcmin ?? o.majorArcmin}` : '?',
-      magnitude: o.mag ?? null,
-      raHours: Math.round(o.raHours * 1e4) / 1e4,
-      decDeg: Math.round(o.decDeg * 1e3) / 1e3,
-      maxAltitude: vis.maxAlt,
-      bestTime: fmtTime(vis.maxAltAt, opts.timezone),
-      hoursAboveMin: vis.hoursAboveMin,
-      visibleFrom: fmtTime(vis.firstAbove, opts.timezone),
-      visibleUntil: fmtTime(vis.lastAbove, opts.timezone),
-      altitudeNow: Math.round(altAz(site, o.raHours, o.decDeg, now).altitude),
-      moonSeparationDeg: Math.round(moonSep),
-      framing: fr.text,
-      suggestedFilter: suggestFilter(o, moon.illuminationPercent),
-      clearHours: hasWx ? Math.round(clear * 10) / 10 : null,
-      weatherAlignment: hasWx ? Math.round(alignment * 100) : null,
-      skyAtBest: wPeak === undefined ? null : Math.round(wPeak * 100),
-      score: Math.round(score),
+    // The best targets are those whose own optimal time coincides with good weather.
+    const score = geometric * (WEATHER_FLOOR + (1 - WEATHER_FLOOR) * vis.alignment);
+    const atPeak = opts.observability?.(vis.maxAltAt);
+    scored.push({
+      size: o.majorArcmin ?? 0,
+      t: {
+        name: o.id,
+        displayName: displayName(o),
+        gotoName: gotoLabel(o),
+        aliases: o.aliases.slice(0, 4),
+        type: o.typeName,
+        constellation: o.constellation,
+        sizeArcmin: o.majorArcmin ? `${o.majorArcmin}×${o.minorArcmin ?? o.majorArcmin}` : '?',
+        magnitude: o.mag ?? null,
+        raHours: Math.round(o.raHours * 1e4) / 1e4,
+        decDeg: Math.round(o.decDeg * 1e3) / 1e3,
+        maxAltitude: vis.maxAlt,
+        bestTime: fmtTime(vis.maxAltAt, opts.timezone),
+        hoursAboveMin: vis.hoursAboveMin,
+        visibleFrom: fmtTime(vis.firstAbove, opts.timezone),
+        visibleUntil: fmtTime(vis.lastAbove, opts.timezone),
+        altitudeNow: Math.round(altAz(site, o.raHours, o.decDeg, now).altitude),
+        moonSeparationDeg: Math.round(moonSep),
+        framing: fr.text,
+        suggestedFilter: suggestFilter(o, moon.illuminationPercent),
+        clearHours: hasWx ? Math.round(vis.clearHours * 10) / 10 : null,
+        weatherAlignment: hasWx ? Math.round(vis.alignment * 100) : null,
+        skyAtBest: atPeak === undefined || !Number.isFinite(atPeak) ? null : Math.round(atPeak),
+        score: Math.round(score),
+      },
     });
   }
-  out.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => b.t.score - a.t.score);
   // One field, one entry: drop a target whose centre lies inside a better-ranked one that is at
   // least as big (the Maia Nebula inside M 45, a Sharpless region inside an NGC complex).
-  const picked: PlannedTarget[] = [];
-  const size = (t: PlannedTarget) => Number(t.sizeArcmin.split('×')[0]) || 0;
-  for (const t of out) {
-    const host = picked.find((p) => size(p) >= size(t) && separationDeg(p.raHours, p.decDeg, t.raHours, t.decDeg) * 60 < size(p) * 0.4);
-    if (!host) picked.push(t);
-    if (picked.length >= (opts.limit ?? 15)) break;
+  const picked: typeof scored = [];
+  for (const c of scored) {
+    const host = picked.find((p) => p.size >= c.size && separationDeg(p.t.raHours, p.t.decDeg, c.t.raHours, c.t.decDeg) * 60 < p.size * SAME_FIELD);
+    if (!host) picked.push(c);
+    if (picked.length >= limit) break;
   }
   return {
     window: { start: fmtTime(start, opts.timezone), end: fmtTime(end, opts.timezone), hours: Math.round(((end.getTime() - start.getTime()) / 3600e3) * 10) / 10 },
     moon: { illuminationPercent: moon.illuminationPercent, phase: moon.phase },
     minAltitude: opts.minAltitude,
-    weather: opts.observability ? 'ranked by how well tonight\'s forecast lines up with each target\'s best hours' : 'no forecast available: ranked on visibility alone',
+    weather: hasWx ? "ranked by how well tonight's forecast lines up with each target's best hours" : 'no forecast available: ranked on visibility alone',
     candidatesConsidered: candidates.length,
-    targets: picked,
+    targets: picked.map((p) => p.t),
   };
 }

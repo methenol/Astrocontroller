@@ -1,6 +1,6 @@
 /**
- * Minimal FITS reader for DWARF subframes (16-bit Bayer mono, BZERO 32768)
- * and calibration masters. Supports BITPIX 8/16/32/-32/-64, first HDU only.
+ * Minimal FITS reader for DWARF subframes (16-bit Bayer mono, BZERO 32768) and calibration
+ * masters. Supports BITPIX 8/16/32/-32/-64, first HDU, first plane.
  */
 export interface FitsImage {
   header: Record<string, string | number | boolean>;
@@ -11,58 +11,62 @@ export interface FitsImage {
   bayer?: string;
 }
 
+const BLOCK = 2880;
+const CARD = 80;
+const BITPIX_BYTES: Readonly<Record<number, number>> = { 8: 1, 16: 2, 32: 4, [-32]: 4, [-64]: 8 };
+/** Larger than any DWARF frame or master by far; a header claiming more is corrupt, not an image to allocate. */
+const MAX_PIXELS = 200_000_000;
+
 export function isFits(buf: Buffer): boolean {
   return buf.subarray(0, 9).toString('ascii') === 'SIMPLE  =';
 }
 
-export function readFits(buf: Buffer): FitsImage {
-  const header: Record<string, string | number | boolean> = {};
-  let offset = 0;
-  let ended = false;
-  while (!ended && offset < buf.length) {
-    for (let i = 0; i < 36; i++) {
-      const card = buf.subarray(offset + i * 80, offset + i * 80 + 80).toString('ascii');
-      const key = card.slice(0, 8).trim();
-      if (key === 'END') {
-        ended = true;
-        break;
-      }
-      if (card[8] !== '=') continue;
-      let raw = card.slice(10);
-      const q = raw.match(/^\s*'((?:[^']|'')*)'/);
-      if (q) header[key] = q[1].replace(/''/g, "'").trim();
-      else {
-        raw = raw.split('/')[0].trim();
-        if (raw === 'T' || raw === 'F') header[key] = raw === 'T';
-        else if (raw !== '' && !Number.isNaN(Number(raw))) header[key] = Number(raw);
-        else header[key] = raw;
-      }
-    }
-    offset += 2880;
+function parseValue(raw: string): string | number | boolean {
+  const q = raw.match(/^\s*'((?:[^']|'')*)'/);
+  if (q) return q[1].replace(/''/g, "'").trim();
+  const v = raw.split('/')[0].trim();
+  if (v === 'T' || v === 'F') return v === 'T';
+  if (v !== '' && !Number.isNaN(Number(v))) return Number(v);
+  return v;
+}
+
+/** The header cards up to END, and where the data starts (the next block boundary). */
+function readHeader(buf: Buffer): { header: FitsImage['header']; dataOffset: number } {
+  const header: FitsImage['header'] = {};
+  for (let offset = 0; offset + CARD <= buf.length; offset += CARD) {
+    const card = buf.subarray(offset, offset + CARD).toString('ascii');
+    const key = card.slice(0, 8).trim();
+    if (key === 'END') return { header, dataOffset: Math.ceil((offset + CARD) / BLOCK) * BLOCK };
+    if (card[8] === '=') header[key] = parseValue(card.slice(10));
   }
+  throw new Error('FITS header has no END card (truncated file?)');
+}
+
+export function readFits(buf: Buffer): FitsImage {
+  const { header, dataOffset } = readHeader(buf);
   const bitpix = Number(header.BITPIX);
+  const bytes = Object.hasOwn(BITPIX_BYTES, bitpix) ? BITPIX_BYTES[bitpix] : undefined;
+  if (!bytes) throw new Error(`unsupported FITS BITPIX ${header.BITPIX}`);
   const naxis = Number(header.NAXIS);
   const width = Number(header.NAXIS1);
   const height = Number(header.NAXIS2);
-  if (naxis < 2 || !width || !height) throw new Error('FITS has no 2D image in the primary HDU');
-  const planes = naxis >= 3 ? Number(header.NAXIS3) || 1 : 1;
+  if (naxis < 2 || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new Error('FITS has no 2D image in the primary HDU');
+  const n = width * height;
+  if (n > MAX_PIXELS) throw new Error(`FITS claims ${width}×${height} pixels: more than ${MAX_PIXELS}, the header is corrupt`);
+  const need = n * bytes;
+  if (buf.length < dataOffset + need) throw new Error(`FITS data is truncated: ${buf.length - dataOffset} of ${need} bytes for ${width}×${height}`);
   const bzero = Number(header.BZERO ?? 0);
   const bscale = Number(header.BSCALE ?? 1);
-  const n = width * height; // first plane only
+  if (!Number.isFinite(bzero) || !Number.isFinite(bscale)) throw new Error(`FITS BZERO/BSCALE are not numbers (${header.BZERO}, ${header.BSCALE})`);
+  const dv = new DataView(buf.buffer, buf.byteOffset + dataOffset, need);
+  const read: (i: number) => number =
+    bitpix === 8 ? (i) => dv.getUint8(i)
+    : bitpix === 16 ? (i) => dv.getInt16(i * 2, false)
+    : bitpix === 32 ? (i) => dv.getInt32(i * 4, false)
+    : bitpix === -32 ? (i) => dv.getFloat32(i * 4, false)
+    : (i) => dv.getFloat64(i * 8, false);
   const data = new Float32Array(n);
-  const dv = new DataView(buf.buffer, buf.byteOffset + offset, Math.min(buf.length - offset, (Math.abs(bitpix) / 8) * n * planes));
-  for (let i = 0; i < n; i++) {
-    let v: number;
-    switch (bitpix) {
-      case 8: v = dv.getUint8(i); break;
-      case 16: v = dv.getInt16(i * 2, false); break;
-      case 32: v = dv.getInt32(i * 4, false); break;
-      case -32: v = dv.getFloat32(i * 4, false); break;
-      case -64: v = dv.getFloat64(i * 8, false); break;
-      default: throw new Error(`unsupported BITPIX ${bitpix}`);
-    }
-    data[i] = v * bscale + bzero;
-  }
+  for (let i = 0; i < n; i++) data[i] = read(i) * bscale + bzero;
   const bayer = typeof header.BAYERPAT === 'string' ? header.BAYERPAT.toUpperCase() : undefined;
   return { header, width, height, data, bayer };
 }
@@ -75,13 +79,18 @@ export function superpixel(img: FitsImage): { width: number; height: number; rgb
   const rgb = new Float32Array(w * h * 3);
   const pos: Record<string, number[]> = { R: [], G: [], B: [] };
   [...pat].forEach((c, i) => pos[c]?.push(i));
+  const r = pos.R[0] ?? 0;
+  const g0 = pos.G[0] ?? 1;
+  const g1 = pos.G.length === 2 ? pos.G[1] : g0;
+  const b = pos.B[0] ?? 3;
+  const px = [0, 0, 0, 0];
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const px = [0, 1, 2, 3].map((i) => img.data[(y * 2 + (i >> 1)) * img.width + x * 2 + (i & 1)]);
+      for (let i = 0; i < 4; i++) px[i] = img.data[(y * 2 + (i >> 1)) * img.width + x * 2 + (i & 1)];
       const o = (y * w + x) * 3;
-      rgb[o] = px[pos.R[0] ?? 0];
-      rgb[o + 1] = pos.G.length === 2 ? (px[pos.G[0]] + px[pos.G[1]]) / 2 : px[pos.G[0] ?? 1];
-      rgb[o + 2] = px[pos.B[0] ?? 3];
+      rgb[o] = px[r];
+      rgb[o + 1] = (px[g0] + px[g1]) / 2;
+      rgb[o + 2] = px[b];
     }
   }
   return { width: w, height: h, rgb };

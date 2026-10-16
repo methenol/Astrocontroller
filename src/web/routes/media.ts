@@ -1,0 +1,217 @@
+/** Live snapshots, the SD-card album, the library, transfers, processing and agent captures. */
+import fs from 'node:fs';
+import path from 'node:path';
+import express, { type Router } from 'express';
+import { z } from 'zod';
+import { config } from '../../config.js';
+import { errMsg } from '../../log.js';
+import * as dhttp from '../../dwarf/http.js';
+import * as library from '../../library/transfer.js';
+import * as processing from '../../processing/queue.js';
+import * as studio from '../../processing/studio.js';
+import { badRequest, body, notFound, queryNumber, queryString, route } from '../http.js';
+import type { WebContext } from '../context.js';
+
+const ALBUM_PAGE_SIZE = 24;
+const THUMB_TTL_MS = 3600e3;
+const THUMB_MAX_BYTES = 2e6;
+const THUMB_MAX_ENTRIES = 300;
+/** All cached files together stay under this. */
+const THUMB_BUDGET_BYTES = 64 * 1024 * 1024;
+/** The album viewer shows photos and stacked images, not whole videos (those are transferred). */
+const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
+/** A snapshot reuses a frame up to this old, and waits this long for a new one. */
+const SNAPSHOT_MAX_AGE_MS = 5000;
+const SNAPSHOT_TIMEOUT_MS = 15_000;
+
+/** Small album files (thumbnails, stacked JPGs) kept in memory: the SD card is slow over Wi-Fi. */
+export class ThumbCache {
+  private readonly entries = new Map<string, { buf: Buffer; type: string; at: number }>();
+  private bytes = 0;
+
+  get(p: string): { buf: Buffer; type: string } | null {
+    const hit = this.entries.get(p);
+    if (!hit) return null;
+    if (Date.now() - hit.at >= THUMB_TTL_MS) {
+      this.drop(p);
+      return null;
+    }
+    return hit;
+  }
+
+  put(p: string, buf: Buffer, type: string): void {
+    if (buf.length >= THUMB_MAX_BYTES) return;
+    this.drop(p);
+    this.entries.set(p, { buf, type, at: Date.now() });
+    this.bytes += buf.length;
+    // the oldest go first, until both the count and the byte budget are met
+    while (this.entries.size > THUMB_MAX_ENTRIES || this.bytes > THUMB_BUDGET_BYTES) this.drop(this.entries.keys().next().value!);
+  }
+
+  private drop(p: string): void {
+    const e = this.entries.get(p);
+    if (!e) return;
+    this.bytes -= e.buf.length;
+    this.entries.delete(p);
+  }
+
+  clear(): void {
+    this.entries.clear();
+    this.bytes = 0;
+  }
+
+  /** Bytes held (for tests). */
+  get size(): number {
+    return this.bytes;
+  }
+}
+
+const contentType = (p: string) => (p.endsWith('.png') ? 'image/png' : p.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg');
+
+const TransferBody = z.union([
+  z.object({ session: z.string().min(1), subframes: z.boolean().optional(), calibration: z.boolean().optional(), process: z.boolean().optional() }),
+  z.object({ paths: z.array(z.string().min(1)).min(1) }),
+]);
+
+const ProcessBody = z.object({
+  session: z.string().optional(),
+  sessions: z.array(z.string()).optional(),
+  target: z.string().optional(),
+  /** with target: that camera's sessions (required when the target has sessions of both) */
+  camera: z.enum(['tele', 'wide']).optional(),
+  profile: z.string().optional(),
+});
+
+/** A target's library sessions of one camera: one stack never mixes the tele and wide cameras. */
+function targetSessions(target: string, camera: 'tele' | 'wide' | undefined): string[] {
+  if (camera) return library.librarySessionsFor(target, camera);
+  const tele = library.librarySessionsFor(target, 'tele');
+  const wide = library.librarySessionsFor(target, 'wide');
+  if (tele.length && wide.length) throw badRequest(`${target} has tele and wide sessions: give camera (tele or wide)`);
+  return tele.length ? tele : wide;
+}
+
+export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
+  const api = express.Router();
+
+  api.get(
+    '/snapshot/:name',
+    route(async (req, res) => {
+      const name = String(req.params.name);
+      if (!['tele', 'wide', 'stack'].includes(name)) throw notFound(`unknown stream ${name}`);
+      const f = await hub.get(name).snapshot(SNAPSHOT_MAX_AGE_MS, SNAPSHOT_TIMEOUT_MS);
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(f.jpeg);
+    }),
+  );
+
+  // ---- album on the SD card
+  api.get(
+    '/album',
+    route(async (req) => {
+      const type = queryNumber(req, 'type') ?? 0;
+      const page = Math.max(0, Math.floor(queryNumber(req, 'page') ?? 0));
+      const [counts, items] = await Promise.all([dhttp.getMediaCounts(), dhttp.listMedia(type, page, ALBUM_PAGE_SIZE)]);
+      // the page size lets the UI tell the last page from a full one
+      return { counts, items, pageSize: ALBUM_PAGE_SIZE };
+    }),
+  );
+
+  api.get(
+    '/device-file',
+    route(async (req, res) => {
+      const p = queryString(req, 'path') ?? '';
+      // fileUrl encodes each segment and refuses what leaves the card; this only keeps the route to the album
+      if (!p.startsWith('/DWARF3/') || p.split('/').some((s) => s === '..' || s === '.')) throw badRequest('bad path');
+      let entry = thumbs.get(p);
+      if (!entry) {
+        const buf = await dhttp.fetchFile(p, dhttp.FILE_TIMEOUT_MS, DEVICE_FILE_MAX_BYTES);
+        entry = { buf, type: contentType(p) };
+        thumbs.put(p, buf, entry.type);
+      }
+      res.setHeader('Content-Type', entry.type);
+      res.setHeader('Cache-Control', `private, max-age=${THUMB_TTL_MS / 1000}`);
+      res.end(entry.buf);
+    }),
+  );
+
+  // ---- sessions, library, transfers
+  api.get('/sessions', route(async (req) => library.listDeviceSessions(req.query.counts === '1')));
+  api.get('/library', route(async () => ({ root: config.paths.library, targets: library.listLibrary() })));
+  api.post(
+    '/transfer',
+    route(async (req) => {
+      const b = body(req, TransferBody);
+      if ('session' in b) {
+        return library.transferSession(b.session, { includeSubframes: b.subframes !== false, includeCalibration: b.calibration !== false, process: b.process, origin: 'ui' });
+      }
+      return library.transferFiles(b.paths, 'ui');
+    }),
+  );
+  api.post('/jobs/:id/cancel', route(async (req) => ({ cancelled: library.cancelJob(String(req.params.id)) })));
+
+  // ---- AstroPhoto Studio processing: the local outbox and the server's queue
+  api.get(
+    '/processing',
+    route(async () => {
+      const out: Record<string, unknown> = {
+        server: processing.reachability(),
+        profile: config.studio.profile,
+        dataAccess: config.studio.dataAccess,
+        autoProcess: config.studio.autoProcess,
+        items: processing.listItems(50),
+      };
+      if (config.studio.url) out.queue = await studio.queue().catch((e) => ({ error: errMsg(e) }));
+      return out;
+    }),
+  );
+  api.get(
+    '/processing/profiles',
+    route(async () => {
+      const i = await studio.info();
+      return { profiles: i.profiles, default: i.default_profile, configured: config.studio.profile, devices: i.devices, version: i.version };
+    }),
+  );
+  api.post(
+    '/processing',
+    route(async (req) => {
+      const b = body(req, ProcessBody);
+      const sessions = [...new Set([...(b.sessions ?? []), ...(b.session ? [b.session] : []), ...(b.target ? targetSessions(b.target, b.camera) : [])].filter(Boolean))];
+      if (!sessions.length) throw badRequest('give session(s) or a target with sessions in the library');
+      const target = b.target ?? library.parseSessionFolder(sessions[0])?.target ?? sessions[0];
+      return processing.enqueueProcessing({ sessions, target, profile: b.profile || undefined, origin: 'ui' });
+    }),
+  );
+  api.post('/processing/:id/cancel', route(async (req) => processing.cancelItem(String(req.params.id))));
+  api.post('/processing/:id/retry', route(async (req) => processing.retryItem(String(req.params.id))));
+
+  // ---- what the agent captured (served under /captures)
+  api.get(
+    '/captures',
+    route(async () => {
+      const dir = path.join(config.paths.captures, 'agent');
+      if (!fs.existsSync(dir)) return [];
+      return fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith('.jpg'))
+        .sort()
+        .slice(-60)
+        .map((f) => ({ path: `agent/${f}`, name: f }));
+    }),
+  );
+
+  return api;
+}
+
+/** The MJPEG stream of one source (tele, wide, stack). */
+export function streamRoute({ hub }: WebContext): express.RequestHandler {
+  return (req, res) => {
+    try {
+      hub.get(String(req.params.name)).attach(res);
+    } catch (err) {
+      // plain text: the message carries the requested name, which must never be rendered as HTML
+      res.status(404).type('text/plain').send(errMsg(err));
+    }
+  };
+}

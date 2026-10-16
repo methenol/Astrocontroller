@@ -1,6 +1,6 @@
 {
-  "built": "2026-10-08",
-  "total": 44949,
+  "built": "2026-10-12",
+  "total": 44947,
   "sources": [
     {
       "key": "openngc",
@@ -71,8 +71,8 @@
       "title": "Lynds bright nebulae (LBN)",
       "cite": "Lynds B.T., Catalogue of Bright Nebulae, 1965 (VizieR VII/9)",
       "records": 1125,
-      "added": 732,
-      "merged": 393
+      "added": 731,
+      "merged": 394
     },
     {
       "key": "vdb",
@@ -111,8 +111,8 @@
       "title": "Arp peculiar galaxies",
       "cite": "Arp H., Atlas of Peculiar Galaxies, 1966 (VizieR VII/192)",
       "records": 338,
-      "added": 46,
-      "merged": 292
+      "added": 45,
+      "merged": 293
     },
     {
       "key": "hcg",

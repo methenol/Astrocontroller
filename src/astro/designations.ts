@@ -4,7 +4,8 @@
  * Shared by the runtime catalog and the catalog build tool (src/tools/build-catalog.ts).
  */
 
-export const TYPE_NAMES: Record<string, string> = {
+/** OpenNGC object type codes → readable names. */
+export const TYPE_NAMES: Readonly<Record<string, string>> = Object.freeze({
   '*': 'star',
   '**': 'double star',
   '*Ass': 'stellar association',
@@ -25,9 +26,10 @@ export const TYPE_NAMES: Record<string, string> = {
   SNR: 'supernova remnant',
   Nova: 'nova',
   Other: 'other',
-};
+});
 
-export const TYPE_GROUPS: Record<string, string[]> = {
+/** Search groups ("galaxy", "nebula", ...) → the type codes they cover. */
+export const TYPE_GROUPS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   galaxy: ['G', 'GPair', 'GTrpl', 'GGroup'],
   galaxy_cluster: ['GClstr', 'GGroup'],
   nebula: ['HII', 'EmN', 'Neb', 'RfN', 'Cl+N', 'SNR', 'DrkN'],
@@ -40,10 +42,22 @@ export const TYPE_GROUPS: Record<string, string[]> = {
   reflection: ['RfN'],
   dark: ['DrkN'],
   star: ['*', '**'],
-};
+});
+
+/** The readable name of a type code (the code itself when unknown); only own keys, so "constructor" is not a type. */
+export function typeName(code: string): string {
+  return Object.hasOwn(TYPE_NAMES, code) ? TYPE_NAMES[code] : code;
+}
+
+/** The type codes of a search group (case-insensitive), or undefined when it is not a group. */
+export function typeGroup(key: string): readonly string[] | undefined {
+  const k = key.toLowerCase();
+  return Object.hasOwn(TYPE_GROUPS, k) ? TYPE_GROUPS[k] : undefined;
+}
 
 /** 88 constellations: IAU abbreviation, name, genitive. */
-export const CONSTELLATIONS: [string, string, string][] = [
+export type Constellation = readonly [abbr: string, name: string, genitive: string];
+export const CONSTELLATIONS: readonly Constellation[] = Object.freeze<Constellation[]>([
   ['And', 'Andromeda', 'Andromedae'], ['Ant', 'Antlia', 'Antliae'], ['Aps', 'Apus', 'Apodis'], ['Aqr', 'Aquarius', 'Aquarii'],
   ['Aql', 'Aquila', 'Aquilae'], ['Ara', 'Ara', 'Arae'], ['Ari', 'Aries', 'Arietis'], ['Aur', 'Auriga', 'Aurigae'],
   ['Boo', 'Bootes', 'Bootis'], ['Cae', 'Caelum', 'Caeli'], ['Cam', 'Camelopardalis', 'Camelopardalis'], ['Cnc', 'Cancer', 'Cancri'],
@@ -66,13 +80,13 @@ export const CONSTELLATIONS: [string, string, string][] = [
   ['Sex', 'Sextans', 'Sextantis'], ['Tau', 'Taurus', 'Tauri'], ['Tel', 'Telescopium', 'Telescopii'], ['Tri', 'Triangulum', 'Trianguli'],
   ['TrA', 'Triangulum Australe', 'Trianguli Australis'], ['Tuc', 'Tucana', 'Tucanae'], ['UMa', 'Ursa Major', 'Ursae Majoris'], ['UMi', 'Ursa Minor', 'Ursae Minoris'],
   ['Vel', 'Vela', 'Velorum'], ['Vir', 'Virgo', 'Virginis'], ['Vol', 'Volans', 'Volantis'], ['Vul', 'Vulpecula', 'Vulpeculae'],
-];
+]);
 
 const CON_KEY = new Map<string, string>();
 for (const [abbr, name, gen] of CONSTELLATIONS) for (const k of [abbr, name, gen]) CON_KEY.set(k.toLowerCase(), abbr.toLowerCase());
 
 /** canonical 3-letter Bayer abbreviation, its symbol, and the spellings people (and catalogs) use */
-const GREEK: [string, string, string[]][] = [
+const GREEK: readonly (readonly [abbr: string, symbol: string, spellings: readonly string[]])[] = [
   ['alp', 'α', ['alpha', 'alf']], ['bet', 'β', ['beta']], ['gam', 'γ', ['gamma']], ['del', 'δ', ['delta']],
   ['eps', 'ε', ['epsilon']], ['zet', 'ζ', ['zeta']], ['eta', 'η', []], ['the', 'θ', ['theta', 'tet']],
   ['iot', 'ι', ['iota']], ['kap', 'κ', ['kappa']], ['lam', 'λ', ['lambda', 'lmd']], ['mu', 'μ', []],
@@ -89,25 +103,29 @@ for (const [abbr, sym, alts] of GREEK) {
 
 /** "Alp", "alf", "alpha" → "α"; with an index ("alf02") → "α2". Undefined when not a Greek letter. */
 export function greekSymbol(s: string): string | undefined {
-  const m = s.toLowerCase().match(/^([a-zα-ω.]+?)0*(\d?)$/);
-  const abbr = m ? GREEK_KEY.get(m[1]) : undefined;
-  return abbr ? `${GREEK_SYMBOL.get(abbr)}${m![2]}` : undefined;
+  const m = /^([a-zα-ω.]+?)0*(\d?)$/.exec(s.toLowerCase());
+  if (!m) return undefined;
+  const abbr = GREEK_KEY.get(m[1]);
+  return abbr === undefined ? undefined : `${GREEK_SYMBOL.get(abbr)}${m[2]}`;
 }
 
-// Catalog prefixes in the form normalised keys use; longer synonyms map onto these first.
-const PREFIX_SYNONYMS: [RegExp, string][] = [
-  [/^messier\s*/, 'm'],
-  [/^caldwell\s*/, 'c'],
-  [/^(?:sharpless|sh)\s*2?\s*-\s*|^sh2\s*-?\s*|^sh\s*2\s+/, 'sh2-'],
+// Catalog prefixes in the form normalised keys use; longer synonyms map onto these first. Each one
+// only applies before a number, so a common name such as "Barnard's Loop" is left alone.
+const PREFIX_SYNONYMS: readonly (readonly [RegExp, string])[] = [
+  [/^messier\s*(?=\d)/, 'm'],
+  [/^caldwell\s*(?=\d)/, 'c'],
+  [/^(?:sharpless|sh)\s*2?\s*-\s*(?=\d)|^sh2\s*-?\s*(?=\d)|^sh\s*2\s+(?=\d)/, 'sh2-'],
   [/^(?:collinder|cl)\s*(?=\d)/, 'cr'],
-  [/^melotte\s*/, 'mel'],
-  [/^trumpler\s*/, 'tr'],
-  [/^barnard\s*/, 'b'],
-  [/^van\s*den\s*bergh\s*/, 'vdb'],
-  [/^cederblad\s*/, 'ced'],
-  [/^hickson\s*(?:compact\s*group\s*)?/, 'hcg'],
-  [/^(?:abell\s*cluster|aco)\s*/, 'aco'],
+  [/^melotte\s*(?=\d)/, 'mel'],
+  [/^trumpler\s*(?=\d)/, 'tr'],
+  [/^barnard\s*(?=\d)/, 'b'],
+  [/^van\s*den\s*bergh\s*(?=\d)/, 'vdb'],
+  [/^cederblad\s*(?=\d)/, 'ced'],
+  [/^hickson\s*(?:compact\s*group\s*)?(?=\d)/, 'hcg'],
+  [/^(?:abell\s*cluster|aco)\s*(?=\d)/, 'aco'],
 ];
+const BAYER = /^(?:\d+\s*)?([a-zα-ω]+)[\s.-]*0*(\d?)\s+([a-z ]+)$/;
+const FLAMSTEED = /^(\d+)\s+([a-z ]+)$/;
 const NUMBERED = /^(m|ngc|ic|c|b|sh2-|ldn|lbn|vdb|mel|cr|tr|pgc|ugc|abell|aco|arp|rcw|ced|hcg|gum|hr|hd|hip|pal|stock|king|berkeley|czernik|dolidze)\s*0*(\d+)\s*([a-z]?)$/;
 
 /** Lookup key for any designation or name: "M31", "m 31", "Messier 31" → "m31"; "NGC 0224" → "ngc224"; "α Lyr", "alpha Lyrae" → "alp lyr". */
@@ -119,22 +137,27 @@ export function normalizeName(s: string): string {
       break;
     }
   }
-  const m = t.match(NUMBERED);
+  const m = NUMBERED.exec(t);
   if (m) return `${m[1]}${m[2]}${m[3]}`;
   // Bayer: "alpha lyrae", "alf lyr", "α2 cap", "alp-2 cap", with an optional Flamsteed number before it.
-  const b = t.match(/^(?:\d+\s*)?([a-zα-ω]+)[\s.-]*0*(\d?)\s+([a-z ]+)$/);
-  if (b && GREEK_KEY.has(b[1]) && CON_KEY.has(b[3])) return `${GREEK_KEY.get(b[1])}${b[2]} ${CON_KEY.get(b[3])}`;
-  const f = t.match(/^(\d+)\s+([a-z ]+)$/);
-  if (f && CON_KEY.has(f[2])) return `${Number(f[1])} ${CON_KEY.get(f[2])}`;
+  const b = BAYER.exec(t);
+  if (b) {
+    const letter = GREEK_KEY.get(b[1]);
+    const con = CON_KEY.get(b[3]);
+    if (letter !== undefined && con !== undefined) return `${letter}${b[2]} ${con}`;
+  }
+  const f = FLAMSTEED.exec(t);
+  const fcon = f ? CON_KEY.get(f[2]) : undefined;
+  if (f && fcon !== undefined) return `${Number(f[1])} ${fcon}`;
   return t.replace(/[^a-z0-9+-]+/g, ' ').trim();
 }
 
 /** OpenNGC's packed names: "NGC0224" → "NGC 224", "Sh2155" → "Sh2-155". */
 export function prettyId(raw: string): string {
-  const m = raw.match(/^([A-Za-z]+?)(\d+)(.*)$/);
-  if (!m) return raw;
-  const prefix = m[1] === 'Sh2' ? 'Sh2-' : `${m[1]} `;
-  return `${prefix}${Number(m[2])}${m[3]}`;
+  const sh = /^Sh2-?(\d+)(.*)$/.exec(raw);
+  if (sh) return `Sh2-${Number(sh[1])}${sh[2]}`;
+  const m = /^([A-Za-z]+?)(\d+)(.*)$/.exec(raw);
+  return m ? `${m[1]} ${Number(m[2])}${m[3]}` : raw;
 }
 
 /** True for catalog designations (as opposed to common names like "Orion Nebula"). */
