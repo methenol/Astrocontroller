@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { bootUi, route, calls, stateSocket, videoSocket, tick, type Ui } from './ui-harness.js';
+import { bootUi, route, calls, stateSocket, videoSocket, tick, answerConfirm, type Ui } from './ui-harness.js';
 
 let ui: Ui;
 const lastSubscription = () => {
@@ -220,6 +220,63 @@ test('the album disables Next on a short page and keeps it on a full one', async
   ui.$('#sel-album').dispatchEvent(new ui.window.Event('change'));
   await until(() => ui.document.querySelectorAll('#album .tile').length === 20, 'a full page');
   assert.equal((ui.$('#album-next') as HTMLButtonElement).disabled, false);
+});
+
+test('deleting an album tile confirms and posts the album delete; refusing posts nothing', async () => {
+  const items = [
+    { filePath: '/DWARF3/Normal_Photos/DWARF_TELE_2026-10-11.jpg', mediaType: 1 },
+    { filePath: '/DWARF3/Astronomy/DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-12-22-00-00-000/stacked.jpg', mediaType: 4, astroTargetName: 'M 31', astroImageDetails: { srcDir: '/Astronomy/DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-12-22-00-00-000/' } },
+  ];
+  route('GET album', () => ({ counts: [], items, pageSize: 20 }));
+  openTab('album');
+  await until(() => ui.document.querySelectorAll('#album .tile').length === 2, 'the album');
+  const photoDel = ui.document.querySelector('#album .tile [data-del]') as HTMLElement;
+  assert.equal(photoDel.dataset.astro, '0', 'the photo tile is not flagged astro');
+  calls.length = 0;
+  answerConfirm(false);
+  photoDel.click();
+  await tick();
+  assert.equal(calls.filter((c) => c.path === 'album/delete').length, 0, 'refusing the confirm deletes nothing');
+  answerConfirm(true);
+  route('POST album/delete', () => ({ outcomes: [{ filePath: items[0].filePath, deleted: true }] }));
+  photoDel.click();
+  await until(() => calls.some((c) => c.path === 'album/delete'), 'the delete post');
+  assert.deepEqual(calls.find((c) => c.path === 'album/delete')!.body, { paths: [items[0].filePath] });
+  // an astro tile says the whole session goes
+  await until(() => !!ui.document.querySelector('#album [data-astro="1"]'), 'the reloaded album');
+});
+
+test('the sessions card deletes transferred sessions from the card and keeps the library', async () => {
+  const F = 'DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-12-22-00-00-000';
+  const sessions = [
+    { folder: F, target: 'M 31', camera: 'tele', exposureS: 15, gain: 60, fitsCount: 40, sizeMB: 640, transferred: true },
+    { folder: 'DWARF_RAW_WIDE_Moon_EXP_1_GAIN_1_2026-10-12-20-00-00-000', target: 'Moon', camera: 'wide', exposureS: 1, gain: 1, fitsCount: 3, sizeMB: 12, transferred: false },
+  ];
+  route('GET sessions', () => ({ sessions }));
+  route('POST sessions/delete', () => ({ outcomes: [{ folder: F, deleted: true }] }));
+  openTab('library');
+  calls.length = 0;
+  click('#btn-sessions');
+  await until(() => ui.document.querySelectorAll('#sessions .sess').length === 2, 'the session list');
+  const bulk = ui.$('#btn-sessions-del') as HTMLButtonElement;
+  assert.equal(bulk.disabled, false, 'one transferred session makes the bulk delete available');
+  assert.deepEqual(JSON.parse(bulk.dataset.folders ?? '[]'), [F], 'only transferred sessions are offered for bulk delete');
+  answerConfirm(true);
+  click('#btn-sessions-del');
+  await until(() => calls.some((c) => c.path === 'sessions/delete'), 'the bulk delete post');
+  assert.deepEqual(calls.find((c) => c.path === 'sessions/delete')!.body, { folders: [F], force: false });
+  // a single transferred session deletes without force
+  await until(() => !!ui.document.querySelector('#sessions [data-transferred="1"]'), 'the reloaded session list');
+  answerConfirm(true);
+  (ui.document.querySelector('#sessions [data-transferred="1"]') as HTMLElement).click();
+  await until(() => calls.filter((c) => c.path === 'sessions/delete').length >= 2, 'the single delete post');
+  assert.deepEqual(calls.filter((c) => c.path === 'sessions/delete').at(-1)!.body, { folders: [F], force: false });
+  // a not-transferred session is deleted with force (its confirm warns it is not in the library)
+  await until(() => !!ui.document.querySelector('#sessions [data-transferred="0"]'), 'the reloaded session list');
+  answerConfirm(true);
+  (ui.document.querySelector('#sessions [data-transferred="0"]') as HTMLElement).click();
+  await until(() => calls.filter((c) => c.path === 'sessions/delete').length >= 3, 'the forced delete post');
+  assert.deepEqual(calls.filter((c) => c.path === 'sessions/delete').at(-1)!.body, { folders: [sessions[1].folder], force: true });
 });
 
 test('the database fills its filters once however often it is opened', async () => {

@@ -23,6 +23,8 @@ const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
 /** A snapshot reuses a frame up to this old, and waits this long for a new one. */
 const SNAPSHOT_MAX_AGE_MS = 5000;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
+/** Items one delete request may name (a page of the album is 24; a night's card holds far fewer). */
+const ALBUM_DELETE_MAX = 100;
 
 /** Small album files (thumbnails, stacked JPGs) kept in memory: the SD card is slow over Wi-Fi. */
 export class ThumbCache {
@@ -82,6 +84,20 @@ const ProcessBody = z.object({
   profile: z.string().optional(),
 });
 
+const AlbumDeleteBody = z.object({
+  /** album paths as the album lists them (/DWARF3/…) */
+  paths: z.array(z.string().min(1)).min(1).max(ALBUM_DELETE_MAX),
+  /** only when the album has no entry for the path (1 photo … 5 panorama) */
+  mediaType: z.number().int().min(1).max(5).optional(),
+});
+
+const SessionDeleteBody = z.object({
+  /** DWARF_RAW_… folders on the card */
+  folders: z.array(z.string().min(1)).min(1).max(ALBUM_DELETE_MAX),
+  /** delete even a session that is not complete in the library */
+  force: z.boolean().optional(),
+});
+
 /** A target's library sessions of one camera: one stack never mixes the tele and wide cameras. */
 function targetSessions(target: string, camera: 'tele' | 'wide' | undefined): string[] {
   if (camera) return library.librarySessionsFor(target, camera);
@@ -136,6 +152,17 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
     }),
   );
 
+  // ---- free SD-card space: the device's own album delete (an astro item takes its whole session package)
+  api.post(
+    '/album/delete',
+    route(async (req) => {
+      const b = body(req, AlbumDeleteBody);
+      const outcomes = await dhttp.deleteMedia(b.paths.map((p) => ({ filePath: p, mediaType: b.mediaType })));
+      thumbs.clear(); // a deleted file must not live on in the thumbnail cache
+      return { outcomes };
+    }),
+  );
+
   // ---- sessions, library, transfers
   api.get('/sessions', route(async (req) => library.listDeviceSessions(req.query.counts === '1')));
   api.get('/library', route(async () => ({ root: config.paths.library, targets: library.listLibrary() })));
@@ -150,6 +177,18 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
     }),
   );
   api.post('/jobs/:id/cancel', route(async (req) => ({ cancelled: library.cancelJob(String(req.params.id)) })));
+
+  // Delete whole sessions from the SD card (the library copies are kept): refused for a session
+  // that is not complete in the library unless forced.
+  api.post(
+    '/sessions/delete',
+    route(async (req) => {
+      const b = body(req, SessionDeleteBody);
+      const outcomes = await library.deleteDeviceSessions(b.folders, { force: b.force });
+      thumbs.clear();
+      return { outcomes };
+    }),
+  );
 
   // ---- AstroPhoto Studio processing: the local outbox and the server's queue
   api.get(

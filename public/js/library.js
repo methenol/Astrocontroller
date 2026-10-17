@@ -3,6 +3,7 @@ import { $, esc, fmtDur, lightbox, toast, baseName } from './dom.js';
 import { api, apiToast, seg, captureUrl } from './api.js';
 import { on } from './bus.js';
 import { state, isPanelActive } from './state.js';
+import { stackWarning } from './telescope.js';
 
 const PROCESSING_POLL_MS = 30000;
 const PROCESSING_SHOWN = 20;
@@ -79,27 +80,60 @@ $('#library').addEventListener('click', async (e) => {
 });
 
 // ---- sessions on the SD card
-$('#btn-sessions').onclick = async () => {
+async function loadSessions() {
   $('#sessions').textContent = 'reading SD card…';
   try {
     const { sessions = [] } = await api('sessions?counts=1');
     $('#sessions').innerHTML = sessions.length
-      ? sessions.map((s) => `<div class="sess"><div><b>${esc(s.target)}</b> <span class="muted">${esc(s.camera)} · ${esc(s.exposureS)}s · gain ${esc(s.gain)} · ${esc(s.startedAt ?? '')} · ${esc(s.fitsCount ?? '?')} FITS · ${esc(s.sizeMB ?? '?')} MB</span></div>${s.transferred ? '<span class="muted">in library</span>' : ''}<button data-session="${esc(s.folder)}">Transfer</button></div>`).join('')
+      ? sessions.map((s) => `<div class="sess"><div><b>${esc(s.target)}</b> <span class="muted">${esc(s.camera)} · ${esc(s.exposureS)}s · gain ${esc(s.gain)} · ${esc(s.startedAt ?? '')} · ${esc(s.fitsCount ?? '?')} FITS · ${esc(s.sizeMB ?? '?')} MB</span></div>${s.transferred ? '<span class="muted">in library</span>' : ''}<button data-session="${esc(s.folder)}">Transfer</button> <button class="warn" data-del-session="${esc(s.folder)}" data-transferred="${s.transferred ? 1 : 0}" title="Delete from the telescope's SD card (the library copy stays)">Delete</button></div>`).join('')
       : 'no sessions';
+    const btn = $('#btn-sessions-del');
+    btn.disabled = !sessions.some((s) => s.transferred);
+    btn.dataset.folders = JSON.stringify(sessions.filter((s) => s.transferred).map((s) => s.folder));
   } catch (e) {
     $('#sessions').textContent = e.message;
   }
-};
-$('#sessions').addEventListener('click', async (e) => {
-  const f = e.target.closest('[data-session]')?.dataset.session;
-  if (!f) return;
+}
+$('#btn-sessions').onclick = loadSessions;
+
+/** Delete sessions from the SD card; their library copies (if transferred) are kept. */
+async function deleteSessions(folders, transferredKnown) {
+  const one = folders.length === 1;
+  const extra = transferredKnown === false ? '\n\nIt is NOT in the library yet — deleting it loses the data for good. Transfer it first if you want to keep it.' : '';
+  if (!confirm(`Delete ${one ? `the session ${folders[0]}` : `${folders.length} sessions`} from the telescope's SD card to free space?${extra}${stackWarning()}\n\nThis cannot be undone.`)) return;
+  $('#sessions').textContent = 'deleting…';
   try {
-    await api('transfer', { session: f });
-    toast('transfer queued');
+    const { outcomes = [] } = await api('sessions/delete', { folders, force: transferredKnown === false });
+    const failed = outcomes.filter((o) => !o.deleted);
+    toast(failed.length ? `${outcomes.length - failed.length} of ${outcomes.length} deleted: ${failed[0].note ?? 'the telescope refused'}` : 'deleted from the card', failed.length > 0);
   } catch (err) {
     toast(err.message, true);
   }
+  loadSessions();
+}
+$('#sessions').addEventListener('click', async (e) => {
+  const f = e.target.closest('[data-session]')?.dataset.session;
+  if (f) {
+    try {
+      await api('transfer', { session: f });
+      toast('transfer queued');
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+  const d = e.target.closest('[data-del-session]');
+  if (d) deleteSessions([d.dataset.delSession], d.dataset.transferred === '1');
 });
+$('#btn-sessions-del').onclick = () => {
+  let folders = [];
+  try {
+    folders = JSON.parse($('#btn-sessions-del').dataset.folders ?? '[]');
+  } catch {
+    /* nothing to delete */
+  }
+  if (folders.length) deleteSessions(folders, true);
+};
 
 // ---- processing
 let procTimer;

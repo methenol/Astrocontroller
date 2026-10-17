@@ -4,13 +4,14 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { errMsg } from '../log.js';
 import { downloadFiles, downloadOne, type FtpEntry } from '../dwarf/ftp.js';
+import { deleteMedia } from '../dwarf/http.js';
 import { enqueueProcessing } from '../processing/queue.js';
 import { startJob, type FailedFile, type Job } from './jobs.js';
-import { listDeviceSessions, parseSessionFolder, sessionLocalDir, librarySessionsFor, SESSION_META, type DeviceSession } from './sessions.js';
+import { isTransferred, listDeviceSessions, parseSessionFolder, sessionLocalDir, librarySessionsFor, SESSION_META, type DeviceSession } from './sessions.js';
 import { writeFileAtomic } from '../util/fs.js';
 
 export { jobBus, listJobs, getJob, cancelJob, cancelActiveJobs, type Job } from './jobs.js';
-export { parseSessionFolder, listDeviceSessions, sessionLocalDir, librarySessionsFor, listLibrary, type DeviceSession } from './sessions.js';
+export { parseSessionFolder, listDeviceSessions, sessionLocalDir, librarySessionsFor, listLibrary, isTransferred, type DeviceSession } from './sessions.js';
 
 const CALIBRATION_KINDS = ['dark', 'flat', 'bias'] as const;
 
@@ -113,6 +114,43 @@ export async function transferSession(folderOrLatest: string, opts: TransferOpti
     // the same session with the same options is one job, however often it is asked for
     `transfer_session:${s.folder}:${opts.includeSubframes}:${opts.includeCalibration}:${opts.process ?? ''}`,
   );
+}
+
+export interface SessionDeleteOutcome {
+  folder: string;
+  deleted: boolean;
+  /** why it was not deleted */
+  note?: string;
+}
+
+/**
+ * Delete sessions from the telescope's SD card through the album API — the device's own way, which
+ * wipes the whole session package (frames, stack, thumbnail) together with its album entry.
+ * A session that is not complete in the library is refused unless `force`: deleting it would lose
+ * data that was never copied. One bad session does not stop the others.
+ */
+export async function deleteDeviceSessions(folders: string[], opts: { force?: boolean } = {}): Promise<SessionDeleteOutcome[]> {
+  const out: SessionDeleteOutcome[] = [];
+  for (const f of folders) {
+    let s: DeviceSession;
+    try {
+      s = await resolveSession(f);
+    } catch (err) {
+      out.push({ folder: f, deleted: false, note: errMsg(err) });
+      continue;
+    }
+    if (!opts.force && !isTransferred(s)) {
+      out.push({ folder: s.folder, deleted: false, note: 'not fully in the library: transfer it first, or force to delete it anyway' });
+      continue;
+    }
+    try {
+      const [r] = await deleteMedia([{ filePath: `/DWARF3${s.path}`, mediaType: 4 }]);
+      out.push({ folder: s.folder, deleted: r.deleted, ...(r.note ? { note: r.note } : {}) });
+    } catch (err) {
+      out.push({ folder: s.folder, deleted: false, note: errMsg(err) });
+    }
+  }
+  return out;
 }
 
 /** Today's date (YYYY-MM-DD) where the observer is: an evening's photos belong to that evening, not to the next UTC day. */

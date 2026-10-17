@@ -1,4 +1,4 @@
-/** The telescope's album (read from its SD card): browse, download into the library, ask the agent. */
+/** The telescope's album (read from its SD card): browse, download into the library, delete to free space, ask the agent. */
 import { $, esc, lightbox, toast, baseName } from './dom.js';
 import { api } from './api.js';
 import { on } from './bus.js';
@@ -20,7 +20,8 @@ function tile(m) {
   const folder = a?.srcDir ? baseName(String(a.srcDir).replace(/\/$/, '')) : '';
   return `<div class="tile"><img loading="lazy" src="${esc(deviceFile(thumb))}" data-full="${esc(file)}" alt=""><div class="cap"><b title="${esc(label)}">${esc(label)}</b><span class="muted">${esc(sub)}</span><br>
     ${folder ? `<button data-session="${esc(folder)}">⇩ session</button>` : `<button data-file="${esc(file)}">⇩ library</button>`}
-    <button data-ask="${esc(file)}">ask agent</button></div></div>`;
+    <button data-ask="${esc(file)}">ask agent</button>
+    <button class="warn" data-del="${esc(file)}" data-astro="${a || folder ? 1 : 0}" title="Delete from the telescope's SD card">delete</button></div></div>`;
 }
 
 export async function loadAlbum() {
@@ -68,13 +69,30 @@ async function transfer(body, done) {
   }
 }
 
+/** Delete album items from the SD card (the device's own delete: an astro item takes its whole session). */
+async function deleteAlbumItems(paths, astro) {
+  const what = paths.length === 1 ? baseName(paths[0]) : `${paths.length} items`;
+  // the device deletes an astro/burst/panorama capture as its whole package (all frames + stack)
+  const extra = astro ? '\n\nThis is a capture session: the whole package goes with it — every raw frame and the stack, not just this image. Transfer it to the library first if you want to keep it.' : '';
+  if (!confirm(`Delete ${what} from the telescope's SD card?${extra}\n\nThis cannot be undone.`)) return;
+  try {
+    const { outcomes = [] } = await api('album/delete', { paths });
+    const failed = outcomes.filter((o) => !o.deleted);
+    toast(failed.length ? `${outcomes.length - failed.length} of ${outcomes.length} deleted: ${failed[0].note ?? 'the telescope refused'}` : 'deleted from the card', failed.length > 0);
+  } catch (err) {
+    toast(err.message, true);
+  }
+  loadAlbum();
+}
+
 $('#album').addEventListener('click', (e) => {
-  const t = e.target.closest('[data-full], [data-session], [data-file], [data-ask]');
+  const t = e.target.closest('[data-full], [data-session], [data-file], [data-ask], [data-del]');
   if (!t) return;
   if (t.dataset.full) lightbox(deviceFile(t.dataset.full), t.dataset.full);
   else if (t.dataset.session) transfer({ session: t.dataset.session }, 'transfer queued — see Library tab');
   else if (t.dataset.file) transfer({ paths: [t.dataset.file] }, 'transfer queued');
   else if (t.dataset.ask) draft(`Look at device:${t.dataset.ask} and assess it (focus, tracking, noise, framing). Suggest improvements for next time.`);
+  else if (t.dataset.del) deleteAlbumItems([t.dataset.del], t.dataset.astro === '1');
 });
 
 on('tab', (name) => {

@@ -108,6 +108,12 @@ The UI is one page, one screen at a time, sized for gloves and dark skies. Nothi
 
 The scope names the session folder after the GoTo target. The controller picks the name the way the DWARF app does (Messier, then Caldwell, then catalog id), so nights captured with either one stack together.
 
+### Freeing the SD card
+
+Once a session is safe in the library you can delete it from the telescope to free space. The **Album** tab has a **delete** button on every tile, and the **Library** tab's "Sessions on the telescope" card has **Delete** on each session plus a **Delete transferred** button for the whole card at once. Both go through the device's own album delete (the same one the DWARFLAB app uses), which wipes the whole session package — every raw frame, the stack and the thumbnail — together with its album entry, so the freed space registers correctly. An astro tile deletes its whole session, not just the one image, and says so.
+
+A session that is **not complete in the library** is refused, so you cannot delete data you never copied; the confirm and the server both guard it, and the UI offers to force it when you really mean to. The library copies are never touched — this only clears the card. (The agent has the same power through `delete_album_items`, but is told to use it only on files you name.)
+
 ## Processing in AstroPhoto Studio
 
 When a transfer finishes, the session is queued for processing on an [AstroPhoto Studio](../AstroPhoto-Studio) server (`ASTROPHOTO_URL`, normally a GPU machine on Tailscale), using its `/api/v1` job API. The queue is a local **outbox** (`data/processing.json`) that survives restarts:

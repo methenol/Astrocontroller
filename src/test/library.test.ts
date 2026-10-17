@@ -7,7 +7,8 @@ import { config } from '../config.js';
 import { toFtpPath } from '../dwarf/ftp.js';
 import { startJob, cancelJob, getJob, drainJobs } from '../library/jobs.js';
 import { parseSessionFolder, librarySessionsFor, listLibrary, isTransferred, sessionLocalDir } from '../library/sessions.js';
-import { albumLocalPath, distinctPaths, missingLights } from '../library/transfer.js';
+import { albumLocalPath, deleteDeviceSessions, distinctPaths, missingLights } from '../library/transfer.js';
+import { FakeHttpApi } from './fake-http.js';
 
 const FOLDER = 'DWARF_RAW_TELE_NGC 281_EXP_15_GAIN_60_2026-10-01-22-20-58-268';
 
@@ -151,6 +152,87 @@ describe('jobs', () => {
     await drainJobs();
     assert.equal(getJob(j.id)?.status, 'failed');
     assert.equal(getJob(j.id)?.error, 'boom');
+  });
+});
+
+describe('deleting sessions from the SD card', () => {
+  const F = 'DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-12-22-00-00-000';
+  let http: FakeHttpApi;
+  let dir = '';
+  const savedLib = { library: '', host: '', port: 0 };
+
+  before(async () => {
+    savedLib.library = config.paths.library;
+    savedLib.host = config.dwarf.host;
+    savedLib.port = config.dwarf.httpPort;
+    config.dwarf.host = '127.0.0.1';
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lib-del-'));
+    config.paths.library = dir;
+  });
+  after(async () => {
+    config.paths.library = savedLib.library;
+    config.dwarf.host = savedLib.host;
+    config.dwarf.httpPort = savedLib.port;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const serve = async (
+    answer: (r: { datas: Array<{ filePath: string }> }) => unknown,
+    info: (filePath: string) => unknown = () => null,
+  ) => {
+    http = await new FakeHttpApi().start();
+    config.dwarf.httpPort = http.port;
+    http.route('POST /album/getMediaInfoByFilePath', (r) => ({ data: info((r.body as { filePath: string }).filePath) }));
+    http.route('POST /album/delete', (r) => ({ data: answer(r.body as { datas: Array<{ filePath: string }> }) }));
+  };
+  const stop = async () => {
+    await http?.stop();
+  };
+  /** a session folder in the library; `complete` writes the metadata a finished transfer leaves */
+  const cardSession = (folder: string, complete: boolean) => {
+    const d = path.join(dir, folder);
+    fs.rmSync(d, { recursive: true, force: true });
+    fs.mkdirSync(d, { recursive: true });
+    if (complete) fs.writeFileSync(path.join(d, 'session.json'), '{"failedFiles":0}');
+  };
+
+  test('a transferred session is deleted as its whole astro album package', async () => {
+    cardSession(F, true);
+    await serve(
+      (b) => b.datas.map((d) => ({ filePath: d.filePath, isSuccess: true })),
+      (filePath) => ({ filePath, fileName: F, mediaType: 4, astroSubType: 2 }),
+    );
+    const out = await deleteDeviceSessions([`${F}/`]);
+    assert.deepEqual(out, [{ folder: F, deleted: true }]);
+    const datas = (http.requestsFor('/album/delete')[0].body as { datas: Array<{ mediaType: number; fileName: string; filePath: string }> }).datas;
+    assert.deepEqual(datas, [{ mediaType: 4, filePath: `/DWARF3/Astronomy/${F}`, fileName: F, subType: 2 }]);
+    await stop();
+  });
+
+  test('a session not complete in the library is refused; force deletes it anyway', async () => {
+    cardSession(F, false); // folder only: a transfer that never finished
+    await serve((b) => b.datas.map((d) => ({ filePath: d.filePath, isSuccess: true })));
+    const refused = await deleteDeviceSessions([F]);
+    assert.equal(refused[0].deleted, false);
+    assert.match(refused[0].note ?? '', /not fully in the library/);
+    assert.equal(http.requestsFor('/album/delete').length, 0, 'the refused session never reaches the device');
+    const forced = await deleteDeviceSessions([F], { force: true });
+    assert.equal(forced[0].deleted, true);
+    assert.equal(http.requestsFor('/album/delete').length, 1);
+    await stop();
+  });
+
+  test('a bad folder and a device refusal are reported per folder without stopping the rest', async () => {
+    cardSession(F, true);
+    cardSession('DWARF_RAW_WIDE_Moon_EXP_1_GAIN_1_2026-10-12-20-00-00-000', true);
+    await serve((b) => b.datas.map((d) => ({ filePath: d.filePath, isSuccess: !d.filePath.includes('WIDE') })));
+    const out = await deleteDeviceSessions(['not-a-session', F, 'DWARF_RAW_WIDE_Moon_EXP_1_GAIN_1_2026-10-12-20-00-00-000']);
+    assert.equal(out[0].deleted, false);
+    assert.match(out[0].note ?? '', /not a DWARF session folder/);
+    assert.equal(out[1].deleted, true);
+    assert.equal(out[2].deleted, false);
+    assert.match(out[2].note ?? '', /refused/);
+    await stop();
   });
 });
 
