@@ -1,4 +1,4 @@
-import { test, describe } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,6 +7,19 @@ import { config } from '../config.js';
 import { cancelJob, drainJobs, getJob, INTERRUPTED, jobBus, startJob } from '../library/jobs.js';
 
 describe('background jobs', () => {
+  // Every startJob persists to DATA_DIR/jobs.json: keep the whole suite in a temp dir so a test
+  // run never leaves fake jobs in the running app's job list.
+  const savedData = config.paths.data;
+  let dataDir = '';
+  before(() => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-test-'));
+    config.paths.data = dataDir;
+  });
+  after(() => {
+    config.paths.data = savedData;
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
   test('run one at a time in order; a failed file list makes a job partial', async () => {
     const order: string[] = [];
     const a = startJob('t', 'a', async () => {

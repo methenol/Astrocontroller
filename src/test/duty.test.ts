@@ -1,6 +1,7 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { config } from '../config.js';
@@ -60,16 +61,25 @@ describe('DutyLoop', () => {
   let duty: DutyLoop;
   const make = () => new DutyLoop(dwarf as unknown as Dwarf, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
 
+  // Never write the real DATA_DIR: a duty.json left here resumes in the running app on its next
+  // start (a test duty woke the agent on 2026-10-17), and startJob would persist test jobs to jobs.json.
+  const savedData = config.paths.data;
+  let dataDir = '';
+
   beforeEach(() => {
-    fs.rmSync(path.join(config.paths.data, 'duty.json'), { force: true });
-    fs.mkdirSync(config.paths.data, { recursive: true });
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'duty-test-'));
+    config.paths.data = dataDir;
     now = Date.UTC(2026, 9, 12, 8, 0);
     agent = new StubAgent();
     dwarf = new StubDwarf();
     duty = make();
   });
 
-  afterEach(() => duty.dispose());
+  afterEach(() => {
+    duty.dispose();
+    config.paths.data = savedData;
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
 
   test('dispose removes every listener it added', () => {
     duty.dispose();

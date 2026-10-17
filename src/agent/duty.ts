@@ -426,7 +426,11 @@ export class DutyLoop extends SafeEmitter {
     lines.push('', 'Measurements now:', ...measurements(this.dwarf, this.now(), this.stackSupervisor), '');
     if (kind === 'final') {
       lines.push(
-        'The duty window has ended. Carry out the end steps that the objective above states, if it states any, exactly as written, and nothing else; then report what was done, from tool results. Do not start anything the objective does not name (no shutdown, transfer or processing unless it says so).',
+        'The duty window has ended. Carry out the end steps that the objective above states, if it states any, exactly as written; then always close the duty out: park the scope (move_motors pitch_deg=2.5) and transfer every session still on the telescope\'s SD card (check list_device_sessions, then transfer_session — never assume what is on the card)' +
+          (config.studio.autoProcess
+            ? '; each transfer queues processing in AstroPhoto Studio by itself (processing_status shows the queue).'
+            : '; auto-process is off in .env, so do not queue processing unless the objective says so.') +
+          ' Then report what was done, from tool results. Do not start anything else the objective does not name (no shutdown unless it says so).',
       );
     } else {
       lines.push(

@@ -11,6 +11,19 @@ import { albumLocalPath, distinctPaths, missingLights } from '../library/transfe
 
 const FOLDER = 'DWARF_RAW_TELE_NGC 281_EXP_15_GAIN_60_2026-10-01-22-20-58-268';
 
+// The jobs suite below calls startJob, which persists to DATA_DIR/jobs.json: keep the whole file
+// off the real data dir so a test run never leaves fake jobs in the running app's job list.
+const savedData = config.paths.data;
+let testDataDir = '';
+before(() => {
+  testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lib-test-data-'));
+  config.paths.data = testDataDir;
+});
+after(() => {
+  config.paths.data = savedData;
+  fs.rmSync(testDataDir, { recursive: true, force: true });
+});
+
 describe('session folders', () => {
   test('parses a DWARF session folder', () => {
     const s = parseSessionFolder(FOLDER);
@@ -32,7 +45,7 @@ describe('device and library paths', () => {
     Object.assign(config.paths, { library: path.join(dir, 'library') });
   });
   after(() => {
-    Object.assign(config.paths, saved);
+    config.paths.library = saved.library; // only what this describe changes: restoring all of config.paths would undo the file-level data-dir isolation
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
