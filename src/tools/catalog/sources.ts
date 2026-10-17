@@ -100,6 +100,29 @@ export function sources(env: SourceEnv): Source[] {
       },
     },
     {
+      key: 'mash',
+      title: 'Planetary nebulae (Macquarie/AAO/Strasbourg Hα survey, MASH I+II)',
+      cite: 'Phillipps S. et al., The Macquarie/AAO/Strasbourg Hα Planetary Nebula Catalogue (MASH), 2005 (MNRAS 359, 1001) and MASH-II, 2008 (MNRAS 384, 525; VizieR V/127A)',
+      near: { types: ['PN'], tol: () => 0.5 },
+      load: async () => {
+        const rows = [
+          ...(await vizier('V/127A/mash1', ['PNG', 'Name', 'MajDiam', 'MinDiam'])),
+          ...(await vizier('V/127A/mash2', ['PNG', 'Name', 'MajDiam', 'MinDiam'])),
+        ];
+        const records = rows.flatMap((row) => {
+          const p = pos(row);
+          if (!p || !row.PNG) return [];
+          // MASH lists the PNG in galactic coordinates with a leading G ("G209.1-08.2"); the Strasbourg-ESO id is "PN G209.1-08.2"
+          const png = row.PNG.replace(/^G/, '').trim();
+          const maj = num(row.MajDiam);
+          const min = num(row.MinDiam);
+          const ids = row.Name ? [row.Name.replace(/\s+/g, ' ').trim()] : [];
+          return [{ id: `PN G${png}`, type: 'PN', ...p, maj: maj ? round(maj / 60, 2) : undefined, min: min ? round(min / 60, 2) : undefined, ids, names: [] }];
+        });
+        return { records };
+      },
+    },
+    {
       key: 'green',
       title: 'Supernova remnants (Green 2024)',
       cite: 'Green D.A., A catalogue of 310 Galactic supernova remnants, 2024 (VizieR VII/297)',
@@ -240,6 +263,23 @@ export function sources(env: SourceEnv): Source[] {
           const id = ids.find((x) => /^(NGC|IC|UGC) /.test(x)) ?? ids[0];
           if (!id) return [];
           return [{ id, type: 'G', ...p, maj: round(maj, 2), min: maj !== undefined && r25 !== undefined ? round(maj / 10 ** r25, 2) : undefined, pa: num(row.PA), mag: num(row.BT) ?? num(row.Bmag), ids: ids.filter((x) => x !== id), names: [] }];
+        }),
+      }),
+    },
+    {
+      key: 'pgc',
+      title: 'Galaxies (Principal Galaxies Catalogue, PGC/LEDA)',
+      cite: 'Paturel C. et al., Principal Galaxies Catalogue and LEDA, 2003 (A&A 412, 45; VizieR VII/119B)',
+      // most PGC entries merge into an RC3/OpenNGC galaxy by their shared "PGC N" designation; this catches the
+      // few that lack it, requiring the sizes to agree so a background galaxy at the same spot stays separate
+      near: { types: ['G', 'GPair', 'GTrpl', 'GGroup'], tol: (rec, o) => (o.maj && rec.maj && Math.max(o.maj, rec.maj) / Math.min(o.maj, rec.maj) > 3 ? null : 0.5) },
+      load: async () => ({
+        // the 25 mag/arcsec² isophote; MajAxis>=0.1′ drops the unresolved point-like entries
+        records: (await vizier('VII/119B/pgc', ['PGC', 'MType', 'MajAxis', 'MinAxis', 'Btot'], { MajAxis: '>=0.1' })).flatMap((row) => {
+          const p = pos(row);
+          if (!p || !row.PGC) return [];
+          const id = `PGC ${Number(row.PGC)}`;
+          return [{ id, type: 'G', ...p, maj: num(row.MajAxis), min: num(row.MinAxis), mag: num(row.Btot), ids: [], names: [] }];
         }),
       }),
     },
