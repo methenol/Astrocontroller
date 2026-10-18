@@ -56,7 +56,7 @@ const HANDLERS = {
     if (m.name === 'albumUpdate') emit('album-changed');
   },
   error: (m) => toast(m.message, true),
-  streams: (m) => renderStreamHealth(m.streams),
+  streams: (m) => renderStreamHealth(m.streams, m.now),
 };
 
 function handle(raw) {

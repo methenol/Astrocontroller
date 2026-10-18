@@ -65,12 +65,18 @@ async function loadPlan() {
   const mine = ++planSeq;
   try {
     const type = $('#sel-plan-type').value;
-    const p = await api(`plan${type ? `?types=${encodeURIComponent(type)}` : ''}`);
+    const fov = $('#sel-plan-fov').value;
+    const p = new URLSearchParams();
+    if (type) p.set('types', type);
+    if (fov) p.set('minFovPercent', fov);
+    const qs = p.toString();
+    const r = await api(`plan${qs ? `?${qs}` : ''}`);
     if (mine !== planSeq) return;
-    const targets = Array.isArray(p.targets) ? p.targets : [];
+    const targets = Array.isArray(r.targets) ? r.targets : [];
     const wx = targets.some((t) => t.weatherAlignment != null);
-    const hoursTitle = wx ? 'weather = forecast quality during the target\'s own best hours (weighted toward its peak); clear / up = forecast-weighted hours / hours above the minimum altitude' : 'hours above the minimum altitude';
-    el.innerHTML = `<p class="muted small">${esc(p.window?.start)} → ${esc(p.window?.end)} (${esc(p.window?.hours)} h) · min altitude ${esc(p.minAltitude)}° · Moon ${esc(p.moon?.illuminationPercent)}% · ${esc(p.weather ?? '')}</p>
+    const hoursTitle = wx ? `weather = forecast quality during the target\'s own best hours (weighted toward its peak); clear / up = forecast-weighted hours / hours above the minimum altitude` : 'hours above the minimum altitude';
+    const sizeFilter = fov ? ` · fills ≥${esc(fov)}% of the tele frame` : '';
+    el.innerHTML = `<p class="muted small">${esc(r.window?.start)} → ${esc(r.window?.end)} (${esc(r.window?.hours)} h) · min altitude ${esc(r.minAltitude)}°${sizeFilter} · Moon ${esc(r.moon?.illuminationPercent)}% · ${esc(r.weather ?? '')}</p>
       <table class="plan-table"><tr><th>Target</th><th>Best</th><th title="${esc(hoursTitle)}">${wx ? 'Weather' : 'Hours'}</th><th>Fit / filter</th><th></th></tr>
       ${targets.map(planRow).join('')}</table>`;
   } catch (e) {
@@ -83,6 +89,7 @@ export function loadTonight() {
   loadPlan();
 }
 $('#sel-plan-type').onchange = loadPlan;
+$('#sel-plan-fov').onchange = loadPlan;
 $('#plan').addEventListener('click', (e) => {
   const b = e.target.closest('[data-image]');
   if (b) draft(imagingRequest(b.dataset.image));

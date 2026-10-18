@@ -298,6 +298,30 @@ test('the database fills its filters once however often it is opened', async () 
   assert.equal(andromeda.length, 1);
 });
 
+test('the planner and the database can filter by a minimum percent of the tele frame width', async () => {
+  route('GET plan', () => ({ window: { start: '20:00', end: '04:00', hours: 8 }, moon: { illuminationPercent: 10, phase: 'waxing crescent' }, minAltitude: 20, weather: 'clear', targets: [] }));
+  calls.length = 0;
+  openTab('tonight');
+  await until(() => calls.some((c) => c.path.startsWith('plan')), 'the plan');
+  const sel = ui.$('#sel-plan-fov') as HTMLSelectElement;
+  sel.value = '25';
+  sel.dispatchEvent(new ui.window.Event('change'));
+  await until(() => /fills ≥25% of the tele frame/.test(text('#plan')), 'the plan with the frame filter');
+  assert.ok(calls.some((c) => c.path.startsWith('plan?') && c.path.includes('minFovPercent=25')), 'the plan request carries the filter');
+
+  let searchPath = '';
+  route('GET catalog/search', (path) => {
+    searchPath = path;
+    return { items: [], total: 0 };
+  });
+  openTab('database');
+  await until(() => !!searchPath, 'the database search');
+  const input = ui.$('#db-minfov') as HTMLInputElement;
+  input.value = '40';
+  input.dispatchEvent(new ui.window.Event('input', { bubbles: true }));
+  await until(() => searchPath.includes('minFovPercent=40'), 'the search with the frame filter');
+});
+
 test('a held nudge arrow nudges at once, and the stop on release reaches the server after that nudge', async () => {
   openTab('view');
   let answer!: () => void;

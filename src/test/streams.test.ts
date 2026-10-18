@@ -1,6 +1,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { JpegSplitter, Source } from '../media/streams.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { CameraSource, JpegSplitter, Source } from '../media/streams.js';
+import type { Dwarf } from '../dwarf/device.js';
 
 const jpeg = (n: number, fill: number) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(n, fill), Buffer.from([0xff, 0xd9])]);
 
@@ -92,5 +96,55 @@ describe('frame source', () => {
     assert.equal((await waiting).jpeg.length, 7);
     await assert.rejects(s.snapshot(-1, 30), /no new test frame within 0 s \(last frame was/);
     s.forceStop();
+  });
+});
+
+/** A telescope in DSO mode, idle unless `teleStack`; a stub ffmpeg that just waits stands in for the reader. */
+function teleInDso(teleStack = false) {
+  const bin = mkdtempSync(path.join(tmpdir(), 'ffmpeg-stub-'));
+  writeFileSync(path.join(bin, 'ffmpeg'), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const dwarf = {
+    state: { connected: true, released: false, shootingMode: { id: 2, name: 'DSO' }, stacking: { tele: { state: teleStack ? 'running' : 'idle' }, wide: { state: 'idle' } } },
+    lastMotionAt: 0,
+    quietPeriod: () => false,
+    stackOwnsCamera: (cam: string) => teleStack && cam === 'tele',
+    ensureLiveView: async () => {},
+    autoExposureForLiveView: async () => null,
+  } as unknown as Dwarf;
+  const tele = new CameraSource('tele', 0, dwarf);
+  tele.fallback = new TestSource();
+  return { tele, restore: () => (process.env.PATH = oldPath) };
+}
+
+describe('tele camera source', () => {
+  test('DSO mode with no stack opens the tele RTSP (it has video there), not the silent stack preview', () => {
+    const { tele, restore } = teleInDso();
+    try {
+      const off = tele.subscribe(() => {});
+      const st = tele.status();
+      assert.equal(st.phase, 'connecting');
+      assert.notEqual(st.reader, null);
+      off();
+    } finally {
+      tele.forceStop();
+      restore();
+    }
+  });
+
+  test('a running tele stack shows the stack preview and opens no RTSP session', () => {
+    const { tele, restore } = teleInDso(true);
+    try {
+      const off = tele.subscribe(() => {});
+      const st = tele.status();
+      assert.equal(st.phase, 'preview');
+      assert.equal(st.reader, null);
+      assert.match(st.note ?? '', /live stack preview/);
+      off();
+    } finally {
+      tele.forceStop();
+      restore();
+    }
   });
 });

@@ -3,8 +3,6 @@ import type { CameraName, Dwarf } from '../../dwarf/device.js';
 import { CameraSource } from './camera.js';
 import { StackSource } from './stack.js';
 
-/** Shooting modes in which the telescope serves no tele RTSP (DSO verified; opening it hangs the session). */
-const TELE_NO_RTSP_MODES = [2, 4, 5]; // DSO, Milky Way, Star Trail
 /** After the link comes back, reconnect once the telescope has settled. */
 const RECONNECT_DELAY_MS = 1500;
 /** After a mode change, re-check RTSP once the telescope has switched. */
@@ -23,9 +21,8 @@ export class StreamHub {
   constructor(readonly dwarf: Dwarf) {
     this.tele = new CameraSource('tele', 0, dwarf);
     this.wide = new CameraSource('wide', 1, dwarf);
-    // In astro modes the telescope serves the tele preview on :8092 instead of RTSP.
+    // While a tele stack runs, or a mode refuses the tele RTSP, the tele view is the telescope's :8092 preview.
     this.tele.fallback = this.stack;
-    for (const m of TELE_NO_RTSP_MODES) this.tele.noRtspModes.add(m);
     this.stack.allowed = () => dwarf.state.connected && !dwarf.state.released;
     this.wasConnected = dwarf.state.connected;
     dwarf.on('state', this.onState);

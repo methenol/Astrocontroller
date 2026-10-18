@@ -179,11 +179,33 @@ describe('planning', () => {
     assert.equal(odd.targets[0].skyAtBest, null);
   });
 
+  test('minFovPercent keeps only targets that cover that percent of the frame width', () => {
+    const wide = planNight(SITE, { ...base, minFovPercent: 50 });
+    assert.ok(wide.targets.length > 0);
+    // 50% of a 168′ frame: nothing smaller than 84′ may be offered
+    for (const t of wide.targets) {
+      const major = parseFloat(t.sizeArcmin);
+      assert.ok(major >= 84, `${t.displayName} (${t.sizeArcmin}′) is below half the frame width`);
+    }
+    assert.throws(() => planNight(SITE, { ...base, minFovPercent: 150 }), /minFovPercent/);
+  });
+
   test('queryCatalog pages and clamps its limits', () => {
     const r = queryCatalog({ q: 'nebula', limit: 1e6, offset: -5 }, null, LA);
     assert.equal(r.limit, 200);
     assert.equal(r.offset, 0);
     assert.throws(() => queryCatalog({ up: 'now' }, null, LA), /observer location/);
+  });
+
+  test('queryCatalog: minFovPercent keeps objects spanning that percent of the tele frame width', () => {
+    const fov = { teleFovWidthArcmin: 100 };
+    const all = queryCatalog({ types: ['galaxy'] }, null, LA);
+    const big = queryCatalog({ types: ['galaxy'], minFovPercent: 50 }, null, LA, fov);
+    assert.ok(big.total > 0 && big.total < all.total);
+    for (const it of big.items) assert.ok((it.majorArcmin ?? 0) >= 50, `${it.name} is smaller than half the frame`);
+    // without a frame width the filter is refused rather than silently ignored
+    assert.throws(() => queryCatalog({ minFovPercent: 25 }, null, LA), /field of width/);
+    assert.throws(() => queryCatalog({ minFovPercent: -5 }, null, LA, fov), /frame coverage/);
   });
 
   test('queryCatalog: sorting by altitude orders the matches without dropping the ones that never rise', () => {

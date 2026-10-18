@@ -15,9 +15,9 @@ const GROUPS = [
   ['planetary', 'planetary nebulae'], ['supernova_remnant', 'supernova remnants'], ['cluster', 'star clusters'], ['open_cluster', 'open clusters'],
   ['globular', 'globular clusters'], ['galaxy_cluster', 'galaxy groups & clusters'], ['star', 'stars'],
 ];
-const FIELDS = ['q', 'type', 'catalog', 'con', 'up', 'sort', 'maxmag', 'minsize', 'maxsize', 'minalt', 'named'];
+const FIELDS = ['q', 'type', 'catalog', 'con', 'up', 'sort', 'maxmag', 'minsize', 'maxsize', 'minfov', 'minalt', 'named'];
 const SELECTS = ['type', 'catalog', 'con', 'up', 'sort'];
-const MORE = ['maxmag', 'minsize', 'maxsize', 'minalt', 'named'];
+const MORE = ['maxmag', 'minsize', 'maxsize', 'minfov', 'minalt', 'named'];
 const PAGE = 50;
 const TYPING_MS = 300;
 const DEFAULT_MIN_ALT = 20;
@@ -101,6 +101,7 @@ async function search(append = false) {
   set('maxMag', value('maxmag'));
   set('minSize', value('minsize'));
   set('maxSize', value('maxsize'));
+  set('minFovPercent', value('minfov'));
   set('minAlt', value('minalt'));
   set('named', value('named'));
   p.set('offset', String(append ? db.items.length : 0));

@@ -9,6 +9,8 @@ export interface PlanOptions {
   maxMagnitude?: number;
   minSizeArcmin?: number;
   maxSizeArcmin?: number;
+  /** only targets whose major axis covers at least this percent of the tele frame width */
+  minFovPercent?: number;
   limit?: number;
   fovArcmin: { w: number; h: number };
   timezone: string;
@@ -190,12 +192,13 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
   if (end.getTime() - start.getTime() > MAX_WINDOW_H * 3600e3) throw new Error(`the planning window is one night, at most ${MAX_WINDOW_H} h (${start.toISOString()} → ${end.toISOString()})`);
   if (!(opts.minAltitude >= 0 && opts.minAltitude < 90)) throw new Error(`minAltitude must be from 0 to below 90° (got ${opts.minAltitude})`);
   if (!(opts.fovArcmin.w > 0 && opts.fovArcmin.h > 0)) throw new Error(`the field of view must be positive (got ${opts.fovArcmin.w}×${opts.fovArcmin.h}')`);
+  if (opts.minFovPercent !== undefined && !(opts.minFovPercent >= 0 && opts.minFovPercent <= 100)) throw new Error(`minFovPercent must be from 0 to 100 (got ${opts.minFovPercent})`);
   if (opts.limit !== undefined && !(opts.limit >= 1)) throw new Error(`limit must be at least 1 (got ${opts.limit})`);
   const moon = moonState(site, new Date((start.getTime() + end.getTime()) / 2));
   const types = new Set<string>();
   for (const t of opts.types ?? []) for (const code of typeGroup(t) ?? [t]) types.add(code);
   const maxMag = opts.maxMagnitude ?? DEFAULT_MAX_MAG;
-  const minSize = opts.minSizeArcmin ?? DEFAULT_MIN_SIZE;
+  const minSize = Math.max(opts.minSizeArcmin ?? DEFAULT_MIN_SIZE, ((opts.minFovPercent ?? 0) / 100) * opts.fovArcmin.w);
   const maxSize = opts.maxSizeArcmin ?? DEFAULT_MAX_SIZE;
   const limit = Math.min(MAX_LIMIT, Math.floor(opts.limit ?? DEFAULT_LIMIT));
 

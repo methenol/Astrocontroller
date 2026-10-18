@@ -9,10 +9,12 @@
  *    closed and reopened, with backoff 1 → 15 s; one frame resets everything. Expected pauses (the
  *    mount moving, GoTo / calibration / stacking, a still being taken) are waited out first.
  *  - A long manual exposure (≥ 1 s) stops a camera's video: set back to auto once per episode.
- *  - The tele has no RTSP in DSO mode (it hangs the session and blocks the wide video too): there the
- *    tele view is the telescope's astro preview. Other astro modes are tested: two sessions that never
- *    deliver a frame mark the mode for the tele until the mode changes. Nothing is persisted, and
- *    Normal mode always has video.
+ *  - The tele RTSP is tried in every mode: DSO mode serves it too (fw 1.5.3, 2026-10-17: 28 fps, the
+ *    wide unaffected). Assuming it did not left the tele on the astro preview (:8092), which sends
+ *    nothing unless a stack runs, so the view showed one old frame for ever. Some modes (Moon) do
+ *    answer 454: two sessions that never deliver a frame put the tele on the astro preview, and RTSP
+ *    is tried again every minute, so a refusal never strands the view. While a tele stack runs the
+ *    tele view is the stack preview. Nothing is persisted, and Normal mode always has video.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../../config.js';
@@ -48,6 +50,8 @@ const FULL_RES_MAX_AGE_MS = 1500;
 const FULL_RES_TIMEOUT_MS = 20000;
 /** Tele RTSP probes that never deliver a frame before a mode is taken as having none. */
 const SILENT_PROBES_NO_RTSP = 2;
+/** A mode taken as having no tele RTSP is probed again after this long. */
+const RTSP_REPROBE_MS = 60000;
 /** While reconnecting, a warning every this many attempts (the first is logged at info). */
 const WARN_EVERY_ATTEMPTS = 4;
 const BACKOFF_BASE_MS = 1000;
@@ -59,10 +63,8 @@ const DECODER_NOISE = /POC|RPS|Could not find ref|NALU/;
 type Phase = 'off' | 'connecting' | 'live' | 'backoff' | 'preview' | 'disconnected';
 
 export class CameraSource extends Source {
-  /** Where frames come from when the telescope won't serve RTSP (tele in astro modes → :8092). */
+  /** Where frames come from while a stack runs or the telescope won't serve RTSP (tele → :8092). */
   fallback: Source | null = null;
-  /** Shooting modes known to have no RTSP for this camera (tele: DSO). */
-  readonly noRtspModes = new Set<number>();
 
   private phase: Phase = 'off';
   private proc: ChildProcess | null = null;
@@ -87,6 +89,7 @@ export class CameraSource extends Source {
   private silentProbes = 0;
   private probedMode: number | null = null;
   private learnedNoRtsp: number | null = null;
+  private learnedNoRtspAt = 0;
   private recovering = false;
   private recoveringSince = 0;
 
@@ -162,7 +165,7 @@ export class CameraSource extends Source {
       this.silentProbes = 0;
       this.learnedNoRtsp = null;
     }
-    // Mode not known yet (just connected): opening the tele RTSP in DSO mode hangs the session, so wait.
+    // Mode not known yet (just connected): wait for it, the tele's source depends on it.
     if (this.fallback && mode === null) {
       if (this.proc) this.stopReader('shooting mode unknown');
       this.setPreview(false);
@@ -170,16 +173,24 @@ export class CameraSource extends Source {
       this.note = 'waiting for the telescope to report its shooting mode';
       return;
     }
-    // tele in a mode without RTSP: the astro preview instead
-    if (this.fallback && mode !== null && mode !== NORMAL_MODE && (this.noRtspModes.has(mode) || this.learnedNoRtsp === mode)) {
-      if (this.proc) this.stopReader(`${st.shootingMode?.name} mode has no tele RTSP`);
+    // a mode refused the tele RTSP a while ago: try it again (a refusal must never strand the view)
+    if (this.learnedNoRtsp !== null && now - this.learnedNoRtspAt >= RTSP_REPROBE_MS && !this.dwarf.quietPeriod()) {
+      log.debug(`${this.name}: trying RTSP again in ${st.shootingMode?.name ?? 'this'} mode`);
+      this.learnedNoRtsp = null;
+      this.silentProbes = 0;
+      this.attempts = 0;
+      this.nextAttemptAt = 0;
+    }
+    // tele under a running stack, or in a mode that refused RTSP: the astro preview instead
+    const teleStack = !!this.fallback && this.dwarf.stackOwnsCamera(this.camera);
+    if (this.fallback && (teleStack || (mode !== null && mode !== NORMAL_MODE && this.learnedNoRtsp === mode))) {
+      if (this.proc) this.stopReader(teleStack ? 'a stack owns the tele camera' : `${st.shootingMode?.name} mode has no tele RTSP`);
       this.setPreview(true);
       this.phase = 'preview';
       const name = st.shootingMode?.name ?? 'astro';
-      this.note =
-        st.stacking.tele.state === 'running' || st.stacking.wide.state === 'running'
-          ? `${name} mode: showing the live stack preview`
-          : `${name} mode: the tele shows the stack preview while stacking runs; live video returns in Normal mode`;
+      this.note = teleStack
+        ? `${name} mode: showing the live stack preview`
+        : `${name} mode: the telescope serves no tele video right now; showing the stack preview, live video is retried every ${RTSP_REPROBE_MS / 1000} s`;
       return;
     }
     this.setPreview(false);
@@ -263,7 +274,8 @@ export class CameraSource extends Source {
     if (!this.fallback || mode === null || mode === NORMAL_MODE) return;
     if (++this.silentProbes >= SILENT_PROBES_NO_RTSP && this.learnedNoRtsp !== mode) {
       this.learnedNoRtsp = mode;
-      log.info(`${this.name}: no RTSP video in ${this.dwarf.state.shootingMode?.name ?? 'this'} mode; using the astro preview until the mode changes`);
+      this.learnedNoRtspAt = Date.now();
+      log.info(`${this.name}: no RTSP video in ${this.dwarf.state.shootingMode?.name ?? 'this'} mode; using the astro preview, retrying every ${RTSP_REPROBE_MS / 1000} s`);
     }
   }
 

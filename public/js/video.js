@@ -28,7 +28,10 @@ const TAP_MS = 450;
 const DOUBLE_TAP_MS = 330;
 
 const views = { main: 'tele', a: 'wide', b: 'stack' };
-const lastFrame = { tele: 0, wide: 0, stack: 0 }; // local receive time per source
+// Capture time per source, in server ms. Not the receive time: the server hands a new viewer the
+// last frame it has, which may be minutes old, and that must not look live.
+const lastFrame = { tele: 0, wide: 0, stack: 0 };
+let clockSkew = 0; // server clock − browser clock, from the stream status messages
 const blobUrls = {};
 let videoWs = null;
 let retry = 0;
@@ -65,7 +68,7 @@ function connectVideo() {
     if (!(ev.data instanceof ArrayBuffer) || ev.data.byteLength <= HEADER_BYTES) return;
     const src = SOURCES[new DataView(ev.data).getUint8(0)];
     if (!src) return;
-    lastFrame[src] = Date.now();
+    lastFrame[src] = new DataView(ev.data).getFloat64(1, true) || Date.now() + clockSkew;
     const url = URL.createObjectURL(new Blob([new Uint8Array(ev.data, HEADER_BYTES)], { type: 'image/jpeg' }));
     const old = blobUrls[src];
     blobUrls[src] = url;
@@ -126,13 +129,15 @@ function renderHealth() {
       tag.className = 'stale';
       fig.appendChild(tag);
     }
-    const age = lastFrame[src] ? Math.round((Date.now() - lastFrame[src]) / 1000) : null;
+    const at = Math.max(lastFrame[src], st?.lastFrameAt ?? 0);
+    const age = at ? Math.max(0, Math.round((Date.now() + clockSkew - at) / 1000)) : null;
+    const stale = age !== null && age > STALE_AFTER_S && !(src === 'stack' && !stackActive());
     let text = '';
     if (!videoWs) text = '⚠ video connection lost — reconnecting…';
-    else if (st?.note) text = `ℹ ${st.note}`;
+    else if (st?.note) text = stale ? `⚠ picture is ${fmtAge(age)} old — ${st.note}` : `ℹ ${st.note}`;
     else if (src === 'stack' && !stackActive()) text = 'no live stack running';
     else if (age === null) text = '⚠ waiting for first frame…';
-    else if (age > STALE_AFTER_S) text = `⚠ no new frames for ${age}s`;
+    else if (stale) text = `⚠ no new frames for ${fmtAge(age)}`;
     tag.hidden = !text;
     if (tag.dataset.text !== text) {
       tag.dataset.text = text;
@@ -140,8 +145,13 @@ function renderHealth() {
     }
   }
 }
-export function renderStreamHealth(streams) {
+function fmtAge(s) {
+  return s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`;
+}
+
+export function renderStreamHealth(streams, serverNow) {
   if (streams && typeof streams === 'object') serverStreams = streams;
+  if (typeof serverNow === 'number') clockSkew = serverNow - Date.now();
   renderHealth();
 }
 

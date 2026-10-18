@@ -36,8 +36,9 @@ export function skyRoutes({ dwarf }: WebContext): Router {
     route(async (req) => {
       const site = requireSite(dwarf);
       const types = list(queryString(req, 'types'));
+      const minFovPercent = queryNumber(req, 'minFovPercent');
       const observability = (await weather.observabilityAt(site, tz())) ?? undefined;
-      return planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, limit: 20, fovArcmin: teleFovArcmin(dwarf), timezone: tz(), observability });
+      return planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, minFovPercent, limit: 20, fovArcmin: teleFovArcmin(dwarf), timezone: tz(), observability });
     }),
   );
 
@@ -55,6 +56,7 @@ export function skyRoutes({ dwarf }: WebContext): Router {
         maxMag: queryNumber(req, 'maxMag'),
         minSize: queryNumber(req, 'minSize'),
         maxSize: queryNumber(req, 'maxSize'),
+        minFovPercent: queryNumber(req, 'minFovPercent'),
         named: queryString(req, 'named') === '1',
         up: up === 'now' || up === 'tonight' ? up : undefined,
         minAlt: queryNumber(req, 'minAlt') ?? config.observer.minAltitudeDeg,
@@ -63,7 +65,7 @@ export function skyRoutes({ dwarf }: WebContext): Router {
         offset: queryNumber(req, 'offset'),
         limit: queryNumber(req, 'limit'),
       };
-      return queryCatalog(query, observerSite(dwarf), tz());
+      return queryCatalog(query, observerSite(dwarf), tz(), { teleFovWidthArcmin: teleFovArcmin(dwarf).w });
     }),
   );
 

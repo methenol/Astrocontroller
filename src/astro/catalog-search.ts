@@ -19,6 +19,8 @@ export interface CatalogQuery {
   maxMag?: number;
   minSize?: number;
   maxSize?: number;
+  /** only objects whose major axis covers at least this percent of the tele frame width (needs opts.teleFovWidthArcmin) */
+  minFovPercent?: number;
   /** only objects with a common name */
   named?: boolean;
   /** "now": above minAlt now; "tonight": at least minHours above minAlt during darkness */
@@ -148,9 +150,9 @@ export type CatalogRow = ReturnType<typeof row>;
 
 /**
  * Filter, sort and page the database. Without a site, visibility filters and sorts are refused
- * and rows carry no altitudes.
+ * and rows carry no altitudes. The frame-width filter needs the tele frame width in arcminutes.
  */
-export function queryCatalog(query: CatalogQuery, site: Site | null, tz: string) {
+export function queryCatalog(query: CatalogQuery, site: Site | null, tz: string, opts: { teleFovWidthArcmin?: number } = {}) {
   const all = catalog();
   const q = query.q ? normalizeName(query.q) : '';
   const types = typeSet(query.types);
@@ -159,6 +161,9 @@ export function queryCatalog(query: CatalogQuery, site: Site | null, tz: string)
   const minAlt = query.minAlt ?? DEFAULT_MIN_ALT;
   if (!(minAlt >= -90 && minAlt <= 90)) throw new Error(`minimum altitude must be from -90 to 90° (got ${query.minAlt})`);
   if (query.minHours !== undefined && !(query.minHours >= 0)) throw new Error(`minimum hours must be 0 or more (got ${query.minHours})`);
+  if (query.minFovPercent !== undefined && !(query.minFovPercent >= 0)) throw new Error(`minimum frame coverage must be 0 percent or more (got ${query.minFovPercent})`);
+  if (query.minFovPercent !== undefined && !(opts.teleFovWidthArcmin! > 0)) throw new Error('the frame-coverage filter needs the tele field of width (the telescope FOV)');
+  const minFovArcmin = query.minFovPercent === undefined ? undefined : (query.minFovPercent / 100) * opts.teleFovWidthArcmin!;
   const needVis = !!query.up || ['altitude', 'hours', 'transit'].includes(query.sort ?? '');
   if (needVis && !site) throw new Error('visibility filters need the observer location (OBSERVER_LATITUDE / OBSERVER_LONGITUDE)');
   const sky = site ? skyFor(site) : null;
@@ -171,6 +176,7 @@ export function queryCatalog(query: CatalogQuery, site: Site | null, tz: string)
     if (query.maxMag !== undefined && !(o.mag !== undefined && o.mag <= query.maxMag)) continue;
     if (query.minSize !== undefined && !((o.majorArcmin ?? 0) >= query.minSize)) continue;
     if (query.maxSize !== undefined && !(o.majorArcmin !== undefined && o.majorArcmin <= query.maxSize)) continue;
+    if (minFovArcmin !== undefined && !((o.majorArcmin ?? 0) >= minFovArcmin)) continue;
     if (query.named && !o.names.length && !isMessier(o) && !isCaldwell(o)) continue;
     let rank = 0;
     if (q) {
