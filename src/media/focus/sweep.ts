@@ -289,7 +289,9 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
   const notes: string[] = [];
 
   await dwarf.refreshState().catch(() => {});
-  let center = o.center ?? dwarf.state.focusPosition;
+  // where the focuser was before the sweep: a sweep that fails goes back there, never stays out of focus
+  const origin = dwarf.state.focusPosition;
+  let center = o.center ?? origin;
   if (center === undefined) {
     const inf = await dwarf.infinityFocusPosition().catch(() => null);
     if (inf === null) throw new Error('the focuser position is unknown (nothing has reported it — is the telescope connected?) and the stored infinity position did not answer either: press Connect in the web UI, or run focus_position action=get first');
@@ -392,7 +394,7 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
         ({ sample } = await sampleAt(positions[i]));
       } catch (err) {
         if (i === 0 || samples.every((s) => s.error)) {
-          throw new Error(`star focus could not measure ${positions[i]}: ${errMsg(err)} — the focuser was left there; check the sky (sky_check) and the camera health`);
+          throw new Error(`star focus could not measure ${positions[i]}: ${errMsg(err)} — check the sky (sky_check) and the camera health`);
         }
         sample = { position: positions[i], score: 0, hfrPx: 0, hfrUncertaintyPx: 0, stars: 0, saturated: 0, seconds: 0, error: errMsg(err) };
       }
@@ -493,11 +495,23 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
     log.info(`${lastMessage} — samples ${samples.map((x) => `${x.position}:${x.error ? 'failed' : `${x.hfrPx}px`}`).join(' ')}`);
     return result;
   } catch (err) {
-    lastMessage = `star focus failed: ${errMsg(err)}`;
-    throw err;
+    // 2026-10-18: a coarse sweep centred on 350 found no stars there and stopped, leaving the tele
+    // 220 steps out of focus (a blank view) until someone noticed: go back to where it started
+    let back = '';
+    if (origin !== undefined) {
+      try {
+        lastPosition = await dwarf.focusTo(origin);
+        back = ` — the focuser was returned to its starting position ${lastPosition}`;
+      } catch (e) {
+        back = ` — the focuser could NOT be returned to its starting position ${origin} (${errMsg(e)}); it is at ${dwarf.state.focusPosition ?? 'an unknown position'}`;
+      }
+    }
+    lastMessage = `star focus failed: ${errMsg(err)}${back}`;
+    throw new Error(`${errMsg(err)}${back}`);
   } finally {
-    if (exposureSet) await dwarf.setSetting('tele', 'exposure', restoreExp).catch((e) => log.warn(`could not restore the tele exposure: ${errMsg(e)}`));
+    // gain first: a gain write switches an auto exposure to manual, so the exposure goes back last
     if (gainSet) await dwarf.setSetting('tele', 'gain', gainNow as number).catch((e) => log.warn(`could not restore the tele gain: ${errMsg(e)}`));
+    if (exposureSet) await dwarf.setSetting('tele', 'exposure', restoreExp).catch((e) => log.warn(`could not restore the tele exposure: ${errMsg(e)}`));
     // the stills paused the live view; nudge it back, and never let a stream that died meanwhile take the process down with it
     setTimeout(() => {
       try {

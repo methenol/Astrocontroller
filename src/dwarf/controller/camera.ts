@@ -265,10 +265,13 @@ export class CameraControl {
       const pick = allowed.length ? nearest(allowed, want) : Math.round(want);
       const expAutoBefore = defs.exp ? this.core.params.get(String(defs.exp.paramId))?.mode === 0 : false;
       await request(this.core, Cmd.PARAM_SET_GAIN, { paramId: packId(def), mode: 1, value: pick });
-      // 2026-10-12 (fw 1.5.3.9): a manual gain puts an auto exposure back to manual (its last value), reported before the reply
+      // 2026-10-12 (fw 1.5.3.9): a manual gain puts an auto exposure back to manual (its last value), reported
+      // before the reply. Left like that, the camera stays on whatever short exposure auto had picked: at night
+      // a black live view (2026-10-18: the focus sweep's restore, exposure auto then gain, blanked the tele for
+      // minutes). Auto exposure holds when set after the gain, so put it back.
       const expManualNow = defs.exp ? this.core.params.get(String(defs.exp.paramId))?.mode === 1 : false;
-      const expNote = expAutoBefore && expManualNow ? ' — note: the telescope switched exposure from auto to manual with it; set exposure "auto" again after the gain if auto is wanted' : '';
-      return `${camera} gain → ${pick}${pick !== want ? ` (nearest allowed to ${want})` : ''}${expNote}`;
+      if (expAutoBefore && expManualNow) await this.setExposure(camera, defs.exp, mode, 'auto');
+      return `${camera} gain → ${pick}${pick !== want ? ` (nearest allowed to ${want})` : ''}`;
     }
     if (key === 'white_balance' || key === 'wb') return this.setWhiteBalance(camera, defs.wb, mode, value);
     if (FILTER_KEYS.has(key)) {
