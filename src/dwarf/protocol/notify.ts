@@ -1,0 +1,120 @@
+/**
+ * Notifications: every notify command the firmware emits, its name and its payload type. The hand
+ * table below carries the names this app uses; the recovered catalogue supplies the ids and schemas it
+ * predates (device attitude, wide/guide focus position, defog, auto-cooling, anti-tangle, power-sound
+ * and do-not-disturb state, and more).
+ */
+import { protoTypeByName, type ProtoType } from './types.js';
+import { decodeWith } from './decode.js';
+import { DWARF_COMMANDS, type CommandSpec } from '../wire/generated/catalog.generated.js';
+
+export const NOTIFY: Readonly<Record<number, { readonly name: string; readonly type?: string }>> = Object.freeze({
+  15200: { name: 'pictureMatching', type: 'notify.PictureMatching' },
+  15201: { name: 'battery', type: 'notify.BatteryInfo' },
+  15202: { name: 'charging', type: 'notify.ChargingState' },
+  15203: { name: 'sdCard', type: 'notify.StorageInfo' },
+  15204: { name: 'teleRecordTime', type: 'notify.RecordTime' },
+  15205: { name: 'teleTimelapseOutTime', type: 'notify.TimeLapseOutTime' },
+  15206: { name: 'darkCaptureState', type: 'notify.OperationStateNotify' },
+  15207: { name: 'darkCaptureProgress', type: 'notify.ProgressCaptureRawDark' },
+  15208: { name: 'teleStackingState', type: 'notify.OperationStateNotify' },
+  15209: { name: 'teleStackingProgress', type: 'notify.ProgressCaptureRawLiveStacking' },
+  15210: { name: 'calibrationState', type: 'notify.AstroCalibrationState' },
+  15211: { name: 'gotoState', type: 'notify.AstroGotoState' },
+  15212: { name: 'trackingState', type: 'notify.AstroTrackingState' },
+  15218: { name: 'teleBurstProgress', type: 'notify.BurstProgress' },
+  15219: { name: 'panoramaProgress', type: 'notify.PanoramaProgress' },
+  15220: { name: 'wideBurstProgress', type: 'notify.BurstProgress' },
+  15221: { name: 'rgbState', type: 'notify.RgbState' },
+  15222: { name: 'powerIndicatorState', type: 'notify.PowerIndState' },
+  15223: { name: 'hostSlaveMode', type: 'notify.HostSlaveMode' },
+  15224: { name: 'mtpState', type: 'notify.MTPState' },
+  15225: { name: 'trackResult', type: 'notify.TrackResult' },
+  15226: { name: 'wideTimelapseOutTime', type: 'notify.TimeLapseOutTime' },
+  15227: { name: 'cpuMode', type: 'notify.CPUMode' },
+  15228: { name: 'specialTrackingState', type: 'notify.AstroTrackingSpecialState' },
+  15229: { name: 'powerOff', type: 'notify.PowerOff' },
+  15230: { name: 'albumUpdate', type: 'notify.AlbumUpdate' },
+  15231: { name: 'sentryState', type: 'notify.SentryState' },
+  15232: { name: 'sentryTrackResult', type: 'notify.TrackResult' },
+  15233: { name: 'oneClickGotoState', type: 'notify.OneClickGotoState' },
+  15234: { name: 'streamType', type: 'notify.StreamType' },
+  15235: { name: 'wideRecordTime', type: 'notify.RecordTime' },
+  15236: { name: 'wideStackingState', type: 'notify.OperationStateNotify' },
+  15237: { name: 'wideStackingProgress', type: 'notify.ProgressCaptureRawLiveStacking' },
+  15238: { name: 'multiTrackResult', type: 'notify.MultiTrackResult' },
+  15239: { name: 'eqSolvingState', type: 'notify.EqSolvingState' },
+  15241: { name: 'teleLongExpProgress', type: 'notify.LongExpPhotoProgress' },
+  15242: { name: 'wideLongExpProgress', type: 'notify.LongExpPhotoProgress' },
+  15243: { name: 'temperature', type: 'notify.Temperature' },
+  15247: { name: 'wideDarkCaptureState', type: 'notify.OperationStateNotify' },
+  15251: { name: 'wideMultiTrackResult', type: 'notify.MultiTrackResult' },
+  15252: { name: 'wideTrackResult', type: 'notify.TrackResult' },
+  15253: { name: 'aiEnhanceState', type: 'notify.OperationStateNotify' },
+  15254: { name: 'aiEnhanceProgress', type: 'notify.ProgressAiEnhance' },
+  15255: { name: 'waitShootingProgress', type: 'notify.CommonProgress' },
+  15256: { name: 'calibrationResult', type: 'notify.CalibrationResult' },
+  15257: { name: 'focusPosition', type: 'notify.FocusPosition' },
+  15258: { name: 'ufoAutoHandMode', type: 'notify.SentryAutoHand' },
+  15260: { name: 'lowTempProtection', type: 'notify.LowTempProtectionMode' },
+  15261: { name: 'systemResourceState', type: 'notify.StateSystemResourceOccupation' },
+  15262: { name: 'bodyStatus', type: 'notify.BodyStatus' },
+  15263: { name: 'mosaicProgress', type: 'notify.ProgressCaptureMosaic' },
+  15264: { name: 'intParam', type: 'notify.GeneralIntParam' },
+  15265: { name: 'floatParam', type: 'notify.GeneralFloatParam' },
+  15266: { name: 'boolParam', type: 'notify.GeneralBoolParams' },
+  15267: { name: 'shootingMode', type: 'notify.SwitchShootingMode' },
+  15268: { name: 'cropRatio', type: 'notify.SwitchCropRatioState' },
+  15270: { name: 'whiteBalance', type: 'notify.Wb' },
+  15272: { name: 'resolution', type: 'notify.ResolutionParam' },
+  15273: { name: 'photoState', type: 'notify.PhotoState' },
+  15274: { name: 'burstState', type: 'notify.BurstState' },
+  15275: { name: 'recordState', type: 'notify.RecordState' },
+  15276: { name: 'timelapseState', type: 'notify.TimeLapseState' },
+  15277: { name: 'panoramaState', type: 'notify.PanoramaState' },
+  15278: { name: 'astroAutoFocusState', type: 'notify.AstroAutoFocusState' },
+  15279: { name: 'autoFocusState', type: 'notify.NormalAutoFocusState' },
+  15280: { name: 'astroAutoFocusFastState', type: 'notify.AstroAutoFocusFastState' },
+  15281: { name: 'areaAutoFocusState', type: 'notify.AreaAutoFocusState' },
+  15282: { name: 'dualCameraLinkage', type: 'notify.DualCameraLinkageState' },
+  15283: { name: 'resolutionFpsState', type: 'notify.SwitchResolutionFpsState' },
+  15284: { name: 'normalTrackState', type: 'notify.NormalTrackState' },
+  15285: { name: 'burstProgress', type: 'notify.BurstProgress' },
+  15286: { name: 'recordTime', type: 'notify.RecordTime' },
+  15287: { name: 'timelapseOutTime', type: 'notify.TimeLapseOutTime' },
+  15288: { name: 'longExpProgress', type: 'notify.LongExpPhotoProgress' },
+  15289: { name: 'sentryMotorState' },
+  15290: { name: 'caliFrameState', type: 'notify.CaptureCaliFrameState' },
+  15291: { name: 'caliFrameProgress', type: 'notify.CaptureCaliFrameProgress' },
+  15292: { name: 'cmosTemperature', type: 'notify.CmosTemperature' },
+  15296: { name: 'skyTargetFinderState', type: 'notify.SkyTargetFinderState' },
+});
+
+const NOTIFY_PREFIX = 'CMD_NOTIFY_';
+const camelCase = (name: string) => name.toLowerCase().replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+
+/** Labels and payload types by command id: this app's names win, the APK's catalogue fills the rest. */
+const notifyNames = new Map<number, string>();
+const notifyTypes = new Map<number, ProtoType>();
+
+for (const [cmd, { name, type }] of Object.entries(NOTIFY)) {
+  notifyNames.set(Number(cmd), name);
+  if (type) notifyTypes.set(Number(cmd), protoTypeByName(type));
+}
+
+for (const [catalogueName, spec] of Object.entries(DWARF_COMMANDS) as [string, CommandSpec][]) {
+  if (!catalogueName.startsWith(NOTIFY_PREFIX) || notifyNames.has(spec.id)) continue;
+  notifyNames.set(spec.id, camelCase(catalogueName.slice(NOTIFY_PREFIX.length)));
+  const ref = spec.response ?? spec.request;
+  if (!ref) continue;
+  try {
+  notifyTypes.set(spec.id, protoTypeByName(ref));
+  } catch {
+  // the descriptor behind the reference will not load: the frame still surfaces, undecoded
+  }
+}
+
+/** A notification's name (`notify_<cmd>` when neither table knows it) and decoded payload. */
+export function decodeNotification(cmd: number, data: Uint8Array): { name: string; data: Record<string, unknown> } {
+  return { name: notifyNames.get(cmd) ?? `notify_${cmd}`, data: decodeWith(notifyTypes.get(cmd), data) };
+}

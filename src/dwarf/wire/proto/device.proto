@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package device;
+
+import "base.proto";
+
+message ReqShootingDoNotDisturb {
+  int32 state = 1;
+}
+
+message ReqLensDefog {
+  int32 state = 1;
+}
+
+message ReqAutoCooling {
+  int32 state = 1;
+}
+
+message ReqSetPowerSound {
+  int32 state = 1;
+}
+
+message ReqAutoShutdown {
+  int32 state = 1;
+}
+
+message ReqAntiTangle {
+  int32 state = 1;
+}

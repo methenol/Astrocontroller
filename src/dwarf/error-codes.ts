@@ -1,5 +1,5 @@
 // Generated from the firmware DwarfErrorCode enum (protocol.proto in stevejcl/dwarf_python_api, MIT).
-export const FIRMWARE_ERRORS: Record<number, string> = {
+export const FIRMWARE_ERRORS: Readonly<Record<number, string | undefined>> = Object.freeze({
   [-1]: 'WS_PARSE_PROTOBUF_ERROR',
   [-2]: 'WS_SDCARD_NOT_EXIST',
   [-3]: 'WS_INVAID_PARAM',
@@ -125,4 +125,4 @@ export const FIRMWARE_ERRORS: Record<number, string> = {
   [-16309]: 'CODE_SHOOTING_SCHEDULE_DEVICE_BUSY',
   [-16310]: 'CODE_SHOOTING_SCHEDULE_INTERRUPTED',
   [-16311]: 'CODE_SHOOTING_SCHEDULE_NOT_SYNCED',
-};
+});

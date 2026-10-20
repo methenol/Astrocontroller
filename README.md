@@ -2,9 +2,9 @@
 
 An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Docker and has three parts:
 
-- **An MCP server** with 50 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
+- **An MCP server** with 55 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
-- **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs.
+- **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs. It is mobile-first: the same page is a thumb-driven single-screen app on a phone at the scope and a two-column desk layout on a laptop.
 
 The agent keeps playbooks ("skills") and site notes in its workspace and is told to refine them as it learns.
 
@@ -24,15 +24,23 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 
 | Variable | Purpose |
 |---|---|
-| `DWARF_HOST` | Telescope IP (STA mode), e.g. `10.0.0.196`. AP mode is `192.168.88.1`. |
+| `DWARF_HOST` | Telescope IP (STA mode), e.g. `10.0.0.196`. AP mode is `192.168.88.1`. Can be changed from the web UI (View → System → Telescope IP); that setting is kept in `data/telescope.json` and wins over this one until you clear the field. |
 | `DWARF_AUTO_SYNC_TIME_LOCATION` | Push time, timezone and location on every connect (default `true`). |
+| `DWARF_PROTOCOL_HEADER` | `app` (default) sends the header the official DWARFLAB app sends (`majorVersion 2 / minorVersion 3`); `sdk` sends the third-party SDK's `1.20` instead. Only touch it if a firmware refuses the official header. |
 | `OBSERVER_LATITUDE` / `OBSERVER_LONGITUDE` / `OBSERVER_ELEVATION_M` | Site. Needed for planning, calibration, GoTo, polar alignment and weather. |
 | `OBSERVER_TIMEZONE` | IANA zone (e.g. `America/New_York`). All reported times use it. |
 | `PLAN_MIN_ALTITUDE_DEG` | Default minimum altitude for target planning. |
+| `PLAN_BORTLE` | Site sky class 1 (dark) … 9 (inner city), default `5`. The one number that moves every reachability threshold: what the sky and glass can bring up, and how long a sub the sky rewards. |
+| `PLAN_FILTERS` | The Dwarf 3's filters, default `Astro,Duo-Band`. Each target is planned through the best of them (continuum targets through Astro only) and `suggestedFilter` names it. Decides whether a faint hydrogen-alpha region is a target at all, and how much the Moon costs it. |
+| `PLAN_FILTER` | Force one glass for every target instead (`none`, `astro`, `uhc`, `duo-band`, `ha 7nm`, a product name…); empty = `PLAN_FILTERS`. |
+| `PLAN_APERTURE_MM` | Clear aperture of the tele lens. The one optics number the scope cannot report; without it the sub advice is the mount's ceiling, with the missing number named. |
+| `PLAN_READ_NOISE_E` | Camera read noise in electrons. With it the sub length is one number; without it the plan quotes the honest range from a modern sensor to an old one. |
+| `PLAN_MOUNT` / `PLAN_GUIDED` | `alt-az` (default) or `eq`; guided or not. Sets what trails and how soon: field rotation on an alt-az head, the trails budget on an unguided equatorial, nothing when guided. |
+| `PLAN_PLATE_SCALE_ARCSEC` | Arcsec per pixel; the telescope's own plate scale is used when unset. |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI-compatible chat-completions endpoint (vLLM, llama.cpp, LM Studio, …). |
 | `REASONING_EFFORT` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. You can also change it live in the UI. |
 | `LLM_CONTEXT_WINDOW` / `LLM_MAX_TOKENS` | Model limits. |
-| `LLM_THINKING_FORMAT` | Optional request shape for thinking (`qwen-chat-template`, `openai`, …). Leave empty for auto. |
+| `LLM_THINKING_FORMAT` | Request shape for thinking (`qwen`, `qwen-chat-template`, `openai`, …). Use `qwen` for Qwen on vLLM: with it empty, Oh My Pi sends no reasoning effort and the server's default applies. |
 | `LLM_VISION` | Send camera and FITS images to the model (default `true`). |
 | `DUTY_INTERVAL_S` | Default time between duty samples (see "Duty loop"); the agent can choose 30 s–15 min per sample. Default `300`. |
 | `PROMPT_TRANSFER_ON_CHARGE` | When the scope is plugged in to charge with sessions still on its SD card, the agent is woken to park, transfer (processing queues itself) and shut the telescope down once the transfers are done. Never while imaging. Default `false`. |
@@ -73,8 +81,24 @@ An LLM turn ends when the model stops calling tools, and nothing happens after t
 
 ### Telescope controls
 
-- **Disconnect / Connect** (top bar) releases the telescope without stopping the container. It closes the control link, the video readers and the stack preview, cancels transfers, and refuses every command until you press Connect (e.g. to use the DWARFLAB app). It survives a restart.
-- **Reboot / Shut down** are in the Power row of the controls (with confirmation).
+- **Disconnect / Connect** releases the telescope without stopping the container. It closes the control link, the video readers and the stack preview, cancels transfers, and refuses every command until you press Connect (e.g. to use the DWARFLAB app). It survives a restart. On a phone it is in the ⋯ menu; at desk widths it sits in the top bar.
+- **Reboot / Shut down** are in the System group of the controls (with confirmation). On a phone the whole System group is folded behind the ⋯ menu.
+- **Star focus** lives in the Focus group: **Sharpness ★** takes one tele frame and scores how sharp the stars are at the current focus (median star half-flux radius → `1000 ÷ HFR″`), **Tune ★** steps the focuser ± 15/30/60 units around it, scores every stop and leaves it on the sharpest. The line under the buttons shows the last reading, and during a sweep which sample it is on; the focus buttons lock while it runs. Exposure and gain are put back afterwards. The agent runs the same code as `star_sharpness` / `star_focus`.
+
+## On a phone or tablet
+
+The UI is one page, one screen at a time, sized for gloves and dark skies. Nothing scrolls the page itself; each screen scrolls inside its own body, so the header, the capture bar and the tab bar never move.
+
+- **Bottom bar**: View · Agent · Tonight · Album · More. Database, Library, Skills and Log live under **More** on a phone and become top-level tabs at desk widths. The screen you were on is remembered.
+- **View**: tap the main view to fill the screen (Fullscreen API where it exists, an in-page mode where it does not — iOS), pinch to zoom, drag to pan, double-tap to zoom to the point you tapped and again to reset, ✕ or Esc to leave. Tapping a small view swaps it into the main slot. Frames are only streamed for the views on screen, so leaving the View screen stops the video and frees the radio.
+- **Capture bar** is pinned under your thumb: camera, Photo, Burst, Record, Stack.
+- **Aim** is a nine-button pad — hold any arrow to keep moving, ■ in the middle stops everything — with a speed slider and Home / Level / Park. Cell size follows the viewport (54-68 px) so it stays a thumb target on a small phone and tightens up at desk widths. Only Aim is open at phone widths; Focus, Mode & exposure and System are folded, and all of them open at desk widths.
+- **Tonight** names one target to start with and the season the list was read off ("Start with the Witch Head Nebula — Milky Way core"), then gives each row its verdict — *easy*, *needs time*, or *beyond tonight's sky* with the reason (a faint hydrogen-alpha region under a bare Bortle 5 sky is not a target until you put a filter on) — its longest run that is simultaneously up, forecast-clear and moon-workable, the sub length to shoot at with the reason (`15s × 1012 subs`: what the mount can hold, not what the sky would reward), and the sky class and filter every judgement was made against. Rows the sky cannot bring up stay listed and explained, and are visibly set aside rather than quietly dropped. Targets the library already holds, or that were suggested in the last few nights, are held back by their own score and named under the list ("Held back by memory: M 31 (shot until Dec 16, 1 d ago)") instead of silently vanishing. Below 760 px the plan becomes cards with each field labelled.
+- **Database** searches and filters the whole object catalog: free-text search over every designation and common name, then type, catalog, constellation, magnitude, size, "named only", and "up now" / "up tonight" above a chosen altitude. Results can be sorted by match, name, brightness, size, current altitude, hours up tonight, best time or RA. Tap a result to see all its designations, tonight's altitude curve against your minimum altitude, Moon separation, and GoTo / ask-the-agent buttons. Your filters are remembered.
+- **Night mode** (the sliders menu in the header, together with Disconnect) puts a red multiply tint over everything, including the live images, and is remembered.
+- **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
+- **Tap targets** are floored at 44 px tall on touch layouts; secondary controls (the view buttons, header chips, small chips under tiles) sit at 38-42 px, and nothing at phone widths is smaller than a gloved fingertip.
+- **Installable**: Add to Home Screen gives a standalone app (manifest + icons, `display_override` falls back to minimal-ui where window controls overlay is not implemented). It honours the notch and home indicator safe areas. Home-screen install and fullscreen need a secure context — plain HTTP on the LAN works fine in a browser tab; put a reverse proxy or Tailscale Serve in front for HTTPS.
 
 ## Imagery library
 
@@ -91,6 +115,12 @@ An LLM turn ends when the model stops calling tools, and nothing happens after t
 ```
 
 The scope names the session folder after the GoTo target. The controller picks the name the way the DWARF app does (Messier, then Caldwell, then catalog id), so nights captured with either one stack together.
+
+### Freeing the SD card
+
+Once a session is safe in the library you can delete it from the telescope to free space. The **Album** tab has a **delete** button on every tile, and the **Library** tab's "Sessions on the telescope" card has **Delete** on each session plus a **Delete transferred** button for the whole card at once. Both go through the device's own album delete (the same one the DWARFLAB app uses), which wipes the whole session package — every raw frame, the stack and the thumbnail — together with its album entry, so the freed space registers correctly. An astro tile deletes its whole session, not just the one image, and says so.
+
+A session that is **not complete in the library** is refused, so you cannot delete data you never copied; the confirm and the server both guard it, and the UI offers to force it when you really mean to. The library copies are never touched — this only clears the card. (The agent has the same power through `delete_album_items`, but is told to use it only on files you name.)
 
 ## Processing in AstroPhoto Studio
 
@@ -124,10 +154,11 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 |---|---|
 | Status/system | `telescope_status`, `telescope_device_info`, `telescope_reconnect`, `sync_time_and_location`, `power`, `raw_command` |
 | Camera | `set_shooting_mode`, `get_camera_settings`, `set_camera_setting`, `take_photo`, `video_recording`, `timelapse`, `view_camera` |
-| Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `focus_step`, `focus_position` (incl. infinity) |
-| Planning | `sky_conditions`, `weather_forecast`, `plan_targets`, `find_target` |
-| Astro | `calibrate`, `goto_target`, `stop_goto`, `live_stacking`, `stacking_status`, `wait`, `polar_alignment`, `track_sun_moon` |
+| Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `star_sharpness`, `star_focus`, `focus_step`, `focus_position` (incl. infinity) |
+| Planning | `sky_conditions`, `weather_forecast`, `sky_check`, `plan_targets`, `rest_target`, `find_target`, `search_catalog`, `map_obstructions` |
+| Astro | `calibrate`, `goto_target`, `stop_goto`, `astro_recover`, `live_stacking`, `stacking_status`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
+| Duty | `duty` (the unattended night loop) |
 | Images & data | `list_album`, `view_image`, `analyze_image`, `analyze_subs`, `dark_frames`, `delete_album_items`, `list_device_sessions`, `transfer_session`, `transfer_files`, `jobs`, `list_library` |
 | Processing | `processing_status`, `process_session`, `processing_job` |
 
@@ -138,8 +169,8 @@ For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `nod
 - **Control**: WebSocket `:9900`, protobuf `WsPacket`s. The protobuf definitions, packet codec and command registry come from [`@alikh/dwarflab-sdk`](https://github.com/alikh31/dwarflab-sdk) (MIT). `src/dwarf/protocol.ts` adds commands and message variants the SDK lacks (motor run-to/reset/position, one-click GoTo `goto_only`, EQ solving results, …), and the firmware error table comes from [`dwarf_python_api`](https://github.com/stevejcl/dwarf_python_api) (MIT).
 - **Live views**: RTSP `:554/ch0|ch1/stream0` (H.265 1080p30) → ffmpeg → MJPEG, on demand. **Stack preview**: the scope's own MJPEG on `:8092/mainstream`.
 - **HTTP** `:8082`: device info, album, and the per-mode parameter schema (exposure tables, gain lists, param IDs). **Files**: HTTP `:80` and anonymous FTP `:21`.
-- **Catalog**: [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) plus a nickname table. GoTo coordinates are J2000, which I verified against coordinates the DWARF app recorded on this device.
-- **Weather**: [Open-Meteo](https://open-meteo.com) (clouds by layer, rain, wind, dew point) + [7Timer!](https://www.7timer.info) (seeing and transparency).
+- **Catalog**: about 45,000 objects in `catalog/objects.tsv`, built by `npm run catalog` (`src/tools/build-catalog.ts`). The sources are [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) and these VizieR catalogs: Sharpless, LBN, Cederblad, RCW, van den Bergh, Barnard, LDN, Strasbourg-ESO planetary nebulae, Green SNRs, Dias open clusters, Harris globulars, RC3 galaxies, Arp, Hickson, Abell clusters and the Bright Star Catalogue. The IAU star names are added, plus a user-editable nickname table (`catalog/nicknames.csv`). An object listed in several catalogs is merged into one entry with all its designations. Merging matches designations and cross-identifications first, then position and size for extended objects. `catalog/sources.json` lists each source, with its citation and how many records it added or merged; the Database tab shows the same list. GoTo coordinates are J2000, which I verified against coordinates the DWARF app recorded on this device.
+- **Weather**: [Open-Meteo](https://open-meteo.com) (clouds by layer, rain, wind, dew point) + [7Timer!](https://www.7timer.info) (seeing and transparency). Each fetch gets three attempts under a deadline (a first call after a spell of silence can stall in DNS/TCP for tens of seconds and then answer in under one), callers share one refresh, and the last good forecast is kept for 12 h and served with its age while it is retried in the background — so a bad second on the field connection costs you an amber "cached N min ago" on the Tonight tab instead of an empty card.
 
 ## Validation status (Dwarf 3, firmware 1.5.3, 2026-10-02)
 
@@ -154,7 +185,7 @@ For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `nod
 - Live-stacking start/stop/progress and the stack-preview stream, in forced preview mode.
 - Weather, planning and target lookup; the agent end to end with tool calls and vision on your vLLM endpoint.
 
-**Implemented from the protocol, not yet run against the sky** (I validated indoors, so no stars): plate-solve `calibrate`, `goto_target` / one-click GoTo, real live-stacking captures, astro autofocus, `polar_alignment` (EQ solving), sentry mode, Sun/Moon tracking, timelapse. The first clear night will exercise these, and the agent is told to record what it learns in its skills.
+**Implemented from the protocol, not yet run against the sky** (I validated indoors, so no stars): plate-solve `calibrate`, `goto_target` / one-click GoTo, real live-stacking captures, astro autofocus, `polar_alignment` (EQ solving), sentry mode, Sun/Moon tracking, timelapse, and the new star-focus pair. `star_sharpness` is checked against synthetic star fields (PSF accuracy, invariance to exposure, gain, sky glow and frame size, same reading from any crop of the same sky, sensitivity to trailing, rejection of hot pixels and flat placeholder frames) and the `star_focus` sweep against a simulated focuser with a known optimum (peak search, the between-samples fit, camera restore, failures, the one-at-a-time lock); neither has seen the real sky yet. The first clear night will exercise these, and the agent is told to record what it learns in its skills.
 
 Firmware quirks found along the way: several commands are acted on but never acknowledged (single-step focus, track start, RGB/power), motor run-to replies only when the motion completes, and a forced stack without GoTo is preview-only (no FITS saved). These are all handled in code.
 
@@ -163,5 +194,7 @@ Firmware quirks found along the way: several commands are acted on but never ack
 ```bash
 npm install && npm run build
 node --env-file=.env dist/index.js     # needs ffmpeg; set AGENT_ENABLED=false if omp isn't installed
-npm run catalog                        # refresh OpenNGC
+npm run catalog                        # rebuild catalog/objects.tsv (downloads cached in catalog/.cache; --fresh to re-download)
 ```
+
+The web UI is `public/` served as-is: no build step for HTML/CSS/JS changes, just reload.

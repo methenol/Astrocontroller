@@ -1,0 +1,166 @@
+{
+  "built": "2026-10-17",
+  "total": 74853,
+  "sources": [
+    {
+      "key": "openngc",
+      "title": "OpenNGC (NGC, IC, Messier, Caldwell and addendum)",
+      "cite": "Mattia Verga, OpenNGC, CC-BY-SA 4.0, github.com/mattiaverga/OpenNGC",
+      "records": 13372,
+      "added": 13372,
+      "merged": 0
+    },
+    {
+      "key": "harris",
+      "title": "Globular clusters (Harris 2010)",
+      "cite": "Harris W.E., Catalog of Parameters for Milky Way Globular Clusters, 2010 edition (VizieR VII/202)",
+      "records": 147,
+      "added": 36,
+      "merged": 111
+    },
+    {
+      "key": "dias",
+      "title": "Open clusters (Dias et al. 2002, v3.5)",
+      "cite": "Dias W.S., Alessi B.S., Moitinho A., Lepine J.R.D., New catalogue of optically visible open clusters and candidates (VizieR B/ocl)",
+      "records": 2167,
+      "added": 1656,
+      "merged": 511
+    },
+    {
+      "key": "pn",
+      "title": "Planetary nebulae (Strasbourg-ESO catalogue)",
+      "cite": "Acker A. et al., Strasbourg-ESO Catalogue of Galactic Planetary Nebulae, 1992 (VizieR V/84)",
+      "records": 1143,
+      "added": 1012,
+      "merged": 131
+    },
+    {
+      "key": "mash",
+      "title": "Planetary nebulae (Macquarie/AAO/Strasbourg Hα survey, MASH I+II)",
+      "cite": "Phillipps S. et al., The Macquarie/AAO/Strasbourg Hα Planetary Nebula Catalogue (MASH), 2005 (MNRAS 359, 1001) and MASH-II, 2008 (MNRAS 384, 525; VizieR V/127A)",
+      "records": 1238,
+      "added": 1238,
+      "merged": 0
+    },
+    {
+      "key": "green",
+      "title": "Supernova remnants (Green 2024)",
+      "cite": "Green D.A., A catalogue of 310 Galactic supernova remnants, 2024 (VizieR VII/297)",
+      "records": 310,
+      "added": 307,
+      "merged": 3
+    },
+    {
+      "key": "sh2",
+      "title": "Sharpless HII regions (Sh2)",
+      "cite": "Sharpless S., A Catalogue of H II Regions, 1959 (VizieR VII/20)",
+      "records": 313,
+      "added": 257,
+      "merged": 56
+    },
+    {
+      "key": "rcw",
+      "title": "RCW southern HII regions",
+      "cite": "Rodgers A.W., Campbell C.T., Whiteoak J.B., A catalogue of H-alpha emission regions in the southern Milky Way, 1960 (VizieR VII/216)",
+      "records": 181,
+      "added": 126,
+      "merged": 55
+    },
+    {
+      "key": "ced",
+      "title": "Cederblad bright diffuse nebulae",
+      "cite": "Cederblad S., Catalog of Bright Diffuse Galactic Nebulae, 1946 (VizieR VII/231)",
+      "records": 330,
+      "added": 157,
+      "merged": 173
+    },
+    {
+      "key": "lbn",
+      "title": "Lynds bright nebulae (LBN)",
+      "cite": "Lynds B.T., Catalogue of Bright Nebulae, 1965 (VizieR VII/9)",
+      "records": 1125,
+      "added": 731,
+      "merged": 394
+    },
+    {
+      "key": "vdb",
+      "title": "van den Bergh reflection nebulae (vdB)",
+      "cite": "van den Bergh S., A study of reflection nebulae, 1966 (VizieR VII/21)",
+      "records": 158,
+      "added": 82,
+      "merged": 76
+    },
+    {
+      "key": "barnard",
+      "title": "Barnard dark nebulae",
+      "cite": "Barnard E.E., Catalogue of 349 dark objects in the sky, 1927 (VizieR VII/220A)",
+      "records": 349,
+      "added": 345,
+      "merged": 4
+    },
+    {
+      "key": "ldn",
+      "title": "Lynds dark nebulae (LDN)",
+      "cite": "Lynds B.T., Catalogue of Dark Nebulae, 1962 (VizieR VII/7A)",
+      "records": 1791,
+      "added": 1537,
+      "merged": 254
+    },
+    {
+      "key": "rc3",
+      "title": "Galaxies (RC3, Third Reference Catalogue of Bright Galaxies)",
+      "cite": "de Vaucouleurs G. et al., Third Reference Catalogue of Bright Galaxies, 1991 (VizieR VII/155)",
+      "records": 23011,
+      "added": 15654,
+      "merged": 7357
+    },
+    {
+      "key": "pgc",
+      "title": "Galaxies (Principal Galaxies Catalogue, PGC/LEDA)",
+      "cite": "Paturel C. et al., Principal Galaxies Catalogue and LEDA, 2003 (A&A 412, 45; VizieR VII/119B)",
+      "records": 52953,
+      "added": 28687,
+      "merged": 24266
+    },
+    {
+      "key": "arp",
+      "title": "Arp peculiar galaxies",
+      "cite": "Arp H., Atlas of Peculiar Galaxies, 1966 (VizieR VII/192)",
+      "records": 338,
+      "added": 26,
+      "merged": 312
+    },
+    {
+      "key": "hcg",
+      "title": "Hickson compact galaxy groups",
+      "cite": "Hickson P., Systematic properties of compact groups of galaxies, 1982 (VizieR VII/213)",
+      "records": 100,
+      "added": 98,
+      "merged": 2
+    },
+    {
+      "key": "aco",
+      "title": "Abell galaxy clusters (ACO, distance class ≤ 4)",
+      "cite": "Abell G.O., Corwin H.G., Olowin R.P., A catalog of rich clusters of galaxies, 1989 (VizieR VII/110A)",
+      "records": 408,
+      "added": 408,
+      "merged": 0
+    },
+    {
+      "key": "bsc",
+      "title": "Bright stars (Yale Bright Star Catalogue, 5th ed.)",
+      "cite": "Hoffleit D., Warren W.H., The Bright Star Catalogue, 5th Revised Ed., 1991 (VizieR V/50)",
+      "records": 9096,
+      "added": 9011,
+      "merged": 85
+    },
+    {
+      "key": "iau",
+      "title": "IAU star names (WGSN)",
+      "cite": "IAU Working Group on Star Names, IAU Catalog of Star Names (www.pas.rochester.edu/~emamajek/WGSN/IAU-CSN.txt)",
+      "records": 451,
+      "added": 113,
+      "merged": 338
+    }
+  ]
+}

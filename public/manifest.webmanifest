@@ -1,0 +1,19 @@
+{
+  "name": "Astrocontroller",
+  "short_name": "Astro",
+  "description": "Control a DWARFLAB Dwarf 3 smart telescope: live views, capture, an agent that plans and shoots, tonight's sky.",
+  "start_url": "./",
+  "scope": "./",
+  "id": "astrocontroller",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#050608",
+  "theme_color": "#050608",
+  "categories": ["photo", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package focus;
+
+import "base.proto";
+
+message ReqManualSingleStepFocus {
+  int32 direction = 1;  // enum-typed: name absent from the shipped descriptor
+}
+
+message ReqManualContinuFocus {
+  int32 direction = 1;  // enum-typed: name absent from the shipped descriptor
+}
+
+message ReqStopManualContinuFocus {
+}
+
+message ReqNormalAutoFocus {
+  int32 mode = 1;  // enum-typed: name absent from the shipped descriptor
+  int32 center_x = 2;  // enum-typed: name absent from the shipped descriptor
+  int32 center_y = 3;  // enum-typed: name absent from the shipped descriptor
+  base.NormalizedPoint norm_point = 4;
+}
+
+message ReqAstroAutoFocus {
+  int32 mode = 1;  // enum-typed: name absent from the shipped descriptor
+}
+
+message ReqStopAstroAutoFocus {
+}
+
+message ReqManualSingleStepFocusForFactory {
+  int32 direction = 1;  // enum-typed: name absent from the shipped descriptor
+  int32 resolution_level = 2;  // enum-typed: name absent from the shipped descriptor
+}
+
+message ReqGetUserInfinityPos {
+}
+
+message ReqSetUserInfinityPos {
+  int32 pos = 1;
+}
+
+message ResUserInfinityPos {
+  int32 code = 1;
+  int32 pos = 2;
+}
+
+message ReqSfrAutoFocusForFactory {
+  int32 mode = 1;  // enum-typed: name absent from the shipped descriptor
+  optional int32 fast_spos = 2;
+  optional int32 fast_pulse = 3;
+  optional int32 fast_scope = 4;
+  optional int32 slow_pulse = 5;
+  optional int32 slow_scope = 6;
+  optional int32 cam_id = 7;
+}
+
+message ReqSetVcmCode {
+  int32 code_value = 1;
+}
