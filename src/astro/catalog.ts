@@ -1,17 +1,18 @@
 /**
  * The object database: catalog/objects.tsv, built by `npm run catalog` (src/tools/build-catalog.ts)
  * from OpenNGC (CC-BY-SA 4.0, github.com/mattiaverga/OpenNGC) and the VizieR catalogs listed in
- * catalog/sources.json: Sharpless, LBN, LDN, Barnard, vdB, Cederblad, RCW, Strasbourg-ESO PNe,
- * Green SNRs, Dias open clusters, Harris globulars, RC3 galaxies, Arp, Hickson, Abell clusters,
- * the Bright Star Catalogue and the IAU star names.
+ * catalog/sources.json: Sharpless, LBN, LDN, Barnard, vdB, Cederblad, RCW, Strasbourg-ESO and
+ * Macquarie/AAO/Strasbourg (MASH) PNe, Green SNRs, Dias open clusters, Harris globulars, RC3 and
+ * the Principal Galaxies Catalogue (PGC/LEDA), Arp, Hickson, Abell clusters, the Bright Star
+ * Catalogue and the IAU star names.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger } from '../log.js';
-import { normalizeName, isDesignation, TYPE_NAMES, TYPE_GROUPS } from './designations.js';
+import { normalizeName, isDesignation, typeName } from './designations.js';
 
-export { normalizeName, TYPE_NAMES, TYPE_GROUPS };
+export { normalizeName, typeName, typeGroup, TYPE_NAMES, TYPE_GROUPS } from './designations.js';
 
 const log = logger('catalog');
 
@@ -45,94 +46,152 @@ export interface SourceInfo {
   merged: number;
 }
 
-let objects: DsoObject[] | null = null;
-let sourceInfo: { built?: string; sources: SourceInfo[] } = { sources: [] };
-const index = new Map<string, DsoObject>();
+/** objects.tsv columns, in order. */
+const COLUMNS = 14;
+const MESSIER = /^M \d+$/;
+const CALDWELL = /^C \d+$/;
+
+interface Loaded {
+  objects: DsoObject[];
+  sources: { built?: string; sources: SourceInfo[] };
+  index: Map<string, DsoObject>;
+}
+
+let loaded: Loaded | null = null;
 /** normalised keys of each object, for substring search */
 const keysOf = new WeakMap<DsoObject, string[]>();
+/** normalised common names of each object, for the fuzzy fallback of findObject */
+const namesOf = new WeakMap<DsoObject, string[]>();
+
+const optNum = (s: string | undefined): number | undefined => {
+  if (s === undefined || s === '') return undefined;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : undefined;
+};
+
+/** One objects.tsv row, or null when it is not a usable object (no id, or no position). */
+export function parseRow(line: string): DsoObject | null {
+  const f = line.split('\t');
+  if (f.length < COLUMNS - 2 || !f[0]) return null;
+  const raHours = Number(f[2]);
+  const decDeg = Number(f[3]);
+  if (f[2] === '' || f[3] === '' || !Number.isFinite(raHours) || !Number.isFinite(decDeg) || raHours < 0 || raHours >= 24 || Math.abs(decDeg) > 90) return null;
+  // proper names before Bayer-style ones that some catalogs list as common names ("Sadr" before "gam Cyg")
+  const names = f[11] ? f[11].split('|').filter(Boolean).sort((x, y) => Number(isDesignation(x)) - Number(isDesignation(y))) : [];
+  const ids = f[12] ? f[12].split('|').filter(Boolean) : [];
+  const lead = ids.filter((a) => MESSIER.test(a) || CALDWELL.test(a));
+  return {
+    id: f[0],
+    aliases: [...lead, ...names, ...ids.filter((a) => !lead.includes(a))],
+    type: f[1],
+    typeName: typeName(f[1]),
+    raHours,
+    decDeg,
+    constellation: f[4] ?? '',
+    majorArcmin: optNum(f[5]),
+    minorArcmin: optNum(f[6]),
+    posAngle: optNum(f[7]),
+    mag: optNum(f[8]),
+    surfaceBrightness: optNum(f[9]),
+    brightClass: optNum(f[10]),
+    names,
+    sources: f[13] ? f[13].split(',').filter(Boolean) : [],
+  };
+}
 
 function loadObjects(file: string): DsoObject[] {
   const out: DsoObject[] = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+  let skipped = 0;
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     if (!line || line.startsWith('#')) continue;
-    const f = line.split('\t');
-    const n = (s: string) => (s === '' ? undefined : Number(s));
-    // proper names before Bayer-style ones that some catalogs list as common names ("Sadr" before "gam Cyg")
-    const names = f[11] ? f[11].split('|').sort((x, y) => Number(isDesignation(x)) - Number(isDesignation(y))) : [];
-    const ids = f[12] ? f[12].split('|') : [];
-    const lead = ids.filter((a) => /^[MC] \d+$/.test(a));
-    out.push({
-      id: f[0],
-      aliases: [...lead, ...names, ...ids.filter((a) => !lead.includes(a))],
-      type: f[1],
-      typeName: TYPE_NAMES[f[1]] ?? f[1],
-      raHours: Number(f[2]),
-      decDeg: Number(f[3]),
-      constellation: f[4],
-      majorArcmin: n(f[5]),
-      minorArcmin: n(f[6]),
-      posAngle: n(f[7]),
-      mag: n(f[8]),
-      surfaceBrightness: n(f[9]),
-      brightClass: n(f[10]),
-      names,
-      sources: f[13] ? f[13].split(',') : [],
-    });
+    const o = parseRow(line);
+    if (o) out.push(o);
+    else skipped++;
   }
+  if (skipped) log.warn(`${skipped} unusable rows in ${file} were skipped (no id or no position)`);
   return out;
 }
 
-export function catalog(): DsoObject[] {
-  if (objects) return objects;
-  const file = path.join(config.paths.catalog, 'objects.tsv');
-  const list = fs.existsSync(file) ? loadObjects(file) : [];
+function loadSources(file: string): Loaded['sources'] {
   try {
-    sourceInfo = JSON.parse(fs.readFileSync(path.join(config.paths.catalog, 'sources.json'), 'utf8'));
+    const j = JSON.parse(fs.readFileSync(file, 'utf8')) as { built?: unknown; sources?: unknown };
+    const sources = Array.isArray(j.sources) ? j.sources.filter((x): x is SourceInfo => !!x && typeof x === 'object' && typeof (x as SourceInfo).key === 'string' && typeof (x as SourceInfo).title === 'string') : [];
+    return { built: typeof j.built === 'string' ? j.built : undefined, sources };
   } catch {
-    /* optional */
+    return { sources: [] }; // optional
   }
-  for (const o of list) {
+}
+
+/** Popular nicknames the catalogs don't carry (catalog/nicknames.csv, user-editable): "nickname;catalog id" per line. */
+function addNicknames(file: string, index: Map<string, DsoObject>): void {
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue;
+    const [nick, id] = line.split(';').map((x) => x.trim());
+    const key = nick ? normalizeName(nick) : '';
+    const target = key && id ? index.get(normalizeName(id)) : undefined;
+    if (!target) continue;
+    if (!target.aliases.includes(nick)) {
+      target.aliases.push(nick);
+      target.names.push(nick);
+      keysOf.get(target)?.push(key);
+      namesOf.get(target)?.push(key);
+    }
+    if (!index.has(key)) index.set(key, target);
+  }
+}
+
+/** Load everything into locals first: a failure part-way leaves nothing half-built behind. */
+function load(): Loaded {
+  const file = path.join(config.paths.catalog, 'objects.tsv');
+  const objects = fs.existsSync(file) ? loadObjects(file) : [];
+  const sources = loadSources(path.join(config.paths.catalog, 'sources.json'));
+  const index = new Map<string, DsoObject>();
+  for (const o of objects) {
     const keys = [o.id, ...o.aliases].map(normalizeName);
     keysOf.set(o, keys);
+    namesOf.set(o, o.names.map(normalizeName));
     for (const key of keys) if (key && !index.has(key)) index.set(key, o);
   }
-  // Popular nicknames the catalogs don't carry (user-editable).
-  const nickFile = path.join(config.paths.catalog, 'nicknames.csv');
-  if (fs.existsSync(nickFile)) {
-    for (const line of fs.readFileSync(nickFile, 'utf8').split(/\r?\n/)) {
-      if (!line || line.startsWith('#')) continue;
-      const [nick, id] = line.split(';').map((s) => s.trim());
-      const target = id ? index.get(normalizeName(id)) : undefined;
-      if (!target) continue;
-      if (!target.aliases.includes(nick)) {
-        target.aliases.push(nick);
-        target.names.push(nick);
-        keysOf.get(target)!.push(normalizeName(nick));
-      }
-      const key = normalizeName(nick);
-      if (!index.has(key)) index.set(key, target);
-    }
-  }
-  objects = list;
-  if (list.length === 0) log.warn(`no object database at ${file} — run "npm run catalog"`);
-  else log.info(`loaded ${list.length} objects from ${sourceInfo.sources.length || '?'} catalogs`);
-  return list;
+  addNicknames(path.join(config.paths.catalog, 'nicknames.csv'), index);
+  if (objects.length === 0) log.warn(`no object database at ${file} — run "npm run catalog"`);
+  else log.info(`loaded ${objects.length} objects from ${sources.sources.length || '?'} catalogs`);
+  return { objects, sources, index };
 }
 
-export function catalogSources() {
-  catalog();
-  return sourceInfo;
+function db(): Loaded {
+  loaded ??= load();
+  return loaded;
 }
+
+export function catalog(): DsoObject[] {
+  return db().objects;
+}
+
+/** Drop the loaded catalog (tests, or after `npm run catalog`): the next call reloads it. */
+export function reloadCatalog(): void {
+  loaded = null;
+}
+
+export function catalogSources(): { built?: string; sources: SourceInfo[] } {
+  return db().sources;
+}
+
+/** Shorter than this, a fuzzy query matches too much to mean anything. */
+const FUZZY_MIN = 3;
 
 export function findObject(name: string): DsoObject | null {
-  catalog();
+  const { index, objects } = db();
   const key = normalizeName(name);
   const hit = index.get(key);
   if (hit) return hit;
   // Fuzzy: substring match on common names.
   const q = key.replace(/ nebula| galaxy| cluster/g, '').trim();
-  if (q.length < 3) return null;
-  return objects!.find((o) => o.names.some((a) => normalizeName(a).includes(q))) ?? null;
+  if (q.length < FUZZY_MIN) return null;
+  // the most prominent of the matches, not whichever the file happens to list first
+  let best: DsoObject | null = null;
+  for (const o of objects) if (namesOf.get(o)?.some((a) => a.includes(q)) && (!best || prominence(o) > prominence(best))) best = o;
+  return best;
 }
 
 /** How well a query matches an object: 0 exact designation/name, 1 prefix, 2 substring; null = no match. */
@@ -147,12 +206,12 @@ export function matchRank(o: DsoObject, q: string): number | null {
 }
 
 export function searchObjects(query: string, limit = 10): DsoObject[] {
-  catalog();
+  const { objects } = db();
   const q = normalizeName(query);
-  if (!q) return [];
+  if (!q || limit < 1) return [];
   const exact = findObject(query);
   const ranked: [DsoObject, number][] = [];
-  for (const o of objects!) {
+  for (const o of objects) {
     if (o === exact) continue;
     const r = matchRank(o, q);
     if (r !== null) ranked.push([o, r]);
@@ -171,8 +230,8 @@ export function prominence(o: DsoObject): number {
 
 function computeProminence(o: DsoObject): number {
   let p = 0;
-  if (o.aliases.some((a) => /^M \d+$/.test(a))) p += 40;
-  else if (o.aliases.some((a) => /^C \d+$/.test(a))) p += 30;
+  if (o.aliases.some((a) => MESSIER.test(a))) p += 40;
+  else if (o.aliases.some((a) => CALDWELL.test(a))) p += 30;
   if (o.names.length) p += 15;
   if (o.mag !== undefined) p += Math.max(0, 15 - o.mag);
   else if (o.brightClass) p += 8 - 2 * o.brightClass;
@@ -182,7 +241,7 @@ function computeProminence(o: DsoObject): number {
 
 /** The name people (and the DWARF app) use: Messier, then Caldwell, then a common name, then the id. */
 export function displayName(o: DsoObject): string {
-  return o.aliases.find((a) => /^M \d+$/.test(a)) ?? o.aliases.find((a) => /^C \d+$/.test(a)) ?? o.names[0] ?? o.id;
+  return o.aliases.find((a) => MESSIER.test(a)) ?? o.aliases.find((a) => CALDWELL.test(a)) ?? o.names[0] ?? o.id;
 }
 
 /**
@@ -192,7 +251,7 @@ export function displayName(o: DsoObject): string {
  */
 export function gotoLabel(o: DsoObject): string {
   if ((o.type === '*' || o.type === '**') && o.names[0]) return o.names[0]; // "Vega", not "HR 7001"
-  return o.aliases.find((a) => /^M \d+$/.test(a)) ?? o.aliases.find((a) => /^C \d+$/.test(a)) ?? (isDesignation(o.id) ? o.id : o.aliases.find(isDesignation) ?? o.id);
+  return o.aliases.find((a) => MESSIER.test(a)) ?? o.aliases.find((a) => CALDWELL.test(a)) ?? (isDesignation(o.id) ? o.id : o.aliases.find(isDesignation) ?? o.id);
 }
 
 export function describe(o: DsoObject): string {

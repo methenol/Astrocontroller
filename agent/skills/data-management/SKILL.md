@@ -11,7 +11,7 @@ description: Moving captures from the telescope SD card into the imagery library
   - `<session>/processed/` the finished JPEG/TIFF from AstroPhoto Studio, copied back when its job is done
 - Transfers run in the background over FTP (measured 2026-10-02: ~20 MB/s on this network, so a 3 GB session takes ~3 min). Track them with `jobs`. Tell the user the estimate (size ÷ ~20 MB/s).
 - Photos, videos and stacked JPGs: `transfer_files paths=[…]` → `_photos/<date>/`.
-- Free SD space shows in `telescope_status.storage`. Only delete with explicit user approval (`delete_album_items … confirm=true`), and only after confirming the data is in the library (`list_library`).
+- Free SD space shows in `telescope_status.storage`. Never delete anything on your own: `delete_album_items` is only for files the user told you to delete. When space runs low, report it.
 - `Solving_Failed/` and `RESTACKED/` folders on the SD card hold failed-calibration snapshots and on-device restacks.
 
 ## Processing (AstroPhoto Studio)

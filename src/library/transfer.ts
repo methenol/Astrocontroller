@@ -1,258 +1,216 @@
-/**
- * Background transfers from the telescope SD card into the imagery library.
- *
- * Library layout: a mirror of the telescope's own Astronomy folder, which is what AstroPhoto
- * Studio reads (it finds CALI_FRAME beside the session folders by itself):
- *   <library>/DWARF_RAW_<TELE|WIDE>_<target>_EXP_…/
- *       *.fits                        raw subframes (failed_*.fits = subs the scope's stacker rejected)
- *       stacked.jpg, stacked-16_*.png/.fits, img_reference.png, shotsInfo.json, Thumbnail/ …
- *       session.json                  metadata written by us (target, exposure, gain, transfer time)
- *   <library>/CALI_FRAME/<dark|flat|bias>/<cam_0|cam_1>/*.fits     device calibration masters
- *   <library>/_photos/<YYYY-MM-DD>/…                               daytime photos/videos
- */
+/** Background transfers from the telescope SD card into the imagery library (layout: sessions.ts). */
 import fs from 'node:fs';
 import path from 'node:path';
-import { EventEmitter } from 'node:events';
 import { config } from '../config.js';
-import { logger, errMsg } from '../log.js';
-import { listDir, downloadFiles, downloadOne, type FtpEntry } from '../dwarf/ftp.js';
+import { errMsg } from '../log.js';
+import { downloadFiles, downloadOne, type FtpEntry } from '../dwarf/ftp.js';
+import { deleteMedia } from '../dwarf/http.js';
 import { enqueueProcessing } from '../processing/queue.js';
+import { startJob, type FailedFile, type Job } from './jobs.js';
+import { isTransferred, listDeviceSessions, parseSessionFolder, sessionLocalDir, librarySessionsFor, SESSION_META, type DeviceSession } from './sessions.js';
+import { writeFileAtomic } from '../util/fs.js';
 
-const log = logger('library');
+export { jobBus, listJobs, getJob, cancelJob, cancelActiveJobs, type Job } from './jobs.js';
+export { parseSessionFolder, listDeviceSessions, sessionLocalDir, librarySessionsFor, listLibrary, isTransferred, type DeviceSession } from './sessions.js';
 
-export interface Job {
-  id: string;
-  kind: string;
-  description: string;
-  /** partial: finished, but some files could not be copied (listed in result.failed and error) */
-  status: 'queued' | 'running' | 'done' | 'partial' | 'failed' | 'cancelled';
-  progress?: { filesDone: number; filesTotal: number; bytesDone: number; bytesTotal: number; file?: string };
-  result?: unknown;
-  error?: string;
-  startedAt: number;
-  finishedAt?: number;
-  /** who asked for it: the agent is told when its own jobs end */
-  origin?: 'agent' | 'ui';
-}
+const CALIBRATION_KINDS = ['dark', 'flat', 'bias'] as const;
 
-export const jobBus = new EventEmitter();
-const jobs = new Map<string, Job & { abort: AbortController }>();
-let queue: Promise<void> = Promise.resolve();
+const isFits = (name: string) => name.toLowerCase().endsWith('.fits');
+/** stacked-16_*.fits is the scope's own stack; failed_*.fits (kept) are subs its stacker rejected. */
+const isSub = (e: FtpEntry) => isFits(e.name) && !e.name.startsWith('stacked');
 
-export function listJobs(): Job[] {
-  return [...jobs.values()].map(({ abort: _a, ...j }) => j).sort((a, b) => b.startedAt - a.startedAt).slice(0, 30);
-}
-
-export function getJob(id: string): Job | undefined {
-  const j = jobs.get(id);
-  if (!j) return undefined;
-  const { abort: _a, ...rest } = j;
-  return rest;
-}
-
-export function cancelJob(id: string): boolean {
-  const j = jobs.get(id);
-  if (!j || (j.status !== 'running' && j.status !== 'queued')) return false;
-  j.abort.abort();
-  j.status = 'cancelled';
-  jobBus.emit('job', getJob(id));
-  return true;
-}
-
-/** Cancel every queued or running job (the user released the telescope). */
-export function cancelActiveJobs(): number {
-  let n = 0;
-  for (const j of jobs.values()) if (cancelJob(j.id)) n++;
-  return n;
-}
-
-function startJob(kind: string, description: string, run: (job: Job, signal: AbortSignal) => Promise<unknown>, origin?: Job['origin']): Job {
-  const id = `job_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  const job: Job & { abort: AbortController } = { id, kind, description, status: 'queued', startedAt: Date.now(), origin, abort: new AbortController() };
-  jobs.set(id, job);
-  jobBus.emit('job', getJob(id));
-  // FTP on the telescope is single-threaded in practice: run jobs one at a time.
-  queue = queue.then(async () => {
-    if (job.abort.signal.aborted) return;
-    job.status = 'running';
-    jobBus.emit('job', getJob(id));
-    try {
-      job.result = await run(job, job.abort.signal);
-      const failed = (job.result as { failed?: Array<{ remote: string; error: string }> } | null)?.failed ?? [];
-      if (failed.length) {
-        job.status = 'partial';
-        job.error = `${failed.length} file(s) could not be copied after 3 attempts each: ${failed.slice(0, 5).map((f) => `${f.remote.split('/').pop()} (${f.error})`).join('; ')}${failed.length > 5 ? '; …' : ''}. Run the same transfer again to retry them (copied files are skipped).`;
-        log.warn(`${description}: partial — ${job.error}`);
-      } else {
-        job.status = 'done';
-        log.info(`${description}: done`);
-      }
-    } catch (err) {
-      job.status = job.abort.signal.aborted ? 'cancelled' : 'failed';
-      job.error = errMsg(err);
-      log.warn(`${description}: ${job.error}`);
-    }
-    job.finishedAt = Date.now();
-    jobBus.emit('job', getJob(id));
-  });
-  return getJob(id)!;
-}
-
-// ---------------------------------------------------------------------------
-// Device sessions
-// ---------------------------------------------------------------------------
-
-export interface DeviceSession {
-  folder: string;
-  path: string;
-  camera: 'tele' | 'wide';
-  target: string;
-  exposureS?: number;
-  gain?: number;
-  startedAt?: string;
-}
-
-/** DWARF_RAW_TELE_NGC 281_EXP_15_GAIN_60_2026-10-01-22-20-58-268 */
-export function parseSessionFolder(folder: string): DeviceSession | null {
-  const m = folder.match(/^DWARF_RAW_(TELE|WIDE)_(.+?)_EXP_([\d.]+)_GAIN_(\d+)_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})/);
-  if (!m) return null;
-  return {
-    folder,
-    path: `/Astronomy/${folder}`,
-    camera: m[1] === 'WIDE' ? 'wide' : 'tele',
-    target: m[2],
-    exposureS: Number(m[3]),
-    gain: Number(m[4]),
-    startedAt: `${m[5]}T${m[6]}:${m[7]}:${m[8]}`,
-  };
-}
-
-export async function listDeviceSessions(withCounts = true) {
-  const dirs = (await listDir('/Astronomy')).filter((e) => e.isDir);
-  const sessions: Array<DeviceSession & { fitsCount?: number; sizeMB?: number; transferred?: boolean }> = [];
-  for (const d of dirs) {
-    const s = parseSessionFolder(d.name);
-    if (!s) continue;
-    const entry: (typeof sessions)[number] = { ...s, transferred: fs.existsSync(sessionLocalDir(s)) };
-    if (withCounts) {
-      const files = await listDir(s.path).catch(() => [] as FtpEntry[]);
-      const fits = files.filter((f) => f.name.toLowerCase().endsWith('.fits'));
-      entry.fitsCount = fits.length;
-      entry.sizeMB = Math.round(files.reduce((a, f) => a + f.size, 0) / 1e6);
-    }
-    sessions.push(entry);
+/** A session named by folder (or a path ending in one), or the newest on the card for "latest". */
+async function resolveSession(folderOrLatest: string): Promise<DeviceSession> {
+  if (folderOrLatest === 'latest') {
+    const { sessions } = await listDeviceSessions(false);
+    if (!sessions[0]) throw new Error('no astronomy sessions on the telescope');
+    return sessions[0];
   }
-  sessions.sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
-  const other = dirs.filter((d) => !parseSessionFolder(d.name)).map((d) => d.name);
-  return { sessions, otherFolders: other };
+  const folder = folderOrLatest.replace(/\/+$/, '').replace(/^.*\/(?=DWARF_RAW_)/, '');
+  const s = parseSessionFolder(folder);
+  if (!s) throw new Error(`not a DWARF session folder: ${folderOrLatest}`);
+  return s;
 }
 
-export function sessionLocalDir(s: DeviceSession): string {
-  return path.join(config.paths.library, s.folder);
+function readJson(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
-/** Library sessions of one target (the target name in the folder), optionally one camera. */
-export function librarySessionsFor(target: string, camera?: 'tele' | 'wide'): string[] {
-  const root = config.paths.library;
-  if (!fs.existsSync(root)) return [];
-  return fs
-    .readdirSync(root)
-    .map((d) => parseSessionFolder(d))
-    .filter((s): s is DeviceSession => !!s && s.target === target && (!camera || s.camera === camera) && fs.statSync(path.join(root, s.folder)).isDirectory())
-    .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''))
-    .map((s) => s.folder);
+export interface TransferOptions {
+  includeCalibration: boolean;
+  includeSubframes: boolean;
+  process?: boolean;
+  profile?: string;
+  pool?: boolean;
+  origin?: Job['origin'];
 }
 
-export function transferSession(folderOrLatest: string, opts: { includeCalibration: boolean; includeSubframes: boolean; process?: boolean; profile?: string; pool?: boolean; origin?: Job['origin'] }): Promise<Job> {
-  return (async () => {
-    let session: DeviceSession | null;
-    if (folderOrLatest === 'latest') {
-      const { sessions } = await listDeviceSessions(false);
-      session = sessions[0] ?? null;
-      if (!session) throw new Error('no astronomy sessions on the telescope');
-    } else {
-      const folder = folderOrLatest.replace(/^.*\/(?=DWARF_RAW_)/, '').replace(/\/$/, '');
-      session = parseSessionFolder(folder);
-      if (!session) throw new Error(`not a DWARF session folder: ${folderOrLatest}`);
-    }
-    const s = session;
-    const dest = sessionLocalDir(s);
-    return startJob('transfer_session', `transfer ${s.target} (${s.folder})`, async (job, signal) => {
+/** The session's light frames among the files that failed (not its stacked-16 FITS, nor calibration masters). */
+export function missingLights(s: DeviceSession, failed: FailedFile[]): FailedFile[] {
+  return failed.filter((f) => f.remote.startsWith(`${s.path}/`) && isSub({ name: path.posix.basename(f.remote), size: 0, isDir: false }));
+}
+
+/**
+ * Processing in AstroPhoto Studio, queued once every light frame is here (it waits in the local
+ * outbox while the server is unreachable); a calibration master that failed to copy does not block it.
+ */
+function queueProcessing(s: DeviceSession, failed: FailedFile[], opts: TransferOptions): unknown {
+  if (!opts.includeSubframes || !(opts.process ?? config.studio.autoProcess) || !config.studio.url) return undefined;
+  const lightsMissing = missingLights(s, failed);
+  if (lightsMissing.length) return `not queued: ${lightsMissing.length} light frame(s) are still missing; run the transfer again`;
+  // pool: this night together with every earlier session of the target in the library
+  const pooled = (opts.pool ?? config.studio.poolSessions) ? librarySessionsFor(s.target, s.camera) : [];
+  const sessions = pooled.includes(s.folder) ? pooled : [...pooled, s.folder];
+  // the files are here whatever happens next: a refusal to queue is reported, it does not fail the transfer
+  try {
+    return enqueueProcessing({ sessions, target: s.target, profile: opts.profile, origin: opts.origin === 'ui' ? 'ui-transfer' : 'transfer' });
+  } catch (err) {
+    return `not queued: ${errMsg(err)}`;
+  }
+}
+
+/** Copy one session (and optionally the camera's calibration masters) into the library. */
+export async function transferSession(folderOrLatest: string, opts: TransferOptions): Promise<Job> {
+  const s = await resolveSession(folderOrLatest);
+  const dest = sessionLocalDir(s);
+  return startJob(
+    'transfer_session',
+    `transfer ${s.target} (${s.folder})`,
+    async (job) => {
       fs.mkdirSync(dest, { recursive: true });
-      const fits = (e: FtpEntry) => e.name.toLowerCase().endsWith('.fits');
-      // stacked-16_*.fits is the scope's own stack, failed_*.fits the subs its stacker rejected
-      // (kept: AstroPhoto Studio grades them and can use their clean parts).
-      const isSub = (e: FtpEntry) => fits(e) && !e.name.startsWith('stacked');
-      const plan: Array<{ remoteDir: string; localDir: string; filter?: (e: FtpEntry) => boolean }> = [
+      const plan: Array<{ remoteDir: string; localDir: string; filter?: (e: FtpEntry) => boolean; optional?: boolean }> = [
         { remoteDir: s.path, localDir: dest, filter: (e) => opts.includeSubframes || !isSub(e) },
       ];
       if (opts.includeCalibration) {
         const cam = s.camera === 'wide' ? 'cam_1' : 'cam_0';
-        for (const kind of ['dark', 'flat', 'bias']) {
-          plan.push({ remoteDir: `/Astronomy/CALI_FRAME/${kind}/${cam}`, localDir: path.join(config.paths.library, 'CALI_FRAME', kind, cam) });
+        for (const kind of CALIBRATION_KINDS) {
+          // a camera without masters of one kind is normal
+          plan.push({ remoteDir: `/Astronomy/CALI_FRAME/${kind}/${cam}`, localDir: path.join(config.paths.library, 'CALI_FRAME', kind, cam), optional: true });
         }
       }
-      const res = await downloadFiles(plan, (p) => {
-        job.progress = p;
-        jobBus.emit('job', getJob(job.id));
-      }, signal);
-      let shots: unknown = null;
-      try {
-        shots = JSON.parse(fs.readFileSync(path.join(dest, 'shotsInfo.json'), 'utf8'));
-      } catch {
-        /* optional */
-      }
-      fs.writeFileSync(
-        path.join(dest, 'session.json'),
-        JSON.stringify({ ...s, shotsInfo: shots, transferredAt: new Date().toISOString(), calibrationDir: opts.includeCalibration ? path.join(config.paths.library, 'CALI_FRAME') : null }, null, 2),
+      const res = await downloadFiles(plan, (p) => job.progress(p), job.signal);
+      writeFileAtomic(
+        path.join(dest, SESSION_META),
+        JSON.stringify(
+          {
+            ...s,
+            shotsInfo: readJson(path.join(dest, 'shotsInfo.json')),
+            transferredAt: new Date().toISOString(),
+            // files that could not be copied: a session with any is not complete in the library
+            failedFiles: res.failed.length,
+            calibrationDir: opts.includeCalibration ? path.join(config.paths.library, 'CALI_FRAME') : null,
+          },
+          null,
+          2,
+        ),
       );
-      // Queue processing in AstroPhoto Studio (it waits in the local outbox while the server is unreachable)
-      // once every light frame is here; a calibration master that failed to copy does not block it.
-      let processing: unknown;
-      const lightsMissing = res.failed.filter((f) => f.remote.startsWith(s.path) && /\.fits$/i.test(f.remote));
-      if (lightsMissing.length) {
-        processing = `not queued: ${lightsMissing.length} light frame(s) are still missing; run the transfer again`;
-      } else if (opts.includeSubframes && (opts.process ?? config.studio.autoProcess) && config.studio.url) {
-        // pool: this night together with every earlier session of the target in the library
-        const sessions = opts.pool ?? config.studio.poolSessions ? librarySessionsFor(s.target, s.camera) : [s.folder];
-        processing = enqueueProcessing({ sessions: sessions.includes(s.folder) ? sessions : [...sessions, s.folder], target: s.target, profile: opts.profile, origin: opts.origin === 'ui' ? 'ui-transfer' : 'transfer' });
-      }
-      return { destination: dest, ...res, processing };
-    }, opts.origin);
-  })();
+      return { destination: dest, ...res, processing: queueProcessing(s, res.failed, opts) };
+    },
+    opts.origin,
+    // the same session with the same options is one job, however often it is asked for
+    `transfer_session:${s.folder}:${opts.includeSubframes}:${opts.includeCalibration}:${opts.process ?? ''}`,
+  );
 }
 
-/** Copy individual album files (photos/videos/stacked images) into the library. */
-export function transferFiles(devicePaths: string[], origin?: Job['origin']): Job {
-  return startJob('transfer_files', `transfer ${devicePaths.length} file(s)`, async (job, signal) => {
-    const out: string[] = [];
-    for (const [i, p] of devicePaths.entries()) {
-      if (signal.aborted) throw new Error('cancelled');
-      const rel = p.replace(/^\/?DWARF3\//, '');
-      const day = new Date().toISOString().slice(0, 10);
-      const local = rel.startsWith('Astronomy/') ? path.join(config.paths.library, rel) : path.join(config.paths.library, '_photos', day, path.basename(rel));
-      await downloadOne(p, local);
-      out.push(local);
-      job.progress = { filesDone: i + 1, filesTotal: devicePaths.length, bytesDone: 0, bytesTotal: 0, file: p };
-      jobBus.emit('job', getJob(job.id));
+export interface SessionDeleteOutcome {
+  folder: string;
+  deleted: boolean;
+  /** why it was not deleted */
+  note?: string;
+}
+
+/**
+ * Delete sessions from the telescope's SD card through the album API — the device's own way, which
+ * wipes the whole session package (frames, stack, thumbnail) together with its album entry.
+ * A session that is not complete in the library is refused unless `force`: deleting it would lose
+ * data that was never copied. One bad session does not stop the others.
+ */
+export async function deleteDeviceSessions(folders: string[], opts: { force?: boolean } = {}): Promise<SessionDeleteOutcome[]> {
+  const out: SessionDeleteOutcome[] = [];
+  for (const f of folders) {
+    let s: DeviceSession;
+    try {
+      s = await resolveSession(f);
+    } catch (err) {
+      out.push({ folder: f, deleted: false, note: errMsg(err) });
+      continue;
     }
-    return { files: out };
-  }, origin);
+    if (!opts.force && !isTransferred(s)) {
+      out.push({ folder: s.folder, deleted: false, note: 'not fully in the library: transfer it first, or force to delete it anyway' });
+      continue;
+    }
+    try {
+      const [r] = await deleteMedia([{ filePath: `/DWARF3${s.path}`, mediaType: 4 }]);
+      out.push({ folder: s.folder, deleted: r.deleted, ...(r.note ? { note: r.note } : {}) });
+    } catch (err) {
+      out.push({ folder: s.folder, deleted: false, note: errMsg(err) });
+    }
+  }
+  return out;
 }
 
-/** Summary of what's in the library: sessions (DWARF_RAW_… folders) grouped by target. */
-export function listLibrary(): Array<{ target: string; sessions: Array<{ name: string; camera: string; lights: number; rejected: number; startedAt?: string }> }> {
-  const root = config.paths.library;
-  if (!fs.existsSync(root)) return [];
-  const byTarget = new Map<string, Array<{ name: string; camera: string; lights: number; rejected: number; startedAt?: string }>>();
-  for (const d of fs.readdirSync(root, { withFileTypes: true })) {
-    const s = d.isDirectory() ? parseSessionFolder(d.name) : null;
-    if (!s) continue;
-    const files = fs.readdirSync(path.join(root, d.name)).filter((f) => f.toLowerCase().endsWith('.fits') && !f.startsWith('stacked'));
-    const rejected = files.filter((f) => f.startsWith('failed_')).length;
-    const list = byTarget.get(s.target) ?? [];
-    list.push({ name: d.name, camera: s.camera, lights: files.length - rejected, rejected, startedAt: s.startedAt });
-    byTarget.set(s.target, list);
-  }
-  return [...byTarget.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([target, sessions]) => ({ target, sessions: sessions.sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? '')) }));
+/** Today's date (YYYY-MM-DD) where the observer is: an evening's photos belong to that evening, not to the next UTC day. */
+function localDay(at = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: config.observer.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
+}
+
+/** "a.jpg", "a.jpg" → "a.jpg", "a-2.jpg": files of the same name in one request must not overwrite each other. */
+export function distinctPaths(locals: string[]): string[] {
+  const seen = new Set<string>();
+  return locals.map((l) => {
+    let out = l;
+    const ext = path.extname(l);
+    for (let n = 2; seen.has(out); n++) out = `${l.slice(0, l.length - ext.length)}-${n}${ext}`;
+    seen.add(out);
+    return out;
+  });
+}
+
+/**
+ * Where an album file lands: Astronomy/… mirrors the card, anything else goes to _photos/<today>.
+ * Throws for a path that would leave the library.
+ */
+export function albumLocalPath(devicePath: string, day = localDay()): string {
+  const rel = devicePath.replace(/\\/g, '/').replace(/^\/?DWARF3\//, '').replace(/^\/+/, '');
+  const parts = rel.split('/');
+  if (!rel || parts.some((p) => p === '..' || p === '.' || p === '')) throw new Error(`bad device path ${devicePath}`);
+  const root = path.resolve(config.paths.library);
+  const local = parts[0] === 'Astronomy' ? path.resolve(root, ...parts) : path.resolve(root, '_photos', day, parts[parts.length - 1]);
+  const inside = path.relative(root, local);
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new Error(`bad device path ${devicePath}`);
+  return local;
+}
+
+/** Copy individual album files (photos/videos/stacked images) into the library; one bad file does not stop the rest. */
+export function transferFiles(devicePaths: string[], origin?: Job['origin']): Job {
+  if (!devicePaths.length) throw new Error('no files to transfer');
+  // refuse bad paths before queueing anything
+  const remotes = [...new Set(devicePaths)];
+  const locals = distinctPaths(remotes.map((p) => albumLocalPath(p)));
+  const plan = remotes.map((remote, i) => ({ remote, local: locals[i] }));
+  return startJob(
+    'transfer_files',
+    `transfer ${plan.length} file(s)`,
+    async (job) => {
+      const files: string[] = [];
+      const failed: FailedFile[] = [];
+      for (const [i, f] of plan.entries()) {
+        if (job.signal.aborted) break;
+        try {
+          await downloadOne(f.remote, f.local, job.signal);
+          files.push(f.local);
+        } catch (err) {
+          if (job.signal.aborted) break;
+          failed.push({ remote: f.remote, error: errMsg(err) });
+        }
+        job.progress({ filesDone: i + 1, filesTotal: plan.length, bytesDone: 0, bytesTotal: 0, file: f.remote });
+      }
+      return { files, failed };
+    },
+    origin,
+  );
 }

@@ -10,7 +10,7 @@ Use only when the session log or the user gives a reason. Examples:
 - A firmware update changed behaviour.
 - The user wants to try a gain other than 60.
 
-Always ask the user first: experiments cost a night of normal imaging and may need an ND session for darks.
+Experiments cost a night of normal imaging and may need an ND session for darks, so run one only when the reason above is clear, and report it.
 
 ## Design
 1. **One question, one candidate vs the incumbent.** No grids (not 15/20/30/45/60 at once, not gains 40–80).
@@ -21,7 +21,7 @@ Always ask the user first: experiments cost a night of normal imaging and may ne
 4. Each candidate's captures are separate sessions (their own DWARF_RAW folders). Process each candidate's sessions as one pool with the same profile: `process_session sessions=[…]` per candidate, both with `profile=default` (the server's best).
 
 ## Judging
-Ask the user to compare the two results in AstroPhoto Studio, or read its per-frame table: `GET <ASTROPHOTO_URL>/api/frames?folder=<server path>` (accepted count, fwhm, elongation, transparency) via bash/curl. Compare:
+Compare the two results yourself from AstroPhoto Studio's per-frame table: `GET <ASTROPHOTO_URL>/api/frames?folder=<server path>` (accepted count, fwhm, elongation, transparency) via bash/curl. Compare:
 - accepted integration per hour of wall-clock time,
 - median FWHM and elongation of accepted subs,
 - faint-structure visibility and background noise in the final image, at the same output scale,

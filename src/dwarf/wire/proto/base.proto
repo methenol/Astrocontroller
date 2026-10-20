@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package base;
+
+message WsPacket {
+  int32 major_version = 1;  // enum-typed: name absent from the shipped descriptor
+  int32 minor_version = 2;  // enum-typed: name absent from the shipped descriptor
+  int32 device_id = 3;  // enum-typed: name absent from the shipped descriptor
+  int32 module_id = 4;  // enum-typed: name absent from the shipped descriptor
+  int32 cmd = 5;  // enum-typed: name absent from the shipped descriptor
+  int32 type = 6;  // enum-typed: name absent from the shipped descriptor
+  bytes data = 7;
+  string client_id = 8;
+}
+
+message ComResponse {
+  int32 code = 1;
+}
+
+message ComResWithInt {
+  int32 value = 1;
+  int32 code = 2;
+}
+
+message ComResWithDouble {
+  double value = 1;
+  int32 code = 2;
+}
+
+message ComResWithString {
+  string str = 1;
+  int32 code = 2;
+}
+
+message CommonParam {
+  bool hasAuto = 1;
+  int32 auto_mode = 2;
+  int32 id = 3;
+  int32 mode_index = 4;
+  int32 index = 5;
+  double continue_value = 6;
+}
+
+message NormalizedPoint {
+  double x = 1;
+  double y = 2;
+}
+
+message NormalizedRect {
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+}
+
+enum WsMajorVersion {
+  WS_MAJOR_VERSION_UNKNOWN = 0;
+  WS_MAJOR_VERSION_NUMBER = 2;
+}
+
+enum WsMinorVersion {
+  WS_MINOR_VERSION_UNKNOWN = 0;
+  WS_MINOR_VERSION_NUMBER = 7;
+}

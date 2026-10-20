@@ -16,7 +16,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="style.css">
   <script src="vendor/marked.js" defer></script>
-  <script src="app.js" defer></script>
+  <script type="module" src="js/main.js"></script>
 </head>
 <body>
   <!-- icon sprite: one place, referenced with <use> -->
@@ -258,10 +258,12 @@
     <section class="panel" id="panel-tonight" role="tabpanel" aria-label="Tonight">
       <div class="card" id="conditions">loading…</div>
       <div class="card" id="weather">weather loading…</div>
+      <div class="card" id="horizon">obstruction map loading…</div>
       <div class="row-head">
         <h3>Best targets tonight</h3>
         <span class="spacer"></span>
         <select id="sel-plan-type" aria-label="Filter targets by type"><option value="">all types</option><option value="galaxy">galaxies</option><option value="emission">emission nebulae</option><option value="nebula">nebulae</option><option value="cluster">clusters</option><option value="planetary">planetary</option></select>
+        <select id="sel-plan-fov" aria-label="Minimum size as a percent of the tele frame width" title="Only targets that fill at least this much of the tele frame width"><option value="">any size</option><option value="10">≥10% of frame</option><option value="25">≥25% of frame</option><option value="50">≥50% of frame</option><option value="75">≥75% of frame</option><option value="100">fills the frame</option></select>
       </div>
       <div id="plan">–</div>
     </section>
@@ -288,6 +290,7 @@
             <label>mag ≤ <input type="number" id="db-maxmag" step="0.5" min="-2" max="20" inputmode="decimal" placeholder="any"></label>
             <label>size ≥ <input type="number" id="db-minsize" step="1" min="0" inputmode="decimal" placeholder="0">′</label>
             <label>size ≤ <input type="number" id="db-maxsize" step="1" min="0" inputmode="decimal" placeholder="any">′</label>
+            <label title="Only objects whose major axis spans at least this percent of the tele camera's frame width">frame ≥ <input type="number" id="db-minfov" step="5" min="0" max="100" inputmode="decimal" placeholder="any">% tele</label>
             <label>above <input type="number" id="db-minalt" step="5" min="0" max="85" inputmode="numeric" placeholder="–">°</label>
             <label class="db-check"><input type="checkbox" id="db-named"> named only</label>
             <button type="button" class="ghost" id="db-reset">Reset</button>
@@ -323,7 +326,7 @@
         <details id="proc-queue-box"><summary class="muted small">Server queue</summary><div id="proc-queue" class="muted small">–</div></details>
       </div>
       <div class="card">
-        <div class="row-head"><h3>Sessions on the telescope</h3><span class="spacer"></span><button class="ghost" id="btn-sessions">Refresh</button></div>
+        <div class="row-head"><h3>Sessions on the telescope</h3><span class="spacer"></span><button class="ghost warn" id="btn-sessions-del" disabled title="Delete every session already transferred to the library from the SD card">Delete transferred</button><button class="ghost" id="btn-sessions">Refresh</button></div>
         <div id="sessions" class="muted">press Refresh</div>
       </div>
       <div class="card"><h3>Library <span class="muted small" id="lib-root"></span></h3><div id="library" class="muted">–</div></div>

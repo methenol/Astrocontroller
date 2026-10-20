@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package itips;
+
+message ReqITipsGet {
+  int32 mode = 1;
+}
+
+message ResITipsGet {
+  int32 mode = 1;
+  string itips_code = 2;
+  int32 code = 3;
+}
+
+message CommonITips {
+  int32 itips_status = 1;
+  string itips_code = 2;
+}
+
+message CommonStepITips {
+  int32 step_id = 1;
+  int32 step_status = 2;
+  repeated CommonITips step_itips = 3;
+}
+
+message ResITipsList {
+  repeated CommonStepITips itips_list = 1;
+  int32 mode = 2;
+  int32 code = 3;
+}

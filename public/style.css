@@ -382,6 +382,11 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .plan-table .sky.ok { color: var(--ok); }
 .plan-table .sky.warn { color: var(--warn); }
 .plan-table .sky.bad { color: var(--err); }
+.plan-hero { margin: 0 0 6px; font-size: 13px; }
+/* A row the sky or the glass cannot bring up: still listed, still explained, visibly set aside. */
+.plan-table tr.gated td { opacity: 0.6; }
+.plan-table tr.gated td b { font-weight: 500; }
+.plan-table .badge { margin-left: 4px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; min-width: 0; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 11.5px; min-width: 0; }
 .tile img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; display: block; background: #000; border: none; border-radius: 0; max-height: none; }
@@ -405,6 +410,18 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .wx-h.fair .sc { color: var(--warn); }
 .wx-h.poor .sc { color: var(--err); }
 .wx-verdict { font-size: 13px; }
+
+/* ---------- Tonight: site obstruction map ---------- */
+.hz-buttons { margin: 8px 0 6px; }
+.hz-buttons button { flex: 0 1 auto; }
+.hz-error { color: var(--err); }
+.hz-plot { display: block; width: 100%; height: auto; margin-top: 8px; }
+.hz-fill { fill: #3a2a1a; stroke: var(--warn); stroke-width: 1.2; }
+.hz-unknown { fill: #1a2436; opacity: .55; }
+.hz-capped { fill: var(--err); }
+.hz-grid { stroke: var(--line); stroke-width: 1; }
+.hz-lbl { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
+.hz-pano { display: block; width: 100%; height: auto; margin-top: 8px; border-radius: 8px; border: 1px solid var(--line); cursor: zoom-in; }
 .wx-age { color: var(--warn); }
 .wx-h .rain { color: var(--muted); }
 .wx-h .rain.mid { color: var(--warn); }
