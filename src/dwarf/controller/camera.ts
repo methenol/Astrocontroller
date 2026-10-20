@@ -40,6 +40,9 @@ const PREVIEW_QUALITY_MS = 3000;
 const CALIBRATION_SETTLE_MS = 500;
 /** bool params are applied but never acknowledged */
 const BOOL_PARAM_MS = 2000;
+/** how long after a manual exposure set the gain is watched for the firmware's reset to 160 */
+const GAIN_RESET_WATCH_MS = 1000;
+const GAIN_RESET_POLL_MS = 100;
 /** without the end notification, wait this long before looking in the album */
 const PHOTO_FALLBACK_WAIT_MS = 1500;
 /** album timestamps are whole seconds and the clocks differ a little: look this far back */
@@ -249,7 +252,7 @@ export class CameraControl {
     const schema = await http.getParamSchema(mode);
     const defs = schema.cameras[camId(camera)] ?? {};
 
-    if (EXPOSURE_KEYS.has(key)) return this.setExposure(camera, defs.exp, mode, value);
+    if (EXPOSURE_KEYS.has(key)) return this.setExposure(camera, defs.exp, mode, value, defs.gain);
     if (key === 'gain' || key === 'iso') {
       const def = defs.gain;
       if (!def) throw new Error(`gain is not adjustable in mode ${mode}`);
@@ -270,8 +273,12 @@ export class CameraControl {
       // a black live view (2026-10-18: the focus sweep's restore, exposure auto then gain, blanked the tele for
       // minutes). Auto exposure holds when set after the gain, so put it back.
       const expManualNow = defs.exp ? this.core.params.get(String(defs.exp.paramId))?.mode === 1 : false;
-      if (expAutoBefore && expManualNow) await this.setExposure(camera, defs.exp, mode, 'auto');
-      return `${camera} gain → ${pick}${pick !== want ? ` (nearest allowed to ${want})` : ''}`;
+      let restored = '';
+      if (expAutoBefore && expManualNow) {
+        await this.setExposure(camera, defs.exp, mode, 'auto');
+        restored = ' (the gain put the exposure from auto to manual; put back to auto)';
+      }
+      return `${camera} gain → ${pick}${pick !== want ? ` (nearest allowed to ${want})` : ''}${restored}`;
     }
     if (key === 'white_balance' || key === 'wb') return this.setWhiteBalance(camera, defs.wb, mode, value);
     if (FILTER_KEYS.has(key)) {
@@ -284,19 +291,45 @@ export class CameraControl {
     return this.setGeneric(camera, setting, key, value, mode, schema);
   }
 
-  private async setExposure(camera: CameraName, def: http.ParamDef | undefined, mode: number, value: string | number | boolean): Promise<string> {
+  private async setExposure(
+    camera: CameraName,
+    def: http.ParamDef | undefined,
+    mode: number,
+    value: string | number | boolean,
+    gainDef?: http.ParamDef,
+  ): Promise<string> {
     if (!def) throw new Error(`exposure is not adjustable in mode ${mode}`);
     if (String(value).toLowerCase() === 'auto') {
       await request(this.core, Cmd.PARAM_SET_EXPOSURE, { paramId: packId(def), mode: 0, value: this.liveValue(def) ?? 0 });
       return `${camera} exposure → auto`;
     }
     const match = matchExposure((def.values ?? []) as Array<{ name: string; value: number }>, value);
+    const gainBefore = gainDef ? this.liveValue(gainDef) : undefined;
     await request(this.core, Cmd.PARAM_SET_EXPOSURE, { paramId: packId(def), mode: 1, value: match.value });
+    const kept = gainDef && gainBefore !== undefined ? await this.keepGain(camera, gainDef, gainBefore) : '';
     const warn =
       exposureLabelSeconds(match.name) >= 1
         ? ` — WARNING: the ${camera} live view is now PAUSED (the telescope stops live streaming at exposures ≥ 1 s) for the user and for you until exposure is set back to "auto". For a one-off night check use view_camera/analyze_image with exposure_s instead, which restores the setting automatically.`
         : '';
-    return `${camera} exposure → ${match.name}s (manual)${warn}`;
+    return `${camera} exposure → ${match.name}s (manual)${kept}${warn}`;
+  }
+
+  /**
+   * 2026-10-19 (fw 1.5.3.9): switching the tele exposure from auto to manual resets the gain (seen: 160,
+   * and 40 on 2026-10-20), reported a moment after the reply. A sweep or a stack set up as exposure-then-gain survives it, but
+   * anything that only changes the exposure silently shoots at 160. Wait for the reset and undo it.
+   */
+  private async keepGain(camera: CameraName, gainDef: http.ParamDef, before: number): Promise<string> {
+    const deadline = Date.now() + GAIN_RESET_WATCH_MS;
+    let now = this.liveValue(gainDef);
+    while (now === before && Date.now() < deadline) {
+      await sleep(GAIN_RESET_POLL_MS);
+      now = this.liveValue(gainDef);
+    }
+    if (now === undefined || now === before) return '';
+    await request(this.core, Cmd.PARAM_SET_GAIN, { paramId: packId(gainDef), mode: 1, value: before });
+    log.info(`${camera} exposure change reset the gain to ${now}; set back to ${before}`);
+    return ` (the telescope reset the gain to ${now}; put back to ${before})`;
   }
 
   private async setWhiteBalance(camera: CameraName, def: http.ParamDef | undefined, mode: number, value: string | number | boolean): Promise<string> {

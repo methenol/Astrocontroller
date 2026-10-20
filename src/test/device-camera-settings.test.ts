@@ -61,7 +61,10 @@ describe('camera settings as the telescope applies them', () => {
       return new Promise((r) => setTimeout(() => r({}), 50));
     });
     const r = await dwarf.setSetting('tele', 'gain', 80);
-    assert.match(r, /switched exposure from auto to manual/);
+    assert.match(r, /gain → 80/);
+    assert.match(r, /put back to auto/, "the caller is told a second command went out on their behalf");
+    const exposure = fake.requestsFor(Cmd.PARAM_SET_EXPOSURE);
+    assert.deepEqual(exposure.map((e) => e.data.mode), [0], 'the auto exposure the gain clobbered is put back, not left at the short value auto had picked');
   });
 
   test('no note when the exposure was manual already', async () => {
@@ -69,6 +72,7 @@ describe('camera settings as the telescope applies them', () => {
     await new Promise((r) => setTimeout(r, 30));
     fake.reply(Cmd.PARAM_SET_GAIN, {});
     const r = await dwarf.setSetting('tele', 'gain', 60);
-    assert.doesNotMatch(r, /switched exposure/);
+    assert.doesNotMatch(r, /put back to auto/);
+    assert.deepEqual(fake.requestsFor(Cmd.PARAM_SET_EXPOSURE), [], 'a manual exposure that the gain left alone needs no restore');
   });
 });

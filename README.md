@@ -2,7 +2,7 @@
 
 An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Docker and has three parts:
 
-- **An MCP server** with 53 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
+- **An MCP server** with 55 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
 - **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs. It is mobile-first: the same page is a thumb-driven single-screen app on a phone at the scope and a two-column desk layout on a laptop.
 
@@ -26,13 +26,21 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 |---|---|
 | `DWARF_HOST` | Telescope IP (STA mode), e.g. `10.0.0.196`. AP mode is `192.168.88.1`. Can be changed from the web UI (View → System → Telescope IP); that setting is kept in `data/telescope.json` and wins over this one until you clear the field. |
 | `DWARF_AUTO_SYNC_TIME_LOCATION` | Push time, timezone and location on every connect (default `true`). |
+| `DWARF_PROTOCOL_HEADER` | `app` (default) sends the header the official DWARFLAB app sends (`majorVersion 2 / minorVersion 3`); `sdk` sends the third-party SDK's `1.20` instead. Only touch it if a firmware refuses the official header. |
 | `OBSERVER_LATITUDE` / `OBSERVER_LONGITUDE` / `OBSERVER_ELEVATION_M` | Site. Needed for planning, calibration, GoTo, polar alignment and weather. |
 | `OBSERVER_TIMEZONE` | IANA zone (e.g. `America/New_York`). All reported times use it. |
 | `PLAN_MIN_ALTITUDE_DEG` | Default minimum altitude for target planning. |
+| `PLAN_BORTLE` | Site sky class 1 (dark) … 9 (inner city), default `5`. The one number that moves every reachability threshold: what the sky and glass can bring up, and how long a sub the sky rewards. |
+| `PLAN_FILTERS` | The Dwarf 3's filters, default `Astro,Duo-Band`. Each target is planned through the best of them (continuum targets through Astro only) and `suggestedFilter` names it. Decides whether a faint hydrogen-alpha region is a target at all, and how much the Moon costs it. |
+| `PLAN_FILTER` | Force one glass for every target instead (`none`, `astro`, `uhc`, `duo-band`, `ha 7nm`, a product name…); empty = `PLAN_FILTERS`. |
+| `PLAN_APERTURE_MM` | Clear aperture of the tele lens. The one optics number the scope cannot report; without it the sub advice is the mount's ceiling, with the missing number named. |
+| `PLAN_READ_NOISE_E` | Camera read noise in electrons. With it the sub length is one number; without it the plan quotes the honest range from a modern sensor to an old one. |
+| `PLAN_MOUNT` / `PLAN_GUIDED` | `alt-az` (default) or `eq`; guided or not. Sets what trails and how soon: field rotation on an alt-az head, the trails budget on an unguided equatorial, nothing when guided. |
+| `PLAN_PLATE_SCALE_ARCSEC` | Arcsec per pixel; the telescope's own plate scale is used when unset. |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI-compatible chat-completions endpoint (vLLM, llama.cpp, LM Studio, …). |
 | `REASONING_EFFORT` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. You can also change it live in the UI. |
 | `LLM_CONTEXT_WINDOW` / `LLM_MAX_TOKENS` | Model limits. |
-| `LLM_THINKING_FORMAT` | Optional request shape for thinking (`qwen-chat-template`, `openai`, …). Leave empty for auto. |
+| `LLM_THINKING_FORMAT` | Request shape for thinking (`qwen`, `qwen-chat-template`, `openai`, …). Use `qwen` for Qwen on vLLM: with it empty, Oh My Pi sends no reasoning effort and the server's default applies. |
 | `LLM_VISION` | Send camera and FITS images to the model (default `true`). |
 | `DUTY_INTERVAL_S` | Default time between duty samples (see "Duty loop"); the agent can choose 30 s–15 min per sample. Default `300`. |
 | `PROMPT_TRANSFER_ON_CHARGE` | When the scope is plugged in to charge with sessions still on its SD card, the agent is woken to park, transfer (processing queues itself) and shut the telescope down once the transfers are done. Never while imaging. Default `false`. |
@@ -85,7 +93,7 @@ The UI is one page, one screen at a time, sized for gloves and dark skies. Nothi
 - **View**: tap the main view to fill the screen (Fullscreen API where it exists, an in-page mode where it does not — iOS), pinch to zoom, drag to pan, double-tap to zoom to the point you tapped and again to reset, ✕ or Esc to leave. Tapping a small view swaps it into the main slot. Frames are only streamed for the views on screen, so leaving the View screen stops the video and frees the radio.
 - **Capture bar** is pinned under your thumb: camera, Photo, Burst, Record, Stack.
 - **Aim** is a nine-button pad — hold any arrow to keep moving, ■ in the middle stops everything — with a speed slider and Home / Level / Park. Cell size follows the viewport (54-68 px) so it stays a thumb target on a small phone and tightens up at desk widths. Only Aim is open at phone widths; Focus, Mode & exposure and System are folded, and all of them open at desk widths.
-- **Tonight** turns the target plan into cards below 760 px, with each target's best time, weather, framing and filter labelled.
+- **Tonight** names one target to start with and the season the list was read off ("Start with the Witch Head Nebula — Milky Way core"), then gives each row its verdict — *easy*, *needs time*, or *beyond tonight's sky* with the reason (a faint hydrogen-alpha region under a bare Bortle 5 sky is not a target until you put a filter on) — its longest run that is simultaneously up, forecast-clear and moon-workable, the sub length to shoot at with the reason (`15s × 1012 subs`: what the mount can hold, not what the sky would reward), and the sky class and filter every judgement was made against. Rows the sky cannot bring up stay listed and explained, and are visibly set aside rather than quietly dropped. Targets the library already holds, or that were suggested in the last few nights, are held back by their own score and named under the list ("Held back by memory: M 31 (shot until Dec 16, 1 d ago)") instead of silently vanishing. Below 760 px the plan becomes cards with each field labelled.
 - **Database** searches and filters the whole object catalog: free-text search over every designation and common name, then type, catalog, constellation, magnitude, size, "named only", and "up now" / "up tonight" above a chosen altitude. Results can be sorted by match, name, brightness, size, current altitude, hours up tonight, best time or RA. Tap a result to see all its designations, tonight's altitude curve against your minimum altitude, Moon separation, and GoTo / ask-the-agent buttons. Your filters are remembered.
 - **Night mode** (the sliders menu in the header, together with Disconnect) puts a red multiply tint over everything, including the live images, and is remembered.
 - **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
@@ -147,9 +155,10 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 | Status/system | `telescope_status`, `telescope_device_info`, `telescope_reconnect`, `sync_time_and_location`, `power`, `raw_command` |
 | Camera | `set_shooting_mode`, `get_camera_settings`, `set_camera_setting`, `take_photo`, `video_recording`, `timelapse`, `view_camera` |
 | Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `star_sharpness`, `star_focus`, `focus_step`, `focus_position` (incl. infinity) |
-| Planning | `sky_conditions`, `weather_forecast`, `plan_targets`, `find_target`, `search_catalog` |
-| Astro | `calibrate`, `goto_target`, `stop_goto`, `live_stacking`, `stacking_status`, `wait`, `polar_alignment`, `track_sun_moon` |
+| Planning | `sky_conditions`, `weather_forecast`, `sky_check`, `plan_targets`, `rest_target`, `find_target`, `search_catalog` |
+| Astro | `calibrate`, `goto_target`, `stop_goto`, `astro_recover`, `live_stacking`, `stacking_status`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
+| Duty | `duty` (the unattended night loop) |
 | Images & data | `list_album`, `view_image`, `analyze_image`, `analyze_subs`, `dark_frames`, `delete_album_items`, `list_device_sessions`, `transfer_session`, `transfer_files`, `jobs`, `list_library` |
 | Processing | `processing_status`, `process_session`, `processing_job` |
 

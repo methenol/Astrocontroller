@@ -58,7 +58,7 @@ describe('star-focus sweep and tele measurement: the camera is handed back as it
     focuser = new FakeFocuser(fake, 500);
     fake.reply(Cmd.CAMERA_TELE_PHOTOGRAPH, { code: -1 });
     const { hub, cam } = stubHub(dwarf);
-    await assert.rejects(starFocusSweep({ dwarf, hub }, { center: 500, range: 10, step: 5, gain: 100, settleMs: 0 }), /star focus could not measure 500: .* the focuser was left there/);
+    await assert.rejects(starFocusSweep({ dwarf, hub }, { center: 500, range: 10, step: 5, gain: 100, settleMs: 0 }), /star focus could not measure 500: .* the focuser was returned to its starting position 500/);
     const exp = fake.requestsFor(Cmd.PARAM_SET_EXPOSURE).map((r) => r.data.value);
     assert.deepEqual(exp, [100, 156], 'set to 1/2 s for the stills, then back to 15 s');
     const gain = fake.requestsFor(Cmd.PARAM_SET_GAIN).map((r) => r.data.value);

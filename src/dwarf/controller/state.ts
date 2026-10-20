@@ -9,7 +9,7 @@ import type { LinkHealth, Notification } from '../link.js';
 import type { TravelForecast } from '../travel-guard.js';
 import type { CameraName, StackingInfo } from '../stacking.js';
 import { logger, errMsg } from '../../log.js';
-import { astroState, bodyMode, opState, round, WB_SCENES } from './util.js';
+import { astroState, bodyMode, deviceOn, opState, round, WB_SCENES } from './util.js';
 
 const log = logger('dwarf');
 /** State broadcasts are coalesced to one per this. */
@@ -85,6 +85,13 @@ export interface TelescopeState {
   shootingTech: { tele?: string; wide?: string };
   bodyMode?: 'eq' | 'altaz' | 'unknown';
   focusPosition?: number;
+  /** Wide/guide encoder positions: the SDK's state schema predated them, the APK's carries them. */
+  wideFocusPosition?: number;
+  guideFocusPosition?: number;
+  /** Device switches, carried on the wire as `DeviceSwitchState` (0 off, 1 on). */
+  switches?: { antiTangle?: boolean; lensDefog?: boolean; autoCooling?: boolean; autoShutdown?: boolean; powerSound?: boolean; doNotDisturb?: boolean };
+  /** The device's own IMU attitude, in degrees, as it reports it (`CMD_NOTIFY_DEVICE_ATTITUDE`). */
+  attitude?: { pitchDeg: number; yawDeg: number; rollDeg: number; at: number };
   motors: { rotationDeg?: number; pitchDeg?: number; homed?: boolean; updatedAt?: number };
   fov: { tele?: { h: number; v: number }; wide?: { h: number; v: number } };
   teleInWide?: { x: number; y: number; width: number; height: number };
@@ -166,6 +173,33 @@ export function applyNotification(st: TelescopeState, params: ParamCache, n: Not
       break;
     case 'focusPosition':
       st.focusPosition = d.pos ?? 0;
+    break;
+  case 'wideFocusPosition':
+    st.wideFocusPosition = d.pos ?? 0;
+    break;
+  case 'guideFocusPosition':
+    st.guideFocusPosition = d.pos ?? 0;
+    break;
+  case 'antiTangleState':
+    st.switches = { ...st.switches, antiTangle: deviceOn(d.state) };
+    break;
+  case 'lensDefogState':
+    st.switches = { ...st.switches, lensDefog: deviceOn(d.state) };
+    break;
+  case 'autoCoolingState':
+    st.switches = { ...st.switches, autoCooling: deviceOn(d.state) };
+    break;
+  case 'autoShutdownState':
+    st.switches = { ...st.switches, autoShutdown: deviceOn(d.state) };
+    break;
+  case 'powerSoundState':
+    st.switches = { ...st.switches, powerSound: deviceOn(d.state) };
+    break;
+  case 'shootingDoNotDisturbState':
+    st.switches = { ...st.switches, doNotDisturb: deviceOn(d.state) };
+    break;
+  case 'deviceAttitude':
+    st.attitude = { pitchDeg: d.pitch ?? 0, yawDeg: d.yaw ?? 0, rollDeg: d.roll ?? 0, at: n.ts };
       break;
     case 'bodyStatus':
       st.bodyMode = bodyMode(d.bodyStatus);
@@ -269,6 +303,19 @@ export function applyNotification(st: TelescopeState, params: ParamCache, n: Not
 }
 
 /**
+ * The `DeviceStateInfo` entries that carry a `DeviceSwitchState`, keyed as the state model names them.
+ * The SDK's schema for the state read stops before all of these; the APK's carries them.
+ */
+const SWITCH_FIELDS: Readonly<Record<string, keyof NonNullable<TelescopeState['switches']>>> = Object.freeze({
+  antiTangle: 'antiTangle',
+  lensDefog: 'lensDefog',
+  autoCooling: 'autoCooling',
+  autoShutdown: 'autoShutdown',
+  powerSound: 'powerSound',
+  shootingDoNotDisturb: 'doNotDisturb',
+});
+
+/**
  * Apply a device state read (TASK_GET_DEVICE_STATE_INFO). Returns the tele camera's capture state
  * (exclusiveState.captureRawState: 1 running, 3 stopped but not finished, on fw 1.5.3; the wide
  * entry is not known to carry it), whether a tele photo is running (exclusiveState.photoState 1),
@@ -291,9 +338,16 @@ export function applyDeviceStateInfo(
   if (dev.storageInfo) st.storage = { availableGB: dev.storageInfo.availableSize ?? 0, totalGB: dev.storageInfo.totalSize ?? 0 };
   if (dev.bodyStatus) st.bodyMode = bodyMode(dev.bodyStatus.bodyStatus);
   if (dev.pictureMatching) st.teleInWide = teleInWide(dev.pictureMatching);
+  const sw: Partial<NonNullable<TelescopeState['switches']>> = {};
+  for (const [field, key] of Object.entries(SWITCH_FIELDS)) if (dev[field]) sw[key] = deviceOn(dev[field].state);
+  if (Object.keys(sw).length) st.switches = { ...st.switches, ...sw };
   const focus = s.focusMotorStateInfo?.focusPosition;
   // proto3 omits 0: a focusPosition entry without pos is position 0
   if (focus) st.focusPosition = focus.pos ?? 0;
+  const wideFocus = s.wideFocusMotorStateInfo?.focusPosition;
+  if (wideFocus) st.wideFocusPosition = wideFocus.pos ?? 0;
+  const guideFocus = s.guideFocusMotorStateInfo?.focusPosition;
+  if (guideFocus) st.guideFocusPosition = guideFocus.pos ?? 0;
   applyMotionState(st, s.motionMotorStateInfo?.exclusiveState);
   const teleCaptureState = Number(tele.exclusiveState?.captureRawState?.state ?? 0);
   return {

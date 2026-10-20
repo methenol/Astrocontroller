@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package system;
+
+message ReqSetTime {
+  uint64 timestamp = 1;
+  double timezone_offset = 2;
+}
+
+message ReqSetTimezone {
+  string timezone = 1;
+}
+
+message ReqSetMtpMode {
+  int32 mode = 1;
+}
+
+message ReqSetCpuMode {
+  int32 mode = 1;
+}
+
+message ReqsetMasterLock {
+  bool lock = 1;
+}
+
+message ReqGetDeviceActivateInfo {
+  int32 issuer = 1;
+}
+
+message ResDeviceActivateInfo {
+  int32 activate_state = 1;
+  int32 activate_process_state = 2;
+  string request_param = 3;
+}
+
+message ReqDeviceActivateWriteFile {
+  string request_param = 1;
+}
+
+message ResDeviceActivateWriteFile {
+  int32 code = 1;
+  string request_param = 2;
+}
+
+message ReqDeviceActivateSuccessfull {
+  string request_param = 1;
+}
+
+message ResDeviceActivateSuccessfull {
+  int32 code = 1;
+  int32 activate_state = 2;
+}
+
+message ReqDisableDeviceActivate {
+  string request_param = 1;
+}
+
+message ResDisableDeviceActivate {
+  int32 code = 1;
+  int32 activate_state = 2;
+}
+
+message ReqSetLocation {
+  double latitude = 1;
+  double longitude = 2;
+  double altitude = 3;
+  string country_region = 4;
+  string province = 5;
+  string city = 6;
+  string district = 7;
+  bool enable = 8;
+}

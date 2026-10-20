@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package voice;
+
+import "base.proto";
+import "notify.proto";
+import "task_center.proto";
+
+message ReqVoiceCommand {
+  int32 command_type = 1;
+  int32 shooting_mode = 2;
+  oneof params {
+    VoicePhotoParams photo_params = 10;
+    VoiceRecordParams record_params = 11;
+    VoiceTimelapseParams timelapse_params = 12;
+    VoiceBurstParams burst_params = 13;
+    VoiceAstroParams astro_params = 14;
+    VoiceSentryParams sentry_params = 15;
+    VoiceMoveParams move_params = 16;
+    VoiceGotoParams goto_params = 17;
+    VoiceCalibrationParams calibration_params = 18;
+    VoiceFocusParams focus_params = 19;
+  }
+}
+
+message VoicePhotoParams {
+  int32 camera_type = 1;
+}
+
+message VoiceRecordParams {
+  int32 camera_type = 1;
+  int32 duration_seconds = 2;
+}
+
+message VoiceTimelapseParams {
+  int32 camera_type = 1;
+  int32 interval_seconds = 2;
+  int32 duration_seconds = 3;
+}
+
+message VoiceBurstParams {
+  int32 camera_type = 1;
+  int32 count = 2;
+}
+
+message VoiceAstroParams {
+  string target_name = 1;
+  double ra = 2;
+  double dec = 3;
+  int32 index = 4;
+  double lon = 5;
+  double lat = 6;
+  bool auto_goto = 7;
+  bool force_start = 8;
+}
+
+message VoiceSentryParams {
+  int32 type = 1;
+}
+
+message VoiceMoveParams {
+  double azimuth_angle = 1;
+  double altitude_angle = 2;
+  int32 speed = 3;
+}
+
+message VoiceGotoParams {
+  string target_name = 1;
+  double ra = 2;
+  double dec = 3;
+  int32 index = 4;
+  double lon = 5;
+  double lat = 6;
+  int32 shooting_mode = 7;
+}
+
+message VoiceCalibrationParams {
+  double lon = 1;
+  double lat = 2;
+}
+
+message VoiceFocusParams {
+  bool is_infinity = 1;
+}
+
+message ResVoiceCommand {
+  int32 code = 1;
+  string message = 2;
+  int32 command_type = 3;
+  oneof result {
+    VoiceStatusResult status_result = 10;
+    VoiceOperationResult operation_result = 11;
+  }
+}
+
+message AstroShootingProgress {
+  string target_name = 1;
+  int32 captured_count = 2;
+  int32 total_count = 3;
+  int32 stacked_count = 4;
+  int32 progress_percentage = 5;
+  int64 elapsed_time = 6;
+  int64 remaining_time = 7;
+}
+
+message VoiceStatusResult {
+  task_center.ResGetDeviceStateInfo device_state_info = 1;
+  AstroShootingProgress astro_progress = 2;
+}
+
+message VoiceOperationResult {
+  bool success = 1;
+  string detail_message = 2;
+}
+
+message ResNotifyVoiceAssistant {
+  int32 command_type = 1;
+  int32 state = 2;
+  string message = 4;
+}
+
+enum VoiceCommandType {
+  VOICE_CMD_UNKNOWN = 0;
+  VOICE_CMD_GET_STATUS = 1;
+  VOICE_CMD_TAKE_PHOTO = 2;
+  VOICE_CMD_START_RECORD = 3;
+  VOICE_CMD_STOP_RECORD = 4;
+  VOICE_CMD_START_TIMELAPSE = 5;
+  VOICE_CMD_STOP_TIMELAPSE = 6;
+  VOICE_CMD_START_BURST = 7;
+  VOICE_CMD_STOP_BURST = 8;
+  VOICE_CMD_START_ASTRO = 9;
+  VOICE_CMD_STOP_ASTRO = 10;
+  VOICE_CMD_START_SENTRY = 11;
+  VOICE_CMD_STOP_SENTRY = 12;
+  VOICE_CMD_MOVE = 13;
+  VOICE_CMD_GOTO_TARGET = 14;
+  VOICE_CMD_CALIBRATION = 15;
+  VOICE_CMD_AUTO_FOCUS = 16;
+  VOICE_CMD_STOP_FOCUS = 17;
+  VOICE_CMD_STOP_ALL = 18;
+}

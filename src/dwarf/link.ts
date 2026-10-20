@@ -1,12 +1,17 @@
 import WebSocket from 'ws';
-import { encodePacket, decodePacket, MessageType } from '@alikh/dwarflab-sdk';
+import { cmdToModule } from '@alikh/dwarflab-sdk';
 import { requestType, responseType, decodeWith, decodeNotification, errorText, type ProtoType } from './protocol.js';
+import { MESSAGE_TYPE, decodePacket, encodePacket, headerFor, moduleIdForCmd } from './wire/index.js';
+import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
 import { assertLinked, gate } from './gate.js';
 import { wire, cmdName } from './wirelog.js';
 import { SafeEmitter } from '../util/events.js';
 
 const log = logger('link');
+
+/** The `deviceId` this app has always put on a request packet — the SDK encoder's fifth argument. */
+const REQUEST_DEVICE_ID = 1;
 
 export class DwarfCommandError extends Error {
   constructor(
@@ -452,7 +457,9 @@ export class DwarfLink extends SafeEmitter {
 
   private open(): void {
     if (this.stopped) return;
-    const url = `ws://${this.host}:${this.port}/`;
+    // the endpoint the official app uses: `MyWsManager` builds `ws://" + host + ":9900/?client_id=" + id`,
+    // and the same id goes in every packet's `clientId` field.
+    const url = `ws://${this.host}:${this.port}/?client_id=${this.clientId}`;
     const ws = new WebSocket(url, { handshakeTimeout: HANDSHAKE_TIMEOUT_MS, maxPayload: MAX_PAYLOAD_BYTES });
     ws.binaryType = 'nodebuffer';
     // the first attempt is not a reconnect
@@ -585,7 +592,7 @@ export class DwarfLink extends SafeEmitter {
       return;
     }
     this.markAlive();
-    if (pkt.type === MessageType.NOTIFICATION) {
+  if (pkt.type === MESSAGE_TYPE.notification) {
       let n: Notification;
       try {
         const { name, data } = decodeNotification(pkt.cmd, pkt.data);
@@ -662,6 +669,26 @@ export class DwarfLink extends SafeEmitter {
     return this.send(cmd, params, opts);
   }
 
+ /**
+  * Frame a request: the header the deployment asked for, this link's client id, and the module the
+  * APK's `WsCmd` says the command belongs to. For the 314 commands the SDK does know, the recovered
+  * ordinal reproduces its encoder's packet byte for byte (wire.test.ts proves it); the SDK leaves
+  * `MODULE_NONE` on the commands it never registered, which is the wrong service for the device extras.
+  * Ids the APK's `WsCmd` lacks (STEP_MOTOR_RUN_TO/RESET) keep the SDK's range module: sent with
+  * `MODULE_NONE` they never reach the motor service, so homing and every absolute move hang.
+  */
+ private frame(cmd: number, payload: Uint8Array): Uint8Array<ArrayBufferLike> {
+  return encodePacket({
+   cmd,
+   moduleId: moduleIdForCmd(cmd) || cmdToModule(cmd),
+   type: MESSAGE_TYPE.request,
+   data: payload,
+   clientId: this.clientId,
+   deviceId: REQUEST_DEVICE_ID,
+   ...headerFor(config.dwarf.protocolHeader),
+  });
+ }
+
   private async send(cmd: number, params: Record<string, unknown>, opts: RequestOptions): Promise<Record<string, unknown> | null> {
     if (!this.connected) await this.waitConnected(opts.timeout ? Math.min(opts.timeout, WAIT_CONNECTED_MS) : WAIT_CONNECTED_MS);
     const ws = this.ws;
@@ -673,7 +700,7 @@ export class DwarfLink extends SafeEmitter {
     } else if (Object.keys(params).length > 0) {
       throw new Error(`no request type registered for command ${cmd}; pass reqType`);
     }
-    const packet = encodePacket(cmd, MessageType.REQUEST, payload, this.clientId, 1);
+  const packet = this.frame(cmd, payload);
     const timeout = opts.timeout ?? this.t.requestTimeoutMs;
     const sentAt = Date.now();
     wire('>', `${cmdName(cmd)}${opts.bestEffort ? ' [best-effort]' : ''}`, params);
@@ -721,7 +748,7 @@ export class DwarfLink extends SafeEmitter {
     if (!reqType && Object.keys(params).length > 0) throw new Error(`no request type registered for command ${cmd}`);
     const payload = reqType ? reqType.encode(reqType.create(params)).finish() : new Uint8Array(0);
     wire('>', `${cmdName(cmd)} [no reply expected]`, params);
-    await new Promise<void>((resolve, reject) => ws.send(encodePacket(cmd, MessageType.REQUEST, payload, this.clientId, 1), (err) => (err ? reject(err) : resolve())));
+  await new Promise<void>((resolve, reject) => ws.send(this.frame(cmd, payload), (err) => (err ? reject(err) : resolve())));
   }
 
   /** Wait for a notification matching `pred`, or time out. Fails early if the telescope stops responding. */

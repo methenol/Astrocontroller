@@ -6,7 +6,11 @@ import express from 'express';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Dwarf } from '../dwarf/device.js';
+import { Cmd } from '../dwarf/protocol.js';
+import { commandInfo } from '../dwarf/wire/index.js';
 import { StreamHub } from '../media/streams.js';
+import { config } from '../config.js';
+import { FakeDwarf } from './fake-dwarf.js';
 import { mountMcp } from '../mcp/server.js';
 
 describe('MCP endpoint', () => {
@@ -175,5 +179,85 @@ describe('MCP endpoint', () => {
       assert.equal(body.jsonrpc, '2.0');
       assert.equal(body.error.code, -32000);
     }
+  });
+});
+
+describe('MCP endpoint against a telescope: the recovered device switches', () => {
+  let fake: FakeDwarf;
+  let server: http.Server;
+  let dwarf: Dwarf;
+  let hub: StreamHub;
+  let url = '';
+
+  before(async () => {
+    config.dwarf.host = '127.0.0.1';
+    config.dwarf.httpPort = 9;
+    config.dwarf.autoSyncTimeLocation = false;
+    fake = await new FakeDwarf().start();
+    dwarf = new Dwarf({ host: '127.0.0.1', port: fake.port, linkTiming: { requestTimeoutMs: 300 } });
+    hub = new StreamHub(dwarf);
+    const app = express();
+    app.use(express.json());
+    mountMcp(app, { dwarf, hub });
+    server = http.createServer(app);
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+    dwarf.link.start();
+    await dwarf.link.waitConnected(2000);
+  });
+
+  after(async () => {
+    hub.shutdown();
+    dwarf.stop();
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+    await fake.stop();
+  });
+
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const client = new Client({ name: 'test', version: '0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+    try {
+      return (await client.callTool({ name, arguments: args })) as { isError?: boolean; content: Array<{ text?: string }> };
+    } finally {
+      await client.close();
+    }
+  };
+  const json = (r: { content: Array<{ text?: string }> }) => JSON.parse(r.content[0]?.text ?? '{}') as Record<string, any>;
+
+  test('the agent can read the switches the stock SDK never exposed', async () => {
+    const r = await call('device_switches');
+    assert.equal(r.isError, undefined);
+    assert.deepEqual(json(r).switches, {}, 'nothing reported yet is reported as nothing, not as off');
+  });
+
+  test('a switch named without on is refused and nothing reaches the telescope', async () => {
+    const r = await call('device_switches', { switch: 'anti_tangle' });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0]?.text ?? '', /give on: true or false/);
+    assert.equal(fake.requestsFor(commandInfo('CMD_DEVICE_ANTI_TANGLE').id).length, 0);
+  });
+
+  test('applying a switch sends the recovered command and reports the device confirmation', async () => {
+    const cmd = commandInfo('CMD_DEVICE_ANTI_TANGLE').id;
+    const notify = commandInfo('CMD_NOTIFY_ANTI_TANGLE_STATE').id;
+    // report the switch as the command arrives: a timer would race the MCP round trip, and a report
+    // delivered before the controller started listening is simply lost
+    fake.on(cmd, async (_req, f) => {
+      await f.notify(notify, { state: 1 });
+      return undefined; // the APK declares no response payload for the switches: no reply is owed
+    });
+    const r = json(await call('device_switches', { switch: 'anti_tangle', on: true }));
+
+    assert.deepEqual(fake.requestsFor(cmd).map((q) => q.data.state), [1], 'one state field, 1 for on, on the DEVICE module');
+    assert.equal(r.confirmed, true);
+    assert.equal(r.switches.antiTangle, true, 'the answer and the reported state agree');
+  });
+
+  test('telescope_status carries the switches the recovered state schema decodes', async () => {
+    fake.reply(Cmd.TASK_GET_DEVICE_STATE_INFO, { code: 0, deviceStateInfo: { lensDefog: { state: 1 }, antiTangle: { state: 0 } } });
+    const r = json(await call('telescope_status', { refresh: true }));
+
+    assert.deepEqual(r.switches, { lensDefog: true, antiTangle: false }, "the SDK's empty state class would leave this field absent");
   });
 });

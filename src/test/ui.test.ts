@@ -10,9 +10,11 @@ const lastSubscription = () => {
 /** Waits (at most `ms`) for the page to settle into `cond`. */
 async function until(cond: () => boolean, what: string, ms = 3000): Promise<void> {
   const end = Date.now() + ms;
+  // The harness unrefs the page's timers, so a setTimeout poll can let the loop drain and the
+  // runner cancels the test. A setImmediate poll is ref'd: it waits without holding the process.
   while (Date.now() < end) {
     if (cond()) return;
-    await new Promise((r) => setTimeout(r, 2));
+    await new Promise((r) => setImmediate(r));
   }
   assert.fail(`timed out waiting for ${what}`);
 }

@@ -6,6 +6,9 @@ import { measureTele, starFocusSweep } from '../../media/focus.js';
 import { capturedLine, cropArg, displayJpeg, saveCapture, text, withImage, type ToolContext, type ToolFn } from './common.js';
 
 const MAX_RELATIVE_DEG = 60;
+/** tele_visibility: a sky frame at infinity focus shows at least this many measurable stars, no softer than this (sharp here is ~2 px; a roof at infinity focus measured 20 px). */
+const VISIBLE_MIN_STARS = 20;
+const VISIBLE_MAX_HFR_PX = 6;
 const NUDGE_ANGLES: Record<string, number> = { up: 0, 'up-right': 45, right: 90, 'down-right': 135, down: 180, 'down-left': 225, left: 270, 'up-left': 315 };
 
 export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): void {
@@ -89,6 +92,34 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
       const jpeg = await displayJpeg(img, 1024);
       const saved = saveCapture(jpeg, 'star_sharpness');
       const report = { focusPosition: dwarf.state.focusPosition, captured: capturedLine(img) || undefined, ...sharp, image: `captures/${saved}` };
+      return withImage(jpeg, JSON.stringify(report, null, 1));
+    },
+  );
+
+  tool(
+    'tele_visibility',
+    'THE test for "is the target visible in the tele frame" after a GoTo — the one answer to trust, not the wide view or a star count. Drives the focuser to the stored infinity position, takes one tele still and measures its stars. At infinity focus anything near the scope (a roof, a dock, a pole, branches) is a large blur while stars are points, so: VISIBLE = at least 20 measurable stars with a median HFR at most 6 px; anything else is BLOCKED (obstruction, cloud or dew). Refuses while the tele camera is stacking. Leaves the focuser at infinity (the starting point for autofocus).',
+    {},
+    async () => {
+      const inf = await dwarf.infinityFocusPosition();
+      const at = await dwarf.focusTo(inf);
+      const { img, sharp } = await measureTele({ dwarf, hub });
+      const jpeg = await displayJpeg(img, 1024);
+      const saved = saveCapture(jpeg, 'tele_visibility');
+      const visible = sharp.ok && sharp.starsUsed >= VISIBLE_MIN_STARS && sharp.hfrPx <= VISIBLE_MAX_HFR_PX;
+      const why = !sharp.ok
+        ? sharp.blocking
+        : sharp.starsUsed < VISIBLE_MIN_STARS
+          ? `only ${sharp.starsUsed} measurable stars`
+          : `median HFR ${sharp.hfrPx.toFixed(1)} px at infinity focus: blurred near structure, not stars`;
+      const report = {
+        verdict: visible ? 'VISIBLE' : 'BLOCKED',
+        next: visible ? 'continue on this target (autofocus, then star focus)' : 'the target is NOT visible: do not focus or stack here — choose another target',
+        reason: visible ? `${sharp.starsUsed} stars, median HFR ${sharp.hfrPx.toFixed(1)} px` : why,
+        focusPosition: at,
+        captured: capturedLine(img) || undefined,
+        image: `captures/${saved}`,
+      };
       return withImage(jpeg, JSON.stringify(report, null, 1));
     },
   );

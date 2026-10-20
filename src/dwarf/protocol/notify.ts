@@ -1,6 +1,12 @@
-/** Notifications: every notify command the firmware emits, its name and its payload type. */
+/**
+ * Notifications: every notify command the firmware emits, its name and its payload type. The hand
+ * table below carries the names this app uses; the recovered catalogue supplies the ids and schemas it
+ * predates (device attitude, wide/guide focus position, defog, auto-cooling, anti-tangle, power-sound
+ * and do-not-disturb state, and more).
+ */
 import { protoTypeByName, type ProtoType } from './types.js';
 import { decodeWith } from './decode.js';
+import { DWARF_COMMANDS, type CommandSpec } from '../wire/generated/catalog.generated.js';
 
 export const NOTIFY: Readonly<Record<number, { readonly name: string; readonly type?: string }>> = Object.freeze({
   15200: { name: 'pictureMatching', type: 'notify.PictureMatching' },
@@ -84,12 +90,31 @@ export const NOTIFY: Readonly<Record<number, { readonly name: string; readonly t
   15296: { name: 'skyTargetFinderState', type: 'notify.SkyTargetFinderState' },
 });
 
+const NOTIFY_PREFIX = 'CMD_NOTIFY_';
+const camelCase = (name: string) => name.toLowerCase().replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+
+/** Labels and payload types by command id: this app's names win, the APK's catalogue fills the rest. */
+const notifyNames = new Map<number, string>();
 const notifyTypes = new Map<number, ProtoType>();
-for (const [cmd, { type }] of Object.entries(NOTIFY)) {
+
+for (const [cmd, { name, type }] of Object.entries(NOTIFY)) {
+  notifyNames.set(Number(cmd), name);
   if (type) notifyTypes.set(Number(cmd), protoTypeByName(type));
 }
 
-/** A notification's name (notify_<cmd> when unknown) and decoded payload. */
+for (const [catalogueName, spec] of Object.entries(DWARF_COMMANDS) as [string, CommandSpec][]) {
+  if (!catalogueName.startsWith(NOTIFY_PREFIX) || notifyNames.has(spec.id)) continue;
+  notifyNames.set(spec.id, camelCase(catalogueName.slice(NOTIFY_PREFIX.length)));
+  const ref = spec.response ?? spec.request;
+  if (!ref) continue;
+  try {
+  notifyTypes.set(spec.id, protoTypeByName(ref));
+  } catch {
+  // the descriptor behind the reference will not load: the frame still surfaces, undecoded
+  }
+}
+
+/** A notification's name (`notify_<cmd>` when neither table knows it) and decoded payload. */
 export function decodeNotification(cmd: number, data: Uint8Array): { name: string; data: Record<string, unknown> } {
-  return { name: NOTIFY[cmd]?.name ?? `notify_${cmd}`, data: decodeWith(notifyTypes.get(cmd), data) };
+  return { name: notifyNames.get(cmd) ?? `notify_${cmd}`, data: decodeWith(notifyTypes.get(cmd), data) };
 }

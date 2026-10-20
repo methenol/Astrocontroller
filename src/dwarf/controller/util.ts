@@ -23,6 +23,9 @@ export const MOTOR_NO_REFERENCE = -14520;
 export const opState = (n: unknown) => OPERATION_STATE[Number(n ?? 0)] ?? `state_${n}`;
 export const astroState = (n: unknown) => ASTRO_STATE[Number(n ?? 0)] ?? `state_${n}`;
 
+/** A device switch as the APK encodes it: `DeviceSwitchState` has OFF 0, ON 1, and `isOn(state) = state == 1`. */
+export const deviceOn = (state: unknown): boolean => Number(state ?? 0) === 1;
+
 export const FILTERS = ['VIS (no filter / UV-IR cut)', 'Astro (IR pass)', 'Duo-Band (Ha/OIII)'];
 export const WB_SCENES = ['Incandescent', 'Warm Fluorescent', 'Fluorescent', 'Sunlight', 'Cloudy', 'Shadow', 'Twilight'];
 

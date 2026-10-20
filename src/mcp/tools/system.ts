@@ -1,7 +1,8 @@
-/** Status, connection, clock and location, power, and the raw-command escape hatch. */
+/** Status, connection, clock and location, power, device switches, and the raw-command escape hatch. */
 import { z } from 'zod';
 import { config } from '../../config.js';
 import type { Dwarf } from '../../dwarf/device.js';
+import type { SwitchResult } from '../../dwarf/controller/extras.js';
 import * as http from '../../dwarf/http.js';
 import { wireLines } from '../../dwarf/wirelog.js';
 import { localTime, sleep, text, type ToolContext, type ToolFn } from './common.js';
@@ -125,6 +126,29 @@ export function registerSystemTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
     async ({ action }) => {
       await dwarf.power(action);
       return text(`${action} sent`);
+    },
+  );
+
+  const SWITCHES: Record<string, (on: boolean) => Promise<SwitchResult>> = {
+    anti_tangle: (on) => dwarf.extras.setAntiTangle(on),
+    lens_defog: (on) => dwarf.extras.setLensDefog(on),
+    auto_cooling: (on) => dwarf.extras.setAutoCooling(on),
+    auto_shutdown: (on) => dwarf.extras.setAutoShutdown(on),
+    power_sound: (on) => dwarf.extras.setPowerSound(on),
+    do_not_disturb: (on) => dwarf.extras.setDoNotDisturb(on),
+  };
+
+  tool(
+    'device_switches',
+    'The device switches the stock SDK never exposed: anti_tangle (the electronic limit — stops the mount before the cable winds up), lens_defog (defogger heater), auto_cooling, auto_shutdown, power_sound (startup chime), do_not_disturb (no notifications while shooting). With no arguments it reports what the telescope currently says (also in telescope_status.switches); with switch+on it applies the change and says whether the telescope confirmed it. power_sound and do_not_disturb are declared by the device but never used by the official app: confirmed:false there usually means the firmware does not implement them.',
+    {
+      switch: z.enum(['anti_tangle', 'lens_defog', 'auto_cooling', 'auto_shutdown', 'power_sound', 'do_not_disturb']).optional(),
+      on: z.boolean().optional(),
+    },
+    async ({ switch: name, on }) => {
+      if (name === undefined) return text({ switches: dwarf.extras.switches() });
+      if (on === undefined) throw new Error(`give on: true or false with switch ${name}; nothing was changed`);
+      return text({ switch: name, on, ...(await SWITCHES[name](on)), switches: dwarf.extras.switches() });
     },
   );
 

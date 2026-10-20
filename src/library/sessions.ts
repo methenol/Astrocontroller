@@ -128,6 +128,11 @@ export function librarySessionsFor(target: string, camera?: 'tele' | 'wide'): st
     .map((s) => s.folder);
 }
 
+/** Every library capture as (target, start time), read from the folder names alone. */
+export function captureLog(): Array<{ target: string; startedAt?: string }> {
+  return librarySessions().map((s) => ({ target: s.target, startedAt: s.startedAt }));
+}
+
 export interface LibrarySession {
   name: string;
   camera: string;

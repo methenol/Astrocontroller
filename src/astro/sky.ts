@@ -209,6 +209,13 @@ export function fmtTime(d: Date | null | undefined, tz: string): string | null {
   return d.toLocaleString('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+/** The observer's local calendar date as YYYY-MM-DD: what day-keyed memory is filed under. */
+export function localDate(when: Date, tz: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(when);
+  const get = (k: string) => parts.find((p) => p.type === k)?.value ?? '01';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
 /** Right ascension as 00h00m00.0s. Rounded once, in tenths of a second, so 59.95 s carries into the minute. */

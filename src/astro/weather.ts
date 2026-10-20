@@ -103,14 +103,32 @@ export async function tonight(site: Site, tz: string, weather: Pick<WeatherServi
   };
 }
 
+/** What the forecast says about one hour, in the terms the planner scores against. */
+export interface HourConditions {
+  /** observability 0–100 (clouds, rain, wind, dew, transparency, haze) */
+  observability: number;
+  /** 7Timer seeing index (1 best … 8 worst) when that provider answered */
+  seeingIdx?: number;
+  /** 7Timer transparency index (1 best … 8 worst) when that provider answered */
+  transparencyIdx?: number;
+  windKmh?: number;
+  gustKmh?: number;
+}
+
 /**
- * Forecast observability (0–100) at any moment, from the hourly forecast (the hour it falls in),
- * for ranking targets by clear time. Null when the forecast cannot be fetched (offline in the field).
+ * The hourly forecast as a lookup, for scoring each target against the hours it is actually up:
+ * observability, the seeing and transparency indices, and the wind. Null when the forecast
+ * cannot be fetched (offline in the field), which leaves the plan geometric.
  */
-export async function observabilityAt(site: Site, tz: string): Promise<((t: Date) => number | undefined) | null> {
+export async function conditionsAt(site: Site, tz: string): Promise<((t: Date) => HourConditions | undefined) | null> {
   try {
     const { hours } = await forecast(site, tz);
-    const byHour = new Map(hours.map((h) => [Math.floor(new Date(h.time).getTime() / HOUR_MS), h.score]));
+    const byHour = new Map<number, HourConditions>(
+      hours.map((h) => [
+        Math.floor(new Date(h.time).getTime() / HOUR_MS),
+        { observability: h.score, seeingIdx: h.seeingIdx, transparencyIdx: h.transparencyIdx, windKmh: h.windKmh, gustKmh: h.gustKmh },
+      ]),
+    );
     return (t: Date) => byHour.get(Math.floor(t.getTime() / HOUR_MS));
   } catch {
     return null;

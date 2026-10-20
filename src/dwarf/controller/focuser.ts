@@ -87,7 +87,7 @@ export class Focuser {
   }
 
   /** Drive the focuser to an absolute position (~1 unit per step; "far" raises it; travel 0–702). */
-  async focusTo(target: number, tolerance = 2): Promise<number> {
+  async focusTo(target: number, tolerance = 0): Promise<number> {
     if (!Number.isFinite(target)) throw new Error('focus target must be a number');
     this.core.guards.assertFocusFree(`moving the focus to ${Math.round(target)}`);
     return this.serial(() => this.focusToNow(target, tolerance));

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package rgb;
+
+message ReqRgbBrightness {
+  int32 brightness = 1;
+}
+
+message ReqOpenRgb {
+}
+
+message ReqCloseRgb {
+}
+
+message ReqPowerDown {
+}
+
+message ReqOpenPowerInd {
+}
+
+message ReqClosePowerInd {
+}
+
+message ReqReboot {
+}

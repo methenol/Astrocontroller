@@ -219,7 +219,7 @@ export function combine(site: Site, tz: string, om: OpenMeteo, astro: AstroMap):
     };
     const a = astroAt(astro, t.getTime());
     const { score, issues } = scoreHour(base, a?.transparency);
-    hours.push({ ...base, seeing: a ? SEEING[a.seeing] : undefined, transparency: a ? TRANSPARENCY[a.transparency] : undefined, score, rating: rate(score), issues });
+    hours.push({ ...base, seeing: a ? SEEING[a.seeing] : undefined, transparency: a ? TRANSPARENCY[a.transparency] : undefined, seeingIdx: a?.seeing, transparencyIdx: a?.transparency, score, rating: rate(score), issues });
   }
   const c = om.current ?? {};
   const current: CurrentWeather = {

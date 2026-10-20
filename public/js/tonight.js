@@ -45,6 +45,18 @@ async function loadConditions() {
 
 const skyCls = (q) => (q == null ? '' : q >= SKY_OK ? 'ok' : q >= SKY_WARN ? 'warn' : 'bad');
 
+/** What the sky and the glass say about this target, as the one word the user scans for. */
+function verdictTag(t) {
+  if (t.gated) {
+    return t.detectBucket === 'SKIP_TONIGHT'
+      ? `<span class="badge failed" title="${esc(t.gateReason ?? '')}">beyond tonight's sky</span>`
+      : `<span class="badge waiting" title="${esc(t.gateReason ?? '')}">poor fit</span>`;
+  }
+  if (t.detectBucket === 'EASY') return '<span class="badge done" title="the sky brings this up on its own">easy</span>';
+  if (t.detectBucket === 'NEEDS_INTEG') return `<span class="badge waiting" title="${esc(t.detectReason ?? '')}">needs time</span>`;
+  return '';
+}
+
 function planRow(t) {
   const names = [t.name, ...(t.aliases ?? [])].filter((a, i, arr) => a && arr.indexOf(a) === i).slice(0, 3);
   const filter = String(t.suggestedFilter ?? '').split(' (')[0];
@@ -52,10 +64,18 @@ function planRow(t) {
   const weather = t.weatherAlignment != null
     ? `<b class="sky ${skyCls(t.weatherAlignment)}">${esc(t.weatherAlignment)}/100</b><small>${esc(t.clearHours)} clear / ${esc(t.hoursAboveMin)} h up</small>`
     : `${esc(t.hoursAboveMin)} h`;
-  return `<tr><td><b>${esc(t.displayName ?? t.name)}</b><small>${esc(names.join(' · '))}</small><small>${esc(t.type)}, ${esc(t.sizeArcmin)}′, mag ${esc(t.magnitude ?? '–')}</small></td>
-    <td data-label="Best time">${esc(t.bestTime ?? '')}<small>max ${esc(t.maxAltitude)}°${sky}</small></td>
+  // The best run that is simultaneously up, forecast-clear and moon-workable — the hours to actually point at.
+  const clear = t.bestClearMinutes >= 5 && t.bestClearFrom
+    ? `<small title="the longest run simultaneously up, forecast-clear and moon-workable">clear ${esc(t.bestClearFrom)}–${esc(t.bestClearUntil)} (${esc(t.bestClearMinutes)} min)</small>`
+    : '';
+  const range = Array.isArray(t.subRangeSeconds) ? `${t.subRangeSeconds[0]}–${t.subRangeSeconds[1]}s` : `${t.subSeconds}s`;
+  const sub = (t.subSeconds != null || Array.isArray(t.subRangeSeconds)) && t.exposureAdvice
+    ? `<small title="${esc(t.exposureAdvice)}">${esc(range)} × ${esc(t.subs ?? '–')} subs</small>`
+    : '';
+  return `<tr${t.gated ? ' class="gated"' : ''}><td><b>${esc(t.displayName ?? t.name)}</b> ${verdictTag(t)}<small>${esc(names.join(' · '))}</small><small>${esc(t.type)}, ${esc(t.sizeArcmin)}′, mag ${esc(t.magnitude ?? '–')}</small>${t.gated && t.gateReason ? `<small>${esc(t.gateReason)}</small>` : ''}</td>
+    <td data-label="Best time">${esc(t.bestTime ?? '')}<small>max ${esc(t.maxAltitude)}°${sky}</small>${clear}</td>
     <td data-label="${t.weatherAlignment != null ? 'Weather' : 'Hours above minimum'}">${weather}</td>
-    <td data-label="Framing &amp; filter"><small>${esc(t.framing)}</small><small>${esc(filter)}</small></td>
+    <td data-label="Framing &amp; filter"><small>${esc(t.framing)}</small><small>${esc(filter)}</small>${sub}</td>
     <td><button class="ghost" data-image="${esc(t.gotoName ?? t.name)}">Image</button></td></tr>`;
 }
 
@@ -76,9 +96,19 @@ async function loadPlan() {
     const wx = targets.some((t) => t.weatherAlignment != null);
     const hoursTitle = wx ? `weather = forecast quality during the target\'s own best hours (weighted toward its peak); clear / up = forecast-weighted hours / hours above the minimum altitude` : 'hours above the minimum altitude';
     const sizeFilter = fov ? ` · fills ≥${esc(fov)}% of the tele frame` : '';
-    el.innerHTML = `<p class="muted small">${esc(r.window?.start)} → ${esc(r.window?.end)} (${esc(r.window?.hours)} h) · min altitude ${esc(r.minAltitude)}°${sizeFilter} · Moon ${esc(r.moon?.illuminationPercent)}% · ${esc(r.weather ?? '')}</p>
+    const skyGlass = r.sky ? ` · Bortle ${esc(r.sky.bortle)} (SQM ${esc(r.sky.sqm)}) · ${esc(r.sky.filter === 'none' ? 'no filter' : r.sky.filter)}` : '';
+    // The one thing to start with, and the season the list was read off. When every row is gated
+    // there is no hero, and saying so is more use than quietly printing the best of the bad.
+    const hero = r.hero
+      ? `<p class="plan-hero">Start with <b>${esc(r.hero)}</b>${r.season?.label && r.season.label !== '—' ? ` <span class="muted">— ${esc(r.season.label)}</span>` : ''}</p>`
+      : `<p class="plan-hero muted">${targets.length ? 'Nothing here is shootable as it stands — each row says why.' : 'No targets match this filter.'}</p>`;
+    const resting = Array.isArray(r.resting) && r.resting.length
+      ? `<p class="muted small">Held back by memory: ${r.resting.map((x) => `<b>${esc(x.displayName ?? x.name)}</b> (${esc(x.reason)})`).join(' · ')}</p>`
+      : '';
+    el.innerHTML = `${hero}
+      <p class="muted small">${esc(r.window?.start)} → ${esc(r.window?.end)} (${esc(r.window?.hours)} h) · min altitude ${esc(r.minAltitude)}°${sizeFilter} · Moon ${esc(r.moon?.illuminationPercent)}%${skyGlass} · ${esc(r.weather ?? '')}</p>
       <table class="plan-table"><tr><th>Target</th><th>Best</th><th title="${esc(hoursTitle)}">${wx ? 'Weather' : 'Hours'}</th><th>Fit / filter</th><th></th></tr>
-      ${targets.map(planRow).join('')}</table>`;
+      ${targets.map(planRow).join('')}</table>${resting}`;
   } catch (e) {
     if (mine === planSeq) el.innerHTML = `<span class="muted">${esc(e.message)}</span>`;
   }

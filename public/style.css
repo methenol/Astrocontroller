@@ -382,6 +382,11 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .plan-table .sky.ok { color: var(--ok); }
 .plan-table .sky.warn { color: var(--warn); }
 .plan-table .sky.bad { color: var(--err); }
+.plan-hero { margin: 0 0 6px; font-size: 13px; }
+/* A row the sky or the glass cannot bring up: still listed, still explained, visibly set aside. */
+.plan-table tr.gated td { opacity: 0.6; }
+.plan-table tr.gated td b { font-weight: 500; }
+.plan-table .badge { margin-left: 4px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; min-width: 0; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 11.5px; min-width: 0; }
 .tile img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; display: block; background: #000; border: none; border-radius: 0; max-height: none; }

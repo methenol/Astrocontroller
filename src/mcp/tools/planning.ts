@@ -1,12 +1,13 @@
 /** Night planning: sky and weather, a clear-sky check, target ranking and the object catalog. */
 import { z } from 'zod';
-import { config } from '../../config.js';
+import { config, planDefaults } from '../../config.js';
 import { errMsg } from '../../log.js';
 import { round } from '../../dwarf/device.js';
 import { analyze, autoStretch, loadImage, toJpeg, type FloatImage } from '../../media/images.js';
 import { describe as describeObject, findObject, gotoLabel, searchObjects } from '../../astro/catalog.js';
 import { queryCatalog } from '../../astro/catalog-search.js';
 import { planNight } from '../../astro/planner.js';
+import * as rest from '../../astro/rest.js';
 import * as sky from '../../astro/sky.js';
 import * as weather from '../../astro/weather.js';
 import { capturedLine, localTime, saveCapture, text, withImage, type ToolContext, type ToolFn } from './common.js';
@@ -145,7 +146,10 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
       const a = analyze(img, 'wide');
       const stars = a.stars.count;
       const bg = a.stats.median;
-      const altitudeDeg = pos?.pitchDeg !== undefined ? pos.pitchDeg - HORIZON_PITCH_DEG : undefined;
+      // pitch is altitude only on the alt-az head: tilted onto a wedge (EQ) it is a polar-axis angle,
+      // and a "below the horizon" verdict from it is false (2026-10-19: EQ pointing at 43° read as -15°)
+      const altAz = dwarf.state.bodyMode !== 'eq';
+      const altitudeDeg = altAz && pos?.pitchDeg !== undefined ? pos.pitchDeg - HORIZON_PITCH_DEG : undefined;
       const sunAlt = (() => {
         try {
           return sky.bodyAlt(site(), 'Sun', new Date());
@@ -165,7 +169,7 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
         settingsUsed: `${exp}s, gain ${g} (camera ${restoredTo.startsWith('NOT') ? restoredTo : `restored to ${restoredTo}`})`,
         captured: capturedLine(img),
         image: `captures/${saved}`,
-        notes: pos?.pitchDeg !== undefined && pos.pitchDeg < LOW_POINTING_PITCH_DEG ? 'pointing is low (< 30° altitude): trees, houses and haze will reduce the star count' : undefined,
+        notes: altAz && pos?.pitchDeg !== undefined && pos.pitchDeg < LOW_POINTING_PITCH_DEG ? 'pointing is low (< 30° altitude): trees, houses and haze will reduce the star count' : undefined,
       };
       return withImage(jpeg, JSON.stringify(summary, null, 1));
     },
@@ -173,7 +177,7 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
 
   tool(
     'plan_targets',
-    "Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera. Each target gets a visibility score (hours above the minimum altitude, peak altitude, size vs field of view, brightness, Moon separation), scaled by weatherAlignment: how good the hourly forecast (clouds, rain, wind, dew, seeing, transparency) is during that target's own best hours, weighted toward its peak. The best targets are those whose optimal time coincides with good weather. bestTime is the target's own peak; skyAtBest is the forecast then; clearHours are its forecast-weighted hours up. Use before choosing what to image, and schedule each target around its bestTime.",
+    "Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera. Each target is scored on five things — framing (fits the tele frame), reach (fraction of tonight it is up), integration (minutes actually worth pointing at, after the Moon by target class, alt-az field rotation near the zenith, and a real session's duty cycle), detectability (its surface brightness against tonight's sky through the filter in config) and appeal — then scaled by weatherAlignment (how good the forecast is during that target's own best hours, weighted toward its peak) and reduced by the app's memory of what it suggested recently and what the library already holds. Quote the numbers, do not re-derive them: `detectReason` says whether the sky and glass can bring it up at all, `usableMinutes` is the time that counts, `subSeconds`/`subs`/`integrationMinutes`/`exposureAdvice` are the exposure answer, `bestClearFrom`/`bestClearUntil` is the longest run that is up, forecast-clear and moon-workable (the go/no-go window), and `restReason` why something is being held back. `hero` is what to start with, `season` what tonight's sky is about. Plan against a sky with PLAN_BORTLE and, per target, the best of the scope's own filters (PLAN_FILTERS: Astro / Duo-Band); `suggestedFilter` starts with the filter to pass to live_stacking. Override per call with bortle, or filter to force one glass.",
     {
       types: z.array(z.string()).optional().describe('galaxy, nebula, emission, planetary, cluster, globular, open_cluster, supernova_remnant, reflection, dark, galaxy_cluster'),
       min_altitude: z.number().min(0).lt(90).optional(),
@@ -184,27 +188,58 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
       start: z.string().optional().describe('local time YYYY-MM-DDTHH:MM; default astronomical dusk (or now)'),
       end: z.string().optional().describe('local time; default astronomical dawn'),
       limit: z.number().int().min(1).max(50).optional(),
+      bortle: z.number().int().min(1).max(9).optional().describe('judge against this sky class instead of PLAN_BORTLE (1 dark … 9 inner city)'),
+      filter: z.string().optional().describe('plan every target through this one glass instead of the scope\'s own filters ("none", "astro", "duo-band", "ha 7nm", "oiii"); omit to have each target planned through the best of PLAN_FILTERS (the Dwarf 3\'s Astro / Duo-Band), named in suggestedFilter'),
+      ignore_rest: z.boolean().optional().describe('true to rank on the sky alone, ignoring captures and recent suggestions (answers "what is up tonight", not "what should I shoot")'),
     },
     async (a) => {
       const s = site();
       const fov = teleFov();
-      const observability = (await weather.observabilityAt(s, tz)) ?? undefined;
-      return text(
-        planNight(s, {
-          observability,
-          types: a.types,
-          minAltitude: a.min_altitude ?? config.observer.minAltitudeDeg,
-          maxMagnitude: a.max_magnitude,
-          minSizeArcmin: a.min_size_arcmin,
-          maxSizeArcmin: a.max_size_arcmin,
-          minFovPercent: a.min_fov_percent,
-          start: a.start ? sky.parseLocal(a.start, tz) : undefined,
-          end: a.end ? sky.parseLocal(a.end, tz) : undefined,
-          limit: a.limit,
-          fovArcmin: { w: fov.h * 60, h: fov.v * 60 },
-          timezone: tz,
-        }),
-      );
+      const conditions = (await weather.conditionsAt(s, tz)) ?? undefined;
+      const defaults = planDefaults();
+      const plan = planNight(s, {
+        conditions,
+        types: a.types,
+        minAltitude: a.min_altitude ?? config.observer.minAltitudeDeg,
+        maxMagnitude: a.max_magnitude,
+        minSizeArcmin: a.min_size_arcmin,
+        maxSizeArcmin: a.max_size_arcmin,
+        minFovPercent: a.min_fov_percent,
+        start: a.start ? sky.parseLocal(a.start, tz) : undefined,
+        end: a.end ? sky.parseLocal(a.end, tz) : undefined,
+        limit: a.limit,
+        fovArcmin: { w: fov.h * 60, h: fov.v * 60 },
+        timezone: tz,
+        bortle: a.bortle ?? defaults.bortle,
+        filter: a.filter ?? (defaults.filter || undefined),
+        filters: defaults.filters,
+        rig: defaults.rig,
+        applyRest: a.ignore_rest ? false : undefined,
+      });
+      if (!a.ignore_rest) rest.recordShown([{ name: plan.hero ?? '', role: 'hero' }, ...plan.targets.slice(0, 5).map((t) => ({ name: t.name, role: 'shortlist' as const }))], sky.localDate(new Date(), tz));
+      return text(plan);
+    },
+  );
+
+  tool(
+    'rest_target',
+    "Tell the planner to hold a target back, or to stop holding it back: role=snooze parks it like a recent capture and lets it decay back; role=done never suggests it again until cleared; role=clear lifts both. Targets the library already holds are rested by themselves — this is the user's own say on top of that. It does not stop the user from shooting it, and it does not affect find_target or search_catalog.",
+    {
+      name: z.string().describe('target as people call it: M 31, NGC 7000, Sh2-155…'),
+      role: z.enum(['snooze', 'done', 'clear']),
+    },
+    async ({ name, role }) => {
+      const o = findObject(name);
+      if (!o) throw new Error(`"${name}" is not in the catalog`);
+      const today = sky.localDate(new Date(), tz);
+      const records = role === 'clear' ? rest.liftRest(name) : rest.setRest(name, role === 'done' ? 'done' : 'snoozed', today);
+      const state = rest.restState(name, today, records);
+      return text({
+        action: role,
+        resting: state ? { kind: state.kind, until: state.until, daysAgo: state.daysAgo } : null,
+        note: role === 'done' ? 'it will not appear in plan_targets until you clear it' : state ? 'it will fade back into the plan as the rest decays' : 'it is back in the pool',
+        target: gotoLabel(o),
+      });
     },
   );
 

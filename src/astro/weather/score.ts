@@ -21,13 +21,16 @@ export interface HourForecast {
   visibilityKm: number | null;
   seeing?: string;
   transparency?: string;
+  /** the raw 7Timer indices (1 best … 8 worst) behind those labels, for per-target scoring */
+  seeingIdx?: number;
+  transparencyIdx?: number;
   score: number;
   rating: Rating;
   issues: string[];
 }
 
 export type Rating = 'excellent' | 'good' | 'fair' | 'poor';
-export type HourInputs = Omit<HourForecast, 'score' | 'rating' | 'issues' | 'seeing' | 'transparency'>;
+export type HourInputs = Omit<HourForecast, 'score' | 'rating' | 'issues' | 'seeing' | 'transparency' | 'seeingIdx' | 'transparencyIdx'>;
 
 // 7Timer scales (1 best … 8 worst).
 export const SEEING = ['', '<0.5″', '0.5–0.75″', '0.75–1″', '1–1.25″', '1.25–1.5″', '1.5–2″', '2–2.5″', '>2.5″'];

@@ -12,6 +12,7 @@
  *   astro.ts     calibration, GoTo, pointing recovery, tracking, polar alignment, astro recovery
  *   stacking-control.ts  stack preparation, start confirmation, stop
  *   darks.ts     dark masters
+ *   extras.ts    the device switches the SDK never registered (anti-tangle, defog, cooling, shutdown)
  *
  * Events: 'state' (TelescopeState, throttled), 'notification' (Notification), 'stackProgress'
  * (cam, info), 'stackHealth' (cam, health, prev), 'released'.
@@ -30,6 +31,7 @@ import { AstroControl } from './controller/astro.js';
 import { CameraControl, type ShootingTech } from './controller/camera.js';
 import { busyWith, isTracking, request, type Core, type Location } from './controller/core.js';
 import { Darks, type DarkRequest } from './controller/darks.js';
+import { DeviceExtrasControl } from './controller/extras.js';
 import { Focuser } from './controller/focuser.js';
 import { Routines } from './controller/follow.js';
 import { Guards } from './controller/guards.js';
@@ -67,6 +69,8 @@ export class Dwarf extends SafeEmitter {
 
   readonly link: DwarfLink;
   readonly stacks: StackTracker;
+  /** The device switches the official SDK never registered: anti-tangle, defog, cooling, shutdown, power sound, do-not-disturb. */
+  readonly extras: DeviceExtrasControl;
   /** Live parameter values keyed by packed paramId (decimal string). */
   readonly params: ParamCache = new Map();
   /** Overrides from the agent/UI for this run (falls back to .env). */
@@ -120,6 +124,7 @@ export class Dwarf extends SafeEmitter {
     this.astro = new AstroControl(this.core, this.routines, this.camera, this.motors, this.system);
     this.stacking = new StackingControl(this.core, this.camera, exposureAtStart);
     this.darks = new Darks(this.core);
+  this.extras = new DeviceExtrasControl(this.core);
 
     this.stacks.on('progress', (cam: CameraName, info: StackingInfo) => this.emit('stackProgress', cam, info));
     this.stacks.on('health', (cam: CameraName, h: StackHealth, prev?: StackHealth) => {
@@ -510,7 +515,7 @@ export class Dwarf extends SafeEmitter {
     return this.focuser.autofocusTiming;
   }
 
-  focusTo(target: number, tolerance = 2): Promise<number> {
+  focusTo(target: number, tolerance = 0): Promise<number> {
     return this.focuser.focusTo(target, tolerance);
   }
 

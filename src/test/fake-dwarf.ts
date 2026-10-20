@@ -14,6 +14,8 @@ import { requestType, responseType, protoTypeByName, decodeWith, NOTIFY, type Pr
 
 export interface ReceivedRequest {
   cmd: number;
+  /** the `WsModuleId` ordinal the request was framed with — the device routes on this, not on the cmd alone */
+  moduleId: number;
   data: Record<string, unknown>;
   t: number;
 }
@@ -92,8 +94,10 @@ export class FakeDwarf {
   async notify(which: string | number, data: Record<string, unknown>): Promise<void> {
     const cmd = typeof which === 'number' ? which : notifyCmdByName.get(which);
     if (cmd === undefined) throw new Error(`unknown notification ${which}`);
-    const ref = NOTIFY[cmd]?.type;
-    const payload = ref ? encode(protoTypeByName(ref), data) : new Uint8Array(0);
+    // The hand table names most notifications; anything outside it (attitude, the device switches) is
+    // encoded with the payload the APK's catalogue declares for that id, which is what the device sends.
+    const ref = cmd in NOTIFY ? NOTIFY[cmd]?.type : undefined;
+    const payload = cmd in NOTIFY ? (ref ? encode(protoTypeByName(ref), data) : new Uint8Array(0)) : encode(responseType(cmd), data);
     await this.deliver(encodePacket(cmd, MessageType.NOTIFICATION, payload, 'dwarf', 1));
   }
 
@@ -133,7 +137,7 @@ export class FakeDwarf {
 
   private async handle(ws: WebSocket, bytes: Uint8Array): Promise<void> {
     const pkt = decodePacket(bytes);
-    const req: ReceivedRequest = { cmd: pkt.cmd, data: decodeWith(requestType(pkt.cmd), pkt.data), t: Date.now() };
+    const req: ReceivedRequest = { cmd: pkt.cmd, moduleId: pkt.moduleId, data: decodeWith(requestType(pkt.cmd), pkt.data), t: Date.now() };
     this.requests.push(req);
     for (const w of [...this.waiters]) {
       if (w.cmd === req.cmd) {
@@ -142,7 +146,9 @@ export class FakeDwarf {
       }
     }
     const h = this.handlers.get(pkt.cmd);
-    const out = h ? await h(req, this) : this.replyByDefault ? { code: 0 } : undefined;
+    // A command the APK declares no response payload for gets no reply, which is what the device owes
+    // it; a test that scripts a payload for one still goes through `encode` and fails loudly there.
+    const out = h ? await h(req, this) : this.replyByDefault && responseType(pkt.cmd) ? { code: 0 } : undefined;
     if (!out || this.hung || ws !== this.client) return;
     await this.deliver(encodePacket(pkt.cmd, MessageType.REPLY, encode(responseType(pkt.cmd), out), 'dwarf', 1), ws);
   }
