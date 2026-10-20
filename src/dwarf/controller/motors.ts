@@ -4,11 +4,13 @@
  * firmware's own time limit with the axis part of the way (-14511 "overtime get reset return",
  * verified 2026-10-04 02:43), and going again continues from where it stopped.
  */
-import { errMsg } from '../../log.js';
+import { errMsg, logger } from '../../log.js';
 import { DwarfCommandError } from '../link.js';
 import { Cmd, errorText } from '../protocol.js';
 import { astroRoutineActive, isTracking, request, sendStop, type Core } from './core.js';
 import { MOTOR_NO_REFERENCE, MOTOR_OVERTIME, round, sleep } from './util.js';
+
+const log = logger('motors');
 
 export interface MotorPositions {
   rotationDeg?: number;
@@ -111,15 +113,8 @@ export class Motors {
   async homeNow(): Promise<string> {
     this.core.guards.assertNoNdLock('homing the motors');
     await this.release();
-    const started = Date.now();
     const notes: string[] = [];
-    // A power-off or a lost connection ends the routine: resetting through a shutdown left the
-    // pitch with a wrong reference (2026-10-11 02:48: 323°, outside its travel).
-    const stillThere = () => {
-      if (this.core.lastDropAt >= started) {
-        throw new Error('homing stopped: the telescope powered off or the connection dropped during it, so nothing more was sent. Once it is back, call motors_home once.');
-      }
-    };
+    const stillThere = this.dropCheck('homing');
     await this.homeAxis(2, true, stillThere, notes);
     // rotation reference switch at ≈12° (direction=true has no switch → -14520)
     const rot = await this.homeAxis(1, false, stillThere, notes);
@@ -146,6 +141,38 @@ export class Motors {
     this.markMotion();
     const q = await this.readPositions();
     return `homed: rotation ${q.rotationDeg}° (centre of travel), pitch ${q.pitchDeg}° (pointing down; raise with move_motors, e.g. pitch 160 ≈ 70° altitude)${notes.length ? `. Notes: ${notes.join('; ')}` : ''}`;
+  }
+
+  /**
+   * A power-off or a lost connection ends a reset routine: resetting through a shutdown left the
+   * pitch with a wrong reference (2026-10-11 02:48: 323°, outside its travel).
+   */
+  private dropCheck(what: string): () => void {
+    const started = Date.now();
+    return () => {
+      if (this.core.lastDropAt >= started) {
+        throw new Error(`${what} stopped: the telescope powered off or the connection dropped during it, so nothing more was sent. Once it is back, call motors_home once.`);
+      }
+    };
+  }
+
+  /**
+   * Give both axes their reference again where they stand, without parking: after a GoTo the
+   * motors read "not homed" (-14520), and each reset drives back to where it started, so the pose a
+   * plate-solved GoTo reached can be read in motor angles (the obstruction survey's anchors).
+   * Tracking is stopped first. Inside an operation that is already running.
+   */
+  async rereferenceNow(): Promise<MotorPositions> {
+    this.core.guards.assertNoNdLock('re-referencing the motors');
+    await this.release();
+    const notes: string[] = [];
+    const stillThere = this.dropCheck('re-referencing the motors');
+    await this.homeAxis(2, true, stillThere, notes);
+    await this.homeAxis(1, false, stillThere, notes);
+    this.markMotion();
+    stillThere();
+    if (notes.length) log.info(`re-reference: ${notes.join('; ')}`);
+    return this.readPositions();
   }
 
   /**

@@ -43,7 +43,7 @@ import { sleep } from './controller/util.js';
 import { SafeEmitter } from '../util/events.js';
 
 export type { CameraName, StackingInfo, StackHealth };
-export type { TelescopeState, FocusTune, DarkCaptureState } from './controller/state.js';
+export type { TelescopeState, FocusTune, DarkCaptureState, HorizonSurvey } from './controller/state.js';
 export { AstroServiceHungError } from './controller/follow.js';
 export { BURST_MAX } from './controller/camera.js';
 export { FOCUS_MAX, FILTERS, WB_SCENES, camId, round, timezoneOffsetHours } from './controller/util.js';
@@ -495,6 +495,11 @@ export class Dwarf extends SafeEmitter {
 
   park(): Promise<string> {
     return this.motors.park();
+  }
+
+  /** Re-reference both axes where they stand, no park (inside a running operation). */
+  rereferenceMotors() {
+    return this.motors.rereferenceNow();
   }
 
   nudge(angleDeg: number, speed: number, durationMs: number): Promise<void> {

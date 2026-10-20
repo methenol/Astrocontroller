@@ -7,6 +7,7 @@ import { analyze, autoStretch, loadImage, toJpeg, type FloatImage } from '../../
 import { describe as describeObject, findObject, gotoLabel, searchObjects } from '../../astro/catalog.js';
 import { queryCatalog } from '../../astro/catalog-search.js';
 import { planNight } from '../../astro/planner.js';
+import { horizonFor } from '../../astro/horizon.js';
 import * as rest from '../../astro/rest.js';
 import * as sky from '../../astro/sky.js';
 import * as weather from '../../astro/weather.js';
@@ -177,7 +178,7 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
 
   tool(
     'plan_targets',
-    "Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera. Each target is scored on five things — framing (fits the tele frame), reach (fraction of tonight it is up), integration (minutes actually worth pointing at, after the Moon by target class, alt-az field rotation near the zenith, and a real session's duty cycle), detectability (its surface brightness against tonight's sky through the filter in config) and appeal — then scaled by weatherAlignment (how good the forecast is during that target's own best hours, weighted toward its peak) and reduced by the app's memory of what it suggested recently and what the library already holds. Quote the numbers, do not re-derive them: `detectReason` says whether the sky and glass can bring it up at all, `usableMinutes` is the time that counts, `subSeconds`/`subs`/`integrationMinutes`/`exposureAdvice` are the exposure answer, `bestClearFrom`/`bestClearUntil` is the longest run that is up, forecast-clear and moon-workable (the go/no-go window), and `restReason` why something is being held back. `hero` is what to start with, `season` what tonight's sky is about. Plan against a sky with PLAN_BORTLE and, per target, the best of the scope's own filters (PLAN_FILTERS: Astro / Duo-Band); `suggestedFilter` starts with the filter to pass to live_stacking. Override per call with bortle, or filter to force one glass.",
+    "Rank deep-sky targets for tonight (or a given window) for the Dwarf 3 tele camera. Each target is scored on five things — framing (fits the tele frame), reach (fraction of tonight it is up), integration (minutes actually worth pointing at, after the Moon by target class, alt-az field rotation near the zenith, and a real session's duty cycle), detectability (its surface brightness against tonight's sky through the filter in config) and appeal — then scaled by weatherAlignment (how good the forecast is during that target's own best hours, weighted toward its peak) and reduced by the app's memory of what it suggested recently and what the library already holds. Quote the numbers, do not re-derive them: `detectReason` says whether the sky and glass can bring it up at all, `usableMinutes` is the time that counts, `subSeconds`/`subs`/`integrationMinutes`/`exposureAdvice` are the exposure answer, `bestClearFrom`/`bestClearUntil` is the longest run that is up, forecast-clear and moon-workable (the go/no-go window), and `restReason` why something is being held back. `hero` is what to start with, `season` what tonight's sky is about. Plan against a sky with PLAN_BORTLE and, per target, the best of the scope's own filters (PLAN_FILTERS: Astro / Duo-Band); `suggestedFilter` starts with the filter to pass to live_stacking. Override per call with bortle, or filter to force one glass. When this site has an obstruction map (map_obstructions), a target counts as up only above the mapped trees and buildings in its direction: `horizon` names the map in use (null = none, minimum altitude only), `obstructedNow` marks a target that is above the minimum altitude but behind an obstruction right now; ignore_horizon plans without it.",
     {
       types: z.array(z.string()).optional().describe('galaxy, nebula, emission, planetary, cluster, globular, open_cluster, supernova_remnant, reflection, dark, galaxy_cluster'),
       min_altitude: z.number().min(0).lt(90).optional(),
@@ -191,9 +192,11 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
       bortle: z.number().int().min(1).max(9).optional().describe('judge against this sky class instead of PLAN_BORTLE (1 dark … 9 inner city)'),
       filter: z.string().optional().describe('plan every target through this one glass instead of the scope\'s own filters ("none", "astro", "duo-band", "ha 7nm", "oiii"); omit to have each target planned through the best of PLAN_FILTERS (the Dwarf 3\'s Astro / Duo-Band), named in suggestedFilter'),
       ignore_rest: z.boolean().optional().describe('true to rank on the sky alone, ignoring captures and recent suggestions (answers "what is up tonight", not "what should I shoot")'),
+      ignore_horizon: z.boolean().optional().describe("true to plan against the minimum altitude alone, ignoring this site's mapped obstructions (map_obstructions)"),
     },
     async (a) => {
       const s = site();
+      const horizon = a.ignore_horizon ? undefined : horizonFor(s);
       const fov = teleFov();
       const conditions = (await weather.conditionsAt(s, tz)) ?? undefined;
       const defaults = planDefaults();
@@ -215,6 +218,7 @@ export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext)
         filters: defaults.filters,
         rig: defaults.rig,
         applyRest: a.ignore_rest ? false : undefined,
+        horizon,
       });
       if (!a.ignore_rest) rest.recordShown([{ name: plan.hero ?? '', role: 'hero' }, ...plan.targets.slice(0, 5).map((t) => ({ name: t.name, role: 'shortlist' as const }))], sky.localDate(new Date(), tz));
       return text(plan);

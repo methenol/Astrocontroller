@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { config, planDefaults } from '../../config.js';
 import * as sky from '../../astro/sky.js';
 import { planNight } from '../../astro/planner.js';
+import { horizonFor } from '../../astro/horizon.js';
 import * as rest from '../../astro/rest.js';
 import * as weather from '../../astro/weather.js';
 import { findObject } from '../../astro/catalog.js';
@@ -42,7 +43,7 @@ export function skyRoutes({ dwarf }: WebContext): Router {
       const types = list(queryString(req, 'types'));
       const minFovPercent = queryNumber(req, 'minFovPercent');
       const conditions = (await weather.conditionsAt(site, tz())) ?? undefined;
-      const plan = planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, minFovPercent, limit: 20, fovArcmin: teleFovArcmin(dwarf), timezone: tz(), conditions, ...planDefaults() });
+      const plan = planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, minFovPercent, limit: 20, fovArcmin: teleFovArcmin(dwarf), timezone: tz(), conditions, ...planDefaults(), horizon: horizonFor(site) });
       // The tab showing a target is what the memory rotates against, same as an agent plan call:
       // idempotent per night and role, so polling the tab tonight cannot stack penalties on itself.
       rest.recordShown([{ name: plan.hero ?? '', role: 'hero' }, ...plan.targets.slice(0, 5).map((t) => ({ name: t.name, role: 'shortlist' as const }))], sky.localDate(new Date(), tz()));

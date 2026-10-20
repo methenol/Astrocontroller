@@ -127,6 +127,15 @@ describe('Dwarf motors against a fake mount', () => {
     assert.deepEqual([m.pos[1], m.pos[2]], [200, 150]);
   });
 
+  test('re-referencing resets both axes where they stand and does not park (the survey anchors)', async () => {
+    const m = new FakeMount(fake, { rotation: 200, pitch: 150 });
+    const p = await dwarf.rereferenceMotors();
+    assert.deepEqual([p.homed, p.rotationDeg, p.pitchDeg], [true, 200, 150]);
+    assert.deepEqual(fake.requestsFor(Cmd.STEP_MOTOR_RESET).map((x) => Number(x.data.id)), [2, 1]);
+    assert.equal(fake.requestsFor(Cmd.STEP_MOTOR_RUN_TO).length, 0);
+    assert.deepEqual([m.pos[1], m.pos[2]], [200, 150]);
+  });
+
   test('a move ended early by the time limit continues from the measured position', async () => {
     const m = new FakeMount(fake, { rotation: 100, pitch: 100 });
     m.homed = { 1: true, 2: true };

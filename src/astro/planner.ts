@@ -25,6 +25,7 @@ import { appealScore, conditionsPenalty, detectFor, emissionOf, moonlitKeep, sqm
 import { subPlan, type Rig } from './exposure.js';
 import { captureRecords, loadRest, restPenalty, restState, type RestRecord } from './rest.js';
 import type { HourConditions } from './weather.js';
+import type { Horizon } from './horizon.js';
 
 export interface PlanOptions {
   start?: Date;
@@ -55,6 +56,8 @@ export interface PlanOptions {
   restRecords?: RestRecord[];
   /** the date the rest log is read against (defaults to today in the observer's zone) */
   today?: string;
+  /** the site's obstructions (astro/horizon.ts): a target counts as up only above them too; without one, minAltitude alone */
+  horizon?: Horizon;
 }
 
 export interface PlannedTarget {
@@ -78,6 +81,8 @@ export interface PlannedTarget {
   altitudeNow: number;
   /** compass direction now, 0 = N, 90 = E: two targets with close azimuths sit behind the same obstruction */
   azimuthNow: number;
+  /** above the minimum altitude now but behind the site's mapped obstructions; null without a horizon mask */
+  obstructedNow: boolean | null;
   moonSeparationDeg: number;
   framing: string;
   suggestedFilter: string;
@@ -124,6 +129,8 @@ export interface NightPlan {
   window: { start: string | null; end: string | null; hours: number };
   moon: { illuminationPercent: number; phase: string };
   minAltitude: number;
+  /** the site horizon the visibility was judged against, or null (minimum altitude only) */
+  horizon: string | null;
   weather: string;
   candidatesConsidered: number;
   /** the sky and glass every judgement on this plan was made against */
@@ -260,22 +267,25 @@ interface Sampled {
 
 /**
  * One pass over the window: visibility, the weather alignment, and what the Moon and the mount
- * leave of the time. Each sample above the minimum altitude is weighted by how well placed the
- * target is then (its altitude above the minimum relative to its own peak, squared, so the hours
- * around the peak dominate), and the forecast is averaged with those weights: 1 = clear at its
+ * leave of the time. Each sample above the minimum altitude (and above the site's mapped
+ * obstructions in its direction) is weighted by how well placed the target is then (its altitude
+ * above the minimum relative to its own peak, squared, so the hours around the peak dominate), and the forecast is averaged with those weights: 1 = clear at its
  * peak, 0 = clouded out when it matters. Without a forecast the alignment is 1.
  *
  * The Moon is not a penalty here: moonlit minutes are kept at `moonKeep` of their value, which
  * is why a narrowband target is still offered on a gibbous-Moon night and a faint galaxy is not.
  */
-function sample(site: Site, o: DsoObject, start: Date, end: Date, minAlt: number, moonKeep: number, conditions?: (t: Date) => HourConditions | undefined, mount: Rig['mount'] = 'alt-az'): Sampled {
-  // each sample stands for the step that follows it, up to the end of the window (the last stands for none)
-  const pts: Array<{ t: Date; alt: number; h: number; moonUp: boolean; c: HourConditions | undefined }> = [];
+function sample(site: Site, o: DsoObject, start: Date, end: Date, minAlt: number, moonKeep: number, conditions?: (t: Date) => HourConditions | undefined, mount: Rig['mount'] = 'alt-az', horizon?: Horizon): Sampled {
+  // each sample stands for the step that follows it, up to the end of the window (the last stands for none);
+  // `lim` is the altitude it must clear there: the minimum, or the site's obstruction in its direction when higher
+  const pts: Array<{ t: Date; alt: number; lim: number; h: number; moonUp: boolean; c: HourConditions | undefined }> = [];
   for (let t = start.getTime(); t <= end.getTime(); t += STEP_H * 3600e3) {
     const d = new Date(t);
+    const aa = altAz(site, o.raHours, o.decDeg, d);
     pts.push({
       t: d,
-      alt: altAz(site, o.raHours, o.decDeg, d).altitude,
+      alt: aa.altitude,
+      lim: horizon ? Math.max(minAlt, horizon.limit(aa.azimuth)) : minAlt,
       h: Math.min(STEP_H, (end.getTime() - t) / 3600e3),
       moonUp: bodyAlt(site, 'Moon', d) >= MOON_HORIZON,
       c: conditions?.(d),
@@ -291,7 +301,7 @@ function sample(site: Site, o: DsoObject, start: Date, end: Date, minAlt: number
       maxAlt = p.alt;
       maxAltAt = p.t;
     }
-    if (p.alt >= minAlt) {
+    if (p.alt >= p.lim) {
       up += p.h;
       firstAbove ??= p.t;
       lastAbove = p.t;
@@ -320,7 +330,7 @@ function sample(site: Site, o: DsoObject, start: Date, end: Date, minAlt: number
     runMin = 0;
   };
   for (const p of pts) {
-    if (p.alt < minAlt) {
+    if (p.alt < p.lim) {
       closeRun();
       continue;
     }
@@ -512,7 +522,7 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
   for (const o of candidates) {
     const { filter: glassUsed, d } = chooseGlass(o, glass);
     const keep = moonlitKeep(d.bucket === 'UNKNOWN' ? { ...d, bucket: brightness(o) >= 0.55 ? 'EASY' : 'NEEDS_INTEG' } : d, moonStrength);
-    const vis = sample(site, o, start, end, opts.minAltitude, keep, opts.conditions, mount);
+    const vis = sample(site, o, start, end, opts.minAltitude, keep, opts.conditions, mount, opts.horizon);
     if (vis.hoursAboveMin < MIN_HOURS_UP) continue;
 
     const fr = framing(o, opts.fovArcmin);
@@ -569,7 +579,11 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
         hoursAboveMin: vis.hoursAboveMin,
         visibleFrom: fmtTime(vis.firstAbove, opts.timezone),
         visibleUntil: fmtTime(vis.lastAbove, opts.timezone),
-        ...(({ altitude, azimuth }) => ({ altitudeNow: Math.round(altitude), azimuthNow: Math.round(azimuth) }))(altAz(site, o.raHours, o.decDeg, now)),
+        ...(({ altitude, azimuth }) => ({
+          altitudeNow: Math.round(altitude),
+          azimuthNow: Math.round(azimuth),
+          obstructedNow: opts.horizon ? altitude >= opts.minAltitude && altitude < opts.horizon.limit(azimuth) : null,
+        }))(altAz(site, o.raHours, o.decDeg, now)),
         moonSeparationDeg: Math.round(moonSep),
         framing: fr.text,
         suggestedFilter: perTarget ? `${glassUsed} (${d.reason})` : suggestFilter(o, moon.illuminationPercent),
@@ -603,7 +617,11 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
   // Up at the window's start first (now, once it is dark): a target already above the minimum
   // altitude outranks one still rising toward it, so the first rows can be shot the moment the
   // plan is read. Quality orders each group.
-  const upAtStart = new Map(scored.map((s) => [s, altAz(site, s.t.raHours, s.t.decDeg, start).altitude >= opts.minAltitude ? 1 : 0]));
+  const clears = (raHours: number, decDeg: number, when: Date) => {
+    const { altitude, azimuth } = altAz(site, raHours, decDeg, when);
+    return altitude >= Math.max(opts.minAltitude, opts.horizon?.limit(azimuth) ?? 0);
+  };
+  const upAtStart = new Map(scored.map((s) => [s, clears(s.t.raHours, s.t.decDeg, start) ? 1 : 0]));
   scored.sort((a, b) => upAtStart.get(b)! - upAtStart.get(a)! || b.quality - a.quality);
   // One field, one entry: drop a target whose centre lies inside a better-ranked one that is at
   // least as big (the Maia Nebula inside M 45, a Sharpless region inside an NGC complex).
@@ -633,6 +651,7 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
     window: { start: fmtTime(start, opts.timezone), end: fmtTime(end, opts.timezone), hours: Math.round(((end.getTime() - start.getTime()) / 3600e3) * 10) / 10 },
     moon: { illuminationPercent: moon.illuminationPercent, phase: moon.phase },
     minAltitude: opts.minAltitude,
+    horizon: opts.horizon?.summary ?? null,
     weather: hasWx ? "ranked by how well tonight's forecast lines up with each target's best hours" : 'no forecast available: ranked on visibility and sky class alone',
     candidatesConsidered: candidates.length,
     hero: hero?.displayName ?? null,

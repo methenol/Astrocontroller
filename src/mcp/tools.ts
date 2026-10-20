@@ -8,6 +8,7 @@ import { registerCameraTools } from './tools/camera.js';
 import { makeTool, type ToolContext } from './tools/common.js';
 import { registerDarkTools } from './tools/darks.js';
 import { registerDutyTools } from './tools/duty.js';
+import { registerHorizonTools } from './tools/horizon.js';
 import { registerLibraryTools } from './tools/library.js';
 import { registerMediaTools } from './tools/media.js';
 import { registerMotionTools } from './tools/motion.js';
@@ -22,6 +23,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerCameraTools(tool, ctx);
   registerMotionTools(tool, ctx);
   registerPlanningTools(tool, ctx);
+  registerHorizonTools(tool, ctx);
   registerAstroTools(tool, ctx);
   registerMediaTools(tool, ctx);
   registerLibraryTools(tool);

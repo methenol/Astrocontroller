@@ -28,7 +28,7 @@ There is no other ranking. When two sources disagree, apply this list once and a
 # 3. Freshness: stale data is void
 
 A tool result is **void** after any of these, and you must not cite it or act on it:
-- any motion: `goto_target`, `move_motors`, `motors_home`, `nudge`, `calibrate`, `polar_alignment`;
+- any motion: `goto_target`, `move_motors`, `motors_home`, `nudge`, `calibrate`, `polar_alignment`, `map_obstructions action=run`;
 - any owner message saying they changed something (homed, levelled, moved, re-aligned, swapped something);
 - for device state (pointing, tracking, stack, camera): more than 5 minutes old.
 
@@ -47,7 +47,8 @@ While the tele stack is **not** collecting (`stacking_status.tele.state` not run
 ## P1 — Duty sample with no stack collecting (start of night, after a stop, after a failure)
 1. `telescope_status` → read `bodyMode`, `motors.homed`, `link.state`, `stacking`.
 2. If `motors.homed` is false: `motors_home`, then `sync_time_and_location`.
-3. Choose the target. Use the one the owner named; otherwise `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; `altitudeNow` ≥ 25 (it is up **now**; the plan also lists targets that rise later); not on tonight's obscured list; `azimuthNow` at least 45° from every obscured azimuth (P3). Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
+   - Once per night, at the first P1: `map_obstructions` (status). If its `map` says none for this site: `map_obstructions action=run` (~20 min; it fixes its own pointing by plate solving and saves the map for this site). If it fails, go on without it: the plan still works, on the minimum altitude alone.
+3. Choose the target. Use the one the owner named; otherwise `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; `altitudeNow` ≥ 25 (it is up **now**; the plan also lists targets that rise later); `obstructedNow` not true (behind the site's mapped trees or buildings now); not on tonight's obscured list; `azimuthNow` at least 45° from every obscured azimuth (P3). Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
 4. Run **P2** on it.
 Nothing else comes first: no skills, no todo, no forecast, no notes.
 
@@ -74,7 +75,7 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
 The owner's word is final. Do not run `sky_check` to test it. Do not argue.
 1. `live_stacking action=stop` if a stack is running on it.
 2. Add the target to tonight's **obscured list**: name, `azimuthNow`, `altitudeNow`. Repeat the list at the end of every reply until a stack is collecting; after that, keep it in the todo list.
-3. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated`, has `altitudeNow` ≥ 25, and whose `azimuthNow` is **at least 45° away from every azimuth on the obscured list**. Go down the list once and act.
+3. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated`, has `altitudeNow` ≥ 25, `obstructedNow` not true, and whose `azimuthNow` is **at least 45° away from every azimuth on the obscured list**. Go down the list once and act.
 4. Run **P2** on it.
 Never GoTo a target on the obscured list again tonight unless the owner tells you to.
 
@@ -152,7 +153,7 @@ Daytime and other tasks (wildlife, Moon/planets, dark library, transfers): `tele
 NOTES.md and the skills (`.omp/skills/<name>/SKILL.md`) hold **unchanging facts about operating this scope and executing the owner's orders**: procedures, tool arguments that work, firmware behaviour and its fix, the owner's standing preferences.
 
 They **never** hold:
-- anything about a site: the scope moves almost every night. No obstructions, buildings, trees, horizons, directions, azimuths/altitudes, light pollution, what was in view;
+- anything about a site: the scope moves almost every night. No obstructions, buildings, trees, horizons, directions, azimuths/altitudes, light pollution, what was in view (the app keeps each site's obstruction map itself: `map_obstructions`);
 - anything about one night: what happened, targets shot, counts, temperatures, inventories, timings, weather;
 - assumptions, interpretations or guesses, including your own explanations of failures.
 

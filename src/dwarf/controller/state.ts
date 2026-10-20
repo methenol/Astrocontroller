@@ -49,6 +49,20 @@ export interface FocusTune {
   message?: string;
 }
 
+/** Progress of the obstruction survey (media/horizon/survey.ts), for the web UI. */
+export interface HorizonSurvey {
+  running: boolean;
+  phase: string;
+  startedAt: number;
+  finishedAt?: number;
+  index?: number;
+  total?: number;
+  message?: string;
+  error?: string;
+  /** the mask it saved */
+  maskId?: string;
+}
+
 export interface DarkCaptureState {
   state: string;
   progress?: number;
@@ -107,6 +121,8 @@ export interface TelescopeState {
   autofocus: { state: string; astro?: string };
   /** a star-sharpness measurement or focus sweep in progress (media/focus.ts publishes its progress here) */
   focusTune?: FocusTune;
+  /** the obstruction survey in progress or last run */
+  horizonSurvey?: HorizonSurvey;
   capture: { photo?: string; burst?: string; record?: string; timelapse?: string; panorama?: string; burstProgress?: string };
   sentry?: { state: string; objectType?: number };
   trackResult?: Record<string, unknown>;

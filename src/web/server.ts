@@ -11,6 +11,7 @@ import { rejectCrossSite } from './http.js';
 import { mountSockets } from './sockets.js';
 import { systemRoutes } from './routes/system.js';
 import { skyRoutes } from './routes/sky.js';
+import { horizonRoutes } from './routes/horizon.js';
 import { mediaRoutes, streamRoute, ThumbCache } from './routes/media.js';
 import { controlRoutes } from './routes/control.js';
 import { agentRoutes } from './routes/agent.js';
@@ -34,6 +35,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(rejectCrossSite);
   api.use(systemRoutes(ctx, () => thumbs.clear()));
   api.use(skyRoutes(ctx));
+  api.use(horizonRoutes(ctx));
   api.use(mediaRoutes(ctx, thumbs));
   api.use(controlRoutes(ctx));
   api.use(agentRoutes(ctx));

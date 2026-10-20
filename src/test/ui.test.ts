@@ -324,6 +324,45 @@ test('the planner and the database can filter by a minimum percent of the tele f
   await until(() => searchPath.includes('minFovPercent=40'), 'the search with the frame filter');
 });
 
+test('the obstruction map card: empty, a map with its plot, clear reloads the plan, map starts a survey', async () => {
+  route('GET plan', () => ({ window: { start: '20:00', end: '04:00', hours: 8 }, moon: { illuminationPercent: 10, phase: 'waxing crescent' }, minAltitude: 20, weather: 'clear', targets: [] }));
+  let mask: unknown = null;
+  route('GET horizon', () => ({ mask, survey: null }));
+  calls.length = 0;
+  openTab('tonight');
+  await until(() => /No obstruction map/.test(text('#horizon')), 'the empty card');
+  assert.equal(ui.document.querySelector('#hz-clear'), null);
+
+  const profile = Array.from({ length: 360 }, (_, k) => (k < 20 ? null : k < 90 ? 25 : 8));
+  mask = { id: 'm1', profile, capped: [40], summary: 'surveyed: highest 25° to the NE', notObserved: ['0–20°'], panoramaUrl: '/captures/horizon/m1.jpg' };
+  openTab('view');
+  openTab('tonight');
+  await until(() => !!ui.document.querySelector('#horizon .hz-plot'), 'the profile plot');
+  assert.match(text('#horizon'), /highest 25°.*not observed: 0–20°/);
+  assert.ok(ui.document.querySelector('#horizon .hz-unknown') && ui.document.querySelector('#horizon .hz-capped'));
+  assert.ok(ui.document.querySelector('#hz-pano'));
+
+  route('DELETE horizon', () => {
+    mask = null;
+    return { ok: true };
+  });
+  answerConfirm(true);
+  calls.length = 0;
+  click('#hz-clear');
+  await until(() => /No obstruction map/.test(text('#horizon')), 'the cleared card');
+  assert.ok(calls.some((c) => c.method === 'DELETE' && c.path === 'horizon'));
+  await until(() => calls.some((c) => c.path.startsWith('plan')), 'the plan reloaded without the map');
+
+  route('POST horizon/survey', () => ({ ok: true }));
+  answerConfirm(false);
+  click('#hz-run');
+  await tick();
+  assert.ok(!calls.some((c) => c.path === 'horizon/survey'), 'declining the confirm sends nothing');
+  answerConfirm(true);
+  click('#hz-run');
+  await until(() => calls.some((c) => c.method === 'POST' && c.path === 'horizon/survey'), 'the survey request');
+});
+
 test('a held nudge arrow nudges at once, and the stop on release reaches the server after that nudge', async () => {
   openTab('view');
   let answer!: () => void;

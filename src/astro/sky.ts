@@ -23,6 +23,14 @@ export function altAz(site: Site, raHours: number, decDeg: number, when = new Da
   return { altitude: h.altitude, azimuth: h.azimuth };
 }
 
+/** The J2000 position at an azimuth and (apparent) altitude: what to GoTo to point there. */
+export function raDecFromAltAz(site: Site, azDeg: number, altDeg: number, when = new Date()): { raHours: number; decDeg: number } {
+  const t = A.MakeTime(when);
+  const hor = A.VectorFromHorizon(new A.Spherical(altDeg, azDeg, 1), t, 'normal');
+  const eq = A.EquatorFromVector(A.RotateVector(A.Rotation_HOR_EQJ(t, observer(site)), hor));
+  return { raHours: eq.ra, decDeg: eq.dec };
+}
+
 export const BODIES = ['Sun', 'Moon', 'Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune'] as const;
 export type BodyName = (typeof BODIES)[number];
 

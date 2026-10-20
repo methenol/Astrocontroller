@@ -3,6 +3,7 @@ import { $, esc, fixed } from './dom.js';
 import { api } from './api.js';
 import { on } from './bus.js';
 import { draft } from './chat.js';
+import { loadHorizon, onHorizonChange } from './horizon.js';
 
 const DARK_SUN_ALT = -18;
 const SKY_OK = 60;
@@ -72,7 +73,8 @@ function planRow(t) {
   const sub = (t.subSeconds != null || Array.isArray(t.subRangeSeconds)) && t.exposureAdvice
     ? `<small title="${esc(t.exposureAdvice)}">${esc(range)} × ${esc(t.subs ?? '–')} subs</small>`
     : '';
-  return `<tr${t.gated ? ' class="gated"' : ''}><td><b>${esc(t.displayName ?? t.name)}</b> ${verdictTag(t)}<small>${esc(names.join(' · '))}</small><small>${esc(t.type)}, ${esc(t.sizeArcmin)}′, mag ${esc(t.magnitude ?? '–')}</small>${t.gated && t.gateReason ? `<small>${esc(t.gateReason)}</small>` : ''}</td>
+  const behind = t.obstructedNow ? ` <span class="badge waiting" title="above the minimum altitude, but behind the site's mapped obstructions right now (az ${esc(t.azimuthNow)}°, alt ${esc(t.altitudeNow)}°)">behind obstruction now</span>` : '';
+  return `<tr${t.gated ? ' class="gated"' : ''}><td><b>${esc(t.displayName ?? t.name)}</b> ${verdictTag(t)}${behind}<small>${esc(names.join(' · '))}</small><small>${esc(t.type)}, ${esc(t.sizeArcmin)}′, mag ${esc(t.magnitude ?? '–')}</small>${t.gated && t.gateReason ? `<small>${esc(t.gateReason)}</small>` : ''}</td>
     <td data-label="Best time">${esc(t.bestTime ?? '')}<small>max ${esc(t.maxAltitude)}°${sky}</small>${clear}</td>
     <td data-label="${t.weatherAlignment != null ? 'Weather' : 'Hours above minimum'}">${weather}</td>
     <td data-label="Framing &amp; filter"><small>${esc(t.framing)}</small><small>${esc(filter)}</small>${sub}</td>
@@ -106,7 +108,7 @@ async function loadPlan() {
       ? `<p class="muted small">Held back by memory: ${r.resting.map((x) => `<b>${esc(x.displayName ?? x.name)}</b> (${esc(x.reason)})`).join(' · ')}</p>`
       : '';
     el.innerHTML = `${hero}
-      <p class="muted small">${esc(r.window?.start)} → ${esc(r.window?.end)} (${esc(r.window?.hours)} h) · min altitude ${esc(r.minAltitude)}°${sizeFilter} · Moon ${esc(r.moon?.illuminationPercent)}%${skyGlass} · ${esc(r.weather ?? '')}</p>
+      <p class="muted small">${esc(r.window?.start)} → ${esc(r.window?.end)} (${esc(r.window?.hours)} h) · min altitude ${esc(r.minAltitude)}°${r.horizon ? ' + site obstructions' : ''}${sizeFilter} · Moon ${esc(r.moon?.illuminationPercent)}%${skyGlass} · ${esc(r.weather ?? '')}</p>
       <table class="plan-table"><tr><th>Target</th><th>Best</th><th title="${esc(hoursTitle)}">${wx ? 'Weather' : 'Hours'}</th><th>Fit / filter</th><th></th></tr>
       ${targets.map(planRow).join('')}</table>${resting}`;
   } catch (e) {
@@ -117,7 +119,10 @@ async function loadPlan() {
 export function loadTonight() {
   loadConditions();
   loadPlan();
+  loadHorizon();
 }
+// a new or cleared obstruction map changes what the plan can offer
+onHorizonChange(loadPlan);
 $('#sel-plan-type').onchange = loadPlan;
 $('#sel-plan-fov').onchange = loadPlan;
 $('#plan').addEventListener('click', (e) => {
