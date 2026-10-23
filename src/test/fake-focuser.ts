@@ -1,6 +1,6 @@
 import type { FakeDwarf } from './fake-dwarf.js';
-import { FOCUS_MAX } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
+import { FOCUS_MAX } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
 
 /**
  * The focuser as the firmware drives it (fw 1.5.3): single steps of 1 unit, never answered;

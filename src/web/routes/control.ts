@@ -4,7 +4,7 @@
  */
 import express, { type Router } from 'express';
 import { z } from 'zod';
-import { BURST_MAX, type CameraName } from '../../dwarf/device.js';
+import { BURST_MAX, type CameraName } from '../../drivers/dwarf/device.js';
 import * as sky from '../../astro/sky.js';
 import { findObject, gotoLabel } from '../../astro/catalog.js';
 import { measureTele, starFocusSweep, sharpnessLine } from '../../media/focus.js';

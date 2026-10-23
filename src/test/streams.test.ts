@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { CameraSource, JpegSplitter, Source } from '../media/streams.js';
-import type { Dwarf } from '../dwarf/device.js';
+import type { Dwarf } from '../drivers/dwarf/device.js';
 
 const jpeg = (n: number, fill: number) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(n, fill), Buffer.from([0xff, 0xd9])]);
 

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
-import { FILE_ATTEMPTS } from '../dwarf/ftp.js';
+import { FILE_ATTEMPTS } from '../drivers/dwarf/ftp.js';
 import { SafeEmitter } from '../util/events.js';
 import { writeFileAtomic } from '../util/fs.js';
 

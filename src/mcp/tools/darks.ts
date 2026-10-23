@@ -1,8 +1,8 @@
 /** The dark-frame library: an ND session (lock, masters, unlock). */
 import { z } from 'zod';
 import { errMsg } from '../../log.js';
-import { round } from '../../dwarf/device.js';
-import { listDir } from '../../dwarf/ftp.js';
+import { round } from '../../drivers/dwarf/device.js';
+import { listDir } from '../../drivers/dwarf/ftp.js';
 import { exposureArgSeconds, text, type ToolContext, type ToolFn } from './common.js';
 
 const DARK_DIR = '/Astronomy/CALI_FRAME/dark/cam_0';

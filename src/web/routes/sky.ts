@@ -17,6 +17,12 @@ const list = (s: string | undefined) => s?.split(',').map((x) => x.trim()).filte
 /** How a user wants a target held back: parked for a while, finished for good, or neither. */
 const RestBody = z.object({ name: z.string().min(1), role: z.enum(['snooze', 'done', 'none']) });
 
+/** The integration goal a target must reach before a capture rests it, and how long that rest lasts. */
+const RestSettingsBody = z.object({
+  integrationTargetMin: z.number().min(0).max(100_000).optional(),
+  restDays: z.number().int().min(1).max(3650).optional(),
+});
+
 export function skyRoutes({ dwarf }: WebContext): Router {
   const api = express.Router();
   const tz = () => config.observer.timezone;
@@ -66,6 +72,13 @@ export function skyRoutes({ dwarf }: WebContext): Router {
       const records = b.role === 'none' ? rest.liftRest(b.name) : rest.setRest(b.name, b.role === 'done' ? 'done' : 'snoozed', today);
       return { name: b.name, today, state: rest.restState(b.name, today, records) };
     }),
+  );
+
+  api.get('/rest/settings', route(async () => rest.restSettings()));
+
+  api.post(
+    '/rest/settings',
+    route(async (req) => rest.saveRestSettings(body(req, RestSettingsBody))),
   );
 
   api.get('/catalog/meta', route(async () => catalogMeta()));

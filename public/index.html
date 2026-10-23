@@ -259,6 +259,13 @@
       <div class="card" id="conditions">loading…</div>
       <div class="card" id="weather">weather loading…</div>
       <div class="card" id="horizon">obstruction map loading…</div>
+      <div class="card" id="rest-settings">
+        <div class="row-head"><h3>Target rest</h3></div>
+        <div class="duty-form-row">
+          <label title="Total integration (per camera, summed over library sessions) a target needs before it is rested; 0 = any capture rests it">Integration goal <input type="number" id="rest-goal" min="0" step="5" inputmode="numeric"> min</label>
+          <label title="How long a target that reached its integration goal is held back from the plan">Rest for <input type="number" id="rest-days" min="1" step="1" inputmode="numeric"> days</label>
+        </div>
+      </div>
       <div class="row-head">
         <h3>Best targets tonight</h3>
         <span class="spacer"></span>

@@ -10,7 +10,7 @@
  */
 import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
-import type { Dwarf } from '../dwarf/device.js';
+import type { Dwarf } from '../drivers/dwarf/device.js';
 import type { AgentBridge } from './omp.js';
 import * as library from '../library/transfer.js';
 

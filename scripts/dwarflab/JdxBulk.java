@@ -5,8 +5,8 @@
 #   2 JdxBulk.java   <apk>    <out>      JADX headless decompile             -> $DWARFLAB_WORK/dwarflab-src
 #   3 proto_recover.py                   serialized FileDescriptorProtos     -> $REA_PROJECTS/dwarflab/recovered
 #   4 proto_emit.py                      readable .proto from those bytes    -> .../recovered/proto
-#   5 gen_ts.py                          recovered.root JSON + WsCmd ids     -> src/dwarf/wire/{generated,proto}
-#   6 gen_device_ts.py                   schemas, catalogue, camera params   -> src/dwarf/wire/generated
+#   5 gen_ts.py                          recovered.root JSON + WsCmd ids     -> src/drivers/dwarf/wire/{generated,proto}
+#   6 gen_device_ts.py                   schemas, catalogue, camera params   -> src/drivers/dwarf/wire/generated
 # Steps 5 and 6 read the extracted facts from the committed evidence/ directory, so the
 # TypeScript regenerates without re-running 1-4; those steps are only needed against a new APK.
 # Needs jadx-headless-mcp 0.7.1 (see REA_JADX_MCP_JAR) and Java 17+.

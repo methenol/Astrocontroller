@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import { config, planDefaults } from '../../config.js';
 import { errMsg } from '../../log.js';
-import { round } from '../../dwarf/device.js';
+import { round } from '../../drivers/dwarf/device.js';
 import { analyze, autoStretch, loadImage, toJpeg, type FloatImage } from '../../media/images.js';
 import { describe as describeObject, findObject, gotoLabel, searchObjects } from '../../astro/catalog.js';
 import { queryCatalog } from '../../astro/catalog-search.js';

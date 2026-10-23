@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { matchExposure, resolveFilter, exposureLabelSeconds, nearest } from '../dwarf/controller/util.js';
+import { matchExposure, resolveFilter, exposureLabelSeconds, nearest } from '../drivers/dwarf/controller/util.js';
 
 const values = [
   { name: '1/100', value: 10 },

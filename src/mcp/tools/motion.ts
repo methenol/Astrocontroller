@@ -1,7 +1,7 @@
 /** Mount motion and focus. */
 import { z } from 'zod';
-import { FOCUS_MAX } from '../../dwarf/device.js';
-import { Cmd } from '../../dwarf/protocol.js';
+import { FOCUS_MAX } from '../../drivers/dwarf/device.js';
+import { Cmd } from '../../drivers/dwarf/protocol.js';
 import { measureTele, starFocusSweep } from '../../media/focus.js';
 import { capturedLine, cropArg, displayJpeg, saveCapture, text, withImage, type ToolContext, type ToolFn } from './common.js';
 

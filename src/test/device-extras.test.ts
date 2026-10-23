@@ -2,9 +2,9 @@ import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { config } from '../config.js';
-import { Dwarf } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
-import { commandInfo, moduleIdFor } from '../dwarf/wire/index.js';
+import { Dwarf } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
+import { commandInfo, moduleIdFor } from '../drivers/dwarf/wire/index.js';
 
 /**
  * The six device switches the official SDK never registered. What is under test is the recovered part:

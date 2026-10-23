@@ -1,5 +1,5 @@
 /** The three live sources (tele, wide, stack), kept in step with the telescope's state. */
-import type { CameraName, Dwarf } from '../../dwarf/device.js';
+import type { CameraName, Dwarf } from '../../drivers/dwarf/device.js';
 import { CameraSource } from './camera.js';
 import { StackSource } from './stack.js';
 

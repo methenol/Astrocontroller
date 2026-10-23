@@ -1,5 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { parseLocal, hoursToHms, degToDms, bodyInfo, nightWindow, visibility } from '../astro/sky.js';
 import { zonedWallTimeToInstant } from '../util/time.js';
 import { parseRow, findObject, searchObjects, catalog } from '../astro/catalog.js';
@@ -7,7 +10,8 @@ import { planNight } from '../astro/planner.js';
 import { queryCatalog } from '../astro/catalog-search.js';
 import { classifyFilter, detectFor, moonlitKeep, sqmFor } from '../astro/detect.js';
 import { ladderRound, subPlan, type Rig } from '../astro/exposure.js';
-import { restPenalty, restState, targetKey } from '../astro/rest.js';
+import { captureRecords, REST_DEFAULTS, restPenalty, restState, saveRestSettings, targetKey } from '../astro/rest.js';
+import { config } from '../config.js';
 
 const LA = 'America/Los_Angeles';
 const SITE = { lat: 45.5, lon: -122.6, elev: 50 };
@@ -408,13 +412,47 @@ describe('target memory', () => {
   const ago = (days: number) => new Date(Date.parse(`${TODAY}T12:00:00Z`) - days * 86_400e3).toISOString().slice(0, 10);
   const shot = (days: number, name = 'M 31') => [{ name: targetKey(name), date: ago(days), role: 'shot' as const }];
 
-  test('a capture holds a target for two weeks, then fades out by two months', () => {
+  test('a capture rests a target at full strength for the rest length, then not at all', () => {
     assert.equal(restPenalty('M 31', TODAY, shot(0)), 25);
-    assert.equal(restPenalty('M 31', TODAY, shot(14)), 25, 'full strength through the hold');
-    const mid = restPenalty('M 31', TODAY, shot(30));
-    assert.ok(mid > 0 && mid < 25, `decaying, not falling off a cliff (${mid})`);
-    assert.equal(restPenalty('M 31', TODAY, shot(60)), 0);
-    assert.equal(restState('M 31', TODAY, shot(60)), null, 'nothing to report once it has recovered');
+    assert.equal(restPenalty('M 31', TODAY, shot(REST_DEFAULTS.restDays - 1)), 25, 'full strength through the rest');
+    assert.equal(restState('M 31', TODAY, shot(0))?.until, ago(-REST_DEFAULTS.restDays));
+    assert.equal(restPenalty('M 31', TODAY, shot(REST_DEFAULTS.restDays)), 0);
+    assert.equal(restState('M 31', TODAY, shot(REST_DEFAULTS.restDays)), null, 'nothing to report once it has recovered');
+  });
+
+  test('the rest length is the user\'s', () => {
+    try {
+      saveRestSettings({ restDays: 10 });
+      assert.equal(restPenalty('M 31', TODAY, shot(9)), 25);
+      assert.equal(restPenalty('M 31', TODAY, shot(10)), 0);
+      assert.equal(restState('M 31', TODAY, shot(0))?.until, ago(-10));
+    } finally {
+      saveRestSettings(REST_DEFAULTS);
+    }
+  });
+
+  test('captures rest a target only once they add up to the integration goal', () => {
+    const savedLib = config.paths.library;
+    const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'rest-lib-'));
+    const session = (name: string, subs: number, failed = 0) => {
+      const dir = path.join(lib, name);
+      fs.mkdirSync(dir);
+      for (let i = 0; i < subs; i++) fs.writeFileSync(path.join(dir, `sub_${i}.fits`), '');
+      for (let i = 0; i < failed; i++) fs.writeFileSync(path.join(dir, `failed_sub_${i}.fits`), '');
+    };
+    try {
+      config.paths.library = lib;
+      // 40 × 15 s = 10 min kept the first night, 80 × 15 s = 20 min the second; 50 rejected subs never count
+      session('DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-01-22-00-00-000', 40, 50);
+      session('DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-05-22-00-00-000', 80);
+      session('DWARF_RAW_WIDE_M 31_EXP_15_GAIN_60_2026-10-06-22-00-00-000', 80);
+      assert.deepEqual(captureRecords(TODAY, 0).map((r) => r.date), ['2026-10-01', '2026-10-05', '2026-10-06'], 'no goal: every capture rests it');
+      assert.deepEqual(captureRecords(TODAY, 30).map((r) => r.date), ['2026-10-05'], 'rested the night the tele total reached 30 min');
+      assert.deepEqual(captureRecords(TODAY, 31), [], 'the cameras are not added together');
+    } finally {
+      config.paths.library = savedLib;
+      fs.rmSync(lib, { recursive: true, force: true });
+    }
   });
 
   test('what was suggested tonight does not demote tonight’s own list', () => {

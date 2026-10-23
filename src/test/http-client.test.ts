@@ -2,8 +2,8 @@ import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeHttpApi, dsoSchema } from './fake-http.js';
 import { config } from '../config.js';
-import { parseBigSafe, getParamSchema, getShootingModes, resolveShootingMode, apiHealth, fileUrl, forgetDevice, getDeviceInfo, buildParamSchema, redactDeviceInfo } from '../dwarf/http.js';
-import { call } from '../dwarf/http/client.js';
+import { parseBigSafe, getParamSchema, getShootingModes, resolveShootingMode, apiHealth, fileUrl, forgetDevice, getDeviceInfo, buildParamSchema, redactDeviceInfo } from '../drivers/dwarf/http.js';
+import { call } from '../drivers/dwarf/http/client.js';
 
 describe('parseBigSafe', () => {
   test('integers beyond 2^53 become strings; safe numbers, floats and strings are untouched', () => {

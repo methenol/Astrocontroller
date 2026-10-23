@@ -5,7 +5,7 @@ import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { errMsg } from '../../log.js';
-import * as dhttp from '../../dwarf/http.js';
+import * as dhttp from '../../drivers/dwarf/http.js';
 import * as library from '../../library/transfer.js';
 import * as processing from '../../processing/queue.js';
 import * as studio from '../../processing/studio.js';

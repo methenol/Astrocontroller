@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyNotification, initialState, type ParamCache } from '../dwarf/controller/state.js';
-import type { Notification } from '../dwarf/link.js';
+import { applyNotification, initialState, type ParamCache } from '../drivers/dwarf/controller/state.js';
+import type { Notification } from '../drivers/dwarf/link.js';
 
 const RUNNING = 1;
 const IDLE = 0;

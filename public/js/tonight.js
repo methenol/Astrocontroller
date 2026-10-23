@@ -1,6 +1,6 @@
 /** Tonight: sky conditions, the observing plan and the weather forecast. */
-import { $, esc, fixed } from './dom.js';
-import { api } from './api.js';
+import { $, esc, fixed, toast } from './dom.js';
+import { api, apiToast } from './api.js';
 import { on } from './bus.js';
 import { draft } from './chat.js';
 import { loadHorizon, onHorizonChange } from './horizon.js';
@@ -116,15 +116,43 @@ async function loadPlan() {
   }
 }
 
+async function loadRestSettings() {
+  try {
+    const r = await api('rest/settings');
+    // a field being edited keeps what the user is typing
+    if (document.activeElement !== $('#rest-goal')) $('#rest-goal').value = r.integrationTargetMin;
+    if (document.activeElement !== $('#rest-days')) $('#rest-days').value = r.restDays;
+  } catch (e) {
+    toast(`Target rest: ${e.message}`, true);
+  }
+}
+
+async function saveRestSettings(e) {
+  const goal = Number($('#rest-goal').value);
+  const days = Number($('#rest-days').value);
+  if (!Number.isFinite(goal) || goal < 0 || !Number.isInteger(days) || days < 1) {
+    toast('Integration goal must be 0 or more minutes and the rest a whole number of days (1 or more)', true);
+    return loadRestSettings();
+  }
+  const r = await apiToast('rest/settings', e.target.id === 'rest-goal' ? { integrationTargetMin: goal } : { restDays: days });
+  if (r) {
+    toast(e.target.id === 'rest-goal' ? `Integration goal: ${r.integrationTargetMin} min` : `Rest: ${r.restDays} days`);
+    loadPlan();
+  }
+}
+
 export function loadTonight() {
   loadConditions();
   loadPlan();
   loadHorizon();
+  loadRestSettings();
 }
 // a new or cleared obstruction map changes what the plan can offer
 onHorizonChange(loadPlan);
 $('#sel-plan-type').onchange = loadPlan;
 $('#sel-plan-fov').onchange = loadPlan;
+$('#rest-goal').onchange = saveRestSettings;
+$('#rest-days').onchange = saveRestSettings;
 $('#plan').addEventListener('click', (e) => {
   const b = e.target.closest('[data-image]');
   if (b) draft(imagingRequest(b.dataset.image));

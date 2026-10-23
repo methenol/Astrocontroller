@@ -3,10 +3,10 @@
  * that are worth waking the agent for. Each becomes an event; `onlyOnDuty` events are dropped when
  * no duty is active.
  */
-import type { Dwarf } from '../../dwarf/device.js';
+import type { Dwarf } from '../../drivers/dwarf/device.js';
 import * as library from '../../library/transfer.js';
 import * as processing from '../../processing/queue.js';
-import * as dhttp from '../../dwarf/http.js';
+import * as dhttp from '../../drivers/dwarf/http.js';
 
 export type EventSink = (text: string, onlyOnDuty?: boolean) => void;
 export type SensedDevice = Pick<Dwarf, 'state' | 'stackControl' | 'on' | 'off'>;

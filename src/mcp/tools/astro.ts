@@ -1,7 +1,7 @@
 /** Calibration, GoTo, live stacking, polar alignment, Sun/Moon and daytime tracking, sentry. */
 import { z } from 'zod';
 import { errMsg, logger } from '../../log.js';
-import { round, type CameraName, type Dwarf } from '../../dwarf/device.js';
+import { round, type CameraName, type Dwarf } from '../../drivers/dwarf/device.js';
 import { findObject, gotoLabel } from '../../astro/catalog.js';
 import * as sky from '../../astro/sky.js';
 import * as library from '../../library/transfer.js';

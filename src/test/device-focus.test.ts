@@ -2,8 +2,8 @@ import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { config } from '../config.js';
-import { Dwarf, FOCUS_MAX, AstroServiceHungError } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
+import { Dwarf, FOCUS_MAX, AstroServiceHungError } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
 import { FakeFocuser } from './fake-focuser.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

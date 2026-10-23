@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { WireLog } from '../dwarf/wirelog.js';
+import { WireLog } from '../drivers/dwarf/wirelog.js';
 
 describe('wire log', () => {
   let dir = '';

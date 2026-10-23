@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { config } from '../config.js';
 import { DutyLoop } from '../agent/duty.js';
-import type { Dwarf } from '../dwarf/device.js';
+import type { Dwarf } from '../drivers/dwarf/device.js';
 import type { AgentBridge } from '../agent/omp.js';
 import { startJob, cancelJob, drainJobs } from '../library/jobs.js';
 import { parseUntil } from '../agent/duty/time.js';

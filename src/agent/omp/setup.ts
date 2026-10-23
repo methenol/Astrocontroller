@@ -2,14 +2,16 @@
  * What omp needs on disk before it starts, generated from .env on every start:
  *   $AGENT_HOME/.omp/agent/models.yml   custom OpenAI-compatible provider "astro"
  *   $AGENT_HOME/.omp/agent/config.yml   tool exposure, model role, compaction
- *   $AGENT_HOME/.omp/agent/mcp.json     the dwarf3 MCP server (this process)
+ *   $AGENT_HOME/.omp/agent/mcp.json     the driver's MCP server (this process): dwarf3 or seestar
  * and the workspace (cwd), seeded from the shipped template: SYSTEM.md, APPEND.md, the agent's
- * notes, its skills and the device reference.
+ * notes, its skills and the device reference. The Dwarf's are at the top of the template; another
+ * driver's are under drivers/<driver>/ (APPEND.md is shared by all).
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../../config.js';
 import { writeFileAtomic } from '../../util/fs.js';
+import { MCP_SERVER_NAMES } from '../../drivers/index.js';
 
 /** MCP tool calls may run this long (a dark master, a long stack start, a full star_focus sweep). */
 export const MCP_TIMEOUT_MS = 45 * 60_000;
@@ -80,7 +82,7 @@ export function writeAgentConfig(mcpUrl: string): void {
   fs.mkdirSync(agentDir, { recursive: true });
   writeFileAtomic(path.join(agentDir, 'models.yml'), modelsYml());
   writeFileAtomic(path.join(agentDir, 'config.yml'), configYml());
-  writeFileAtomic(path.join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { dwarf3: { type: 'http', url: mcpUrl, timeout: MCP_TIMEOUT_MS } } }, null, 2));
+  writeFileAtomic(path.join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { [MCP_SERVER_NAMES[config.telescope.driver]]: { type: 'http', url: mcpUrl, timeout: MCP_TIMEOUT_MS } } }, null, 2));
 }
 
 /** Copy what is missing from `src` into `dest`; files already there (the agent's own edits) are kept. */
@@ -97,9 +99,15 @@ export function copyDirIfMissing(src: string, dest: string): void {
 
 const sameText = (a: string, b: string) => fs.existsSync(a) && fs.existsSync(b) && fs.readFileSync(a, 'utf8') === fs.readFileSync(b, 'utf8');
 
+/** The template folder of the driver's own prompt, notes, skills and reference. */
+export function driverTemplate(): string {
+  const tmpl = config.paths.agentTemplate;
+  return config.telescope.driver === 'dwarf' ? tmpl : path.join(tmpl, 'drivers', config.telescope.driver);
+}
+
 export function seedWorkspace(): void {
   const ws = config.paths.workspace;
-  const tmpl = config.paths.agentTemplate;
+  const tmpl = driverTemplate();
   copyDirIfMissing(path.join(tmpl, 'skills'), skillsDir());
 
   // Device reference (manual, specs): read-only and shipped with the image, so replaced every start.
@@ -125,6 +133,6 @@ export function seedWorkspace(): void {
   if (fs.existsSync(notesSrc) && !fs.existsSync(notes)) fs.copyFileSync(notesSrc, notes);
 
   // Owner-compliance rules appended to the system prompt: mandatory, so replaced every start.
-  const append = path.join(tmpl, 'APPEND.md');
+  const append = path.join(config.paths.agentTemplate, 'APPEND.md');
   if (fs.existsSync(append)) fs.copyFileSync(append, appendPromptPath());
 }

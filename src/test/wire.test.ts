@@ -1,11 +1,11 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRequest, commandsIn, commandFields, commandInfo, decodePayload, encodePayload, moduleIdFor, moduleIdForCmd, parseIncoming, payloadFields } from '../dwarf/wire/index.js';
-import { CONNECT_TIMEOUT_MS, MESSAGE_TYPE, PING_INTERVAL_MS, PROTOCOL_MAJOR, PROTOCOL_MINOR, WS_PORT, decodePacket, encodePacket, headerFor } from '../dwarf/wire/transport.js';
+import { buildRequest, commandsIn, commandFields, commandInfo, decodePayload, encodePayload, moduleIdFor, moduleIdForCmd, parseIncoming, payloadFields } from '../drivers/dwarf/wire/index.js';
+import { CONNECT_TIMEOUT_MS, MESSAGE_TYPE, PING_INTERVAL_MS, PROTOCOL_MAJOR, PROTOCOL_MINOR, WS_PORT, decodePacket, encodePacket, headerFor } from '../drivers/dwarf/wire/transport.js';
 import { Command, encodePacket as sdkEncodePacket, MessageType as SdkMessageType } from '@alikh/dwarflab-sdk';
-import { DWARF_COMMANDS, DWARF_COMMANDS_BY_ID } from '../dwarf/wire/generated/catalog.generated.js';
-import { PARAMS_RANGE, exposureIndex } from '../dwarf/wire/generated/params.generated.js';
-import type { FieldSpec } from '../dwarf/wire/generated/payloads.generated.js';
+import { DWARF_COMMANDS, DWARF_COMMANDS_BY_ID } from '../drivers/dwarf/wire/generated/catalog.generated.js';
+import { PARAMS_RANGE, exposureIndex } from '../drivers/dwarf/wire/generated/params.generated.js';
+import type { FieldSpec } from '../drivers/dwarf/wire/generated/payloads.generated.js';
 
 const camel = (k: string) => k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
 

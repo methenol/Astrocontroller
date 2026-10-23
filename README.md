@@ -164,9 +164,46 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 
 For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `node dist/tools/smoke.js <tool> '<json-args>'` calls one.
 
+## ZWO Seestar (`TELESCOPE_DRIVER=seestar`)
+
+The telescope protocol is a driver (`src/drivers/`): `dwarf` (the default) and `seestar`. `TELESCOPE_DRIVER` picks one at startup. The Seestar driver keeps its own data folder (`./data-seestar` unless `DATA_DIR` is set), agent prompt (`agent/drivers/seestar/`) and MCP server (`seestar`, so its tools reach the agent as `mcp__seestar__<tool>`). The web page at `/` is a Seestar control page in this mode; the Dwarf-only services (duty loop, travel guard, stack supervisor, charge watch, live streams) do not run.
+
+It speaks the Seestar's native protocol: JSON-RPC on TCP `:4700` (requests, replies and pushed events, with a `test_connection` heartbeat) and the image sockets `:4800` (tele) and `:4804` (wide) for stacked and preview frames. Firmware 7.18+ requires a signed handshake: set `SEESTAR_KEY_PATH` to the PEM private key extracted from your copy of the official app (seestarpy's `extract_pem`). The key is not shipped.
+
+**Local network**: `SEESTAR_CONNECTION=local`, `SEESTAR_HOST=<the scope's IP>`.
+
+**ZWO Telescope Network** (a remote scope, e.g. a hosted S30): `SEESTAR_CONNECTION=zwo`. [seestar-portfwd](https://github.com/Phaeilo/seestar-portfwd) logs in to the ZWO account, opens the ThroughTek Kalay P2P tunnel and forwards the scope's native services, so the same driver talks to it.
+
+*In Docker* (the usual setup), seestar-portfwd runs as a second container, `seestar-portfwd`, from `docker-compose.yml`. Astrocontroller reaches it by name on the internal `seestar` network, so none of the telescope's ports have to be published on the host.
+
+1. Clone seestar-portfwd next to this repository (or set `SEESTAR_PORTFWD_DIR` to your checkout).
+2. In `.env`:
+   - Set `TELESCOPE_DRIVER=seestar`, `SEESTAR_CONNECTION=zwo` and `COMPOSE_PROFILES=seestar`. The tunnel service only exists with that profile, so the Dwarf setup does not start it.
+   - Set `SEESTAR_USER` and `SEESTAR_PASSWORD`, plus `SEESTAR_SN` when the account holds several scopes. Compose passes only these, and `SEESTAR_COUNTRY`, into the tunnel container.
+   - Set `DATA_PATH=./data-seestar` to keep the Seestar agent's data apart from the Dwarf's.
+3. `docker compose up -d --build`.
+
+The tunnel container restarts by itself when the P2P session drops. `docker compose stop seestar-portfwd` ends it and releases the ZWO session. The app's Disconnect closes Astrocontroller's own links only, because it cannot stop another container. Astrocontroller counts the tunnel as up once the control port answers on the network.
+
+To use the telescope from other software on the host as well (ASCOM Alpaca, RTSP in VLC, SSH, seestar-portfwd's `seestar_rpc.py`), add the optional `docker-compose.seestar-ports.yml`: `COMPOSE_FILE=docker-compose.yml:docker-compose.seestar-ports.yml` in `.env`.
+- Each service has its own host-port variable (`SEESTAR_PUBLISH_RPC_PORT`, `SEESTAR_PUBLISH_ALPACA_PORT`, …), and `SEESTAR_PUBLISH_ADDR` sets the address they bind to (default `127.0.0.1`).
+- Delete the lines of services you do not want exposed.
+- The device's port 80 is published as 8081, so it does not collide with the web UI.
+- The services are unauthenticated: publish them beyond loopback only on a network you trust.
+
+*Without Docker*, run seestar-portfwd yourself (`docker compose run --service-ports --rm seestar` in its checkout). Its ports are on `127.0.0.1`, and its port 80 becomes 8080, which is `WEB_PORT`'s default, so change one (startup reports the clash).
+
+Alternatively, set `SEESTAR_TUNNEL_COMMAND` (and `SEESTAR_TUNNEL_CWD`) so Astrocontroller starts the tunnel, restarts it when it exits, and stops it with SIGINT, which releases the remote session. A managed tunnel counts as up once it has printed `tunnel ready` and the forwarded port answers.
+
+Only one remote session exists per telescope: the official app connecting takes it over (and the other way round). The `zwo_devices` tool lists the account's scopes and whether each is online, shooting or occupied.
+
+Seestar tools: `seestar_status`, `seestar_connect`, `seestar_disconnect`, `zwo_devices`, `tunnel_status`, `tunnel_restart`, `sync_time_location`, `find_target`, `goto_target` (slew + plate solve + centre, optional `stack`), `stop`, `nudge`, `park`, `open_arm`, `plate_solve`, `polar_align`, `start_stacking`, `stop_stacking`, `start_live_view`, `autofocus`, `move_focuser`, `set_exposure`, `set_gain`, `set_dither`, `get_settings`, `set_settings`, `get_image`, `plan_targets`, `power`, `raw_rpc`.
+
+The Seestar driver is tested against a simulated scope only; it has not yet run against real hardware.
+
 ## How it talks to the telescope
 
-- **Control**: WebSocket `:9900`, protobuf `WsPacket`s. The protobuf definitions, packet codec and command registry come from [`@alikh/dwarflab-sdk`](https://github.com/alikh31/dwarflab-sdk) (MIT). `src/dwarf/protocol.ts` adds commands and message variants the SDK lacks (motor run-to/reset/position, one-click GoTo `goto_only`, EQ solving results, …), and the firmware error table comes from [`dwarf_python_api`](https://github.com/stevejcl/dwarf_python_api) (MIT).
+- **Control**: WebSocket `:9900`, protobuf `WsPacket`s. The protobuf definitions, packet codec and command registry come from [`@alikh/dwarflab-sdk`](https://github.com/alikh31/dwarflab-sdk) (MIT). `src/drivers/dwarf/protocol.ts` adds commands and message variants the SDK lacks (motor run-to/reset/position, one-click GoTo `goto_only`, EQ solving results, …), and the firmware error table comes from [`dwarf_python_api`](https://github.com/stevejcl/dwarf_python_api) (MIT).
 - **Live views**: RTSP `:554/ch0|ch1/stream0` (H.265 1080p30) → ffmpeg → MJPEG, on demand. **Stack preview**: the scope's own MJPEG on `:8092/mainstream`.
 - **HTTP** `:8082`: device info, album, and the per-mode parameter schema (exposure tables, gain lists, param IDs). **Files**: HTTP `:80` and anonymous FTP `:21`.
 - **Catalog**: about 45,000 objects in `catalog/objects.tsv`, built by `npm run catalog` (`src/tools/build-catalog.ts`). The sources are [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA 4.0) and these VizieR catalogs: Sharpless, LBN, Cederblad, RCW, van den Bergh, Barnard, LDN, Strasbourg-ESO planetary nebulae, Green SNRs, Dias open clusters, Harris globulars, RC3 galaxies, Arp, Hickson, Abell clusters and the Bright Star Catalogue. The IAU star names are added, plus a user-editable nickname table (`catalog/nicknames.csv`). An object listed in several catalogs is merged into one entry with all its designations. Merging matches designations and cross-identifications first, then position and size for extended objects. `catalog/sources.json` lists each source, with its citation and how many records it added or merged; the Database tab shows the same list. GoTo coordinates are J2000, which I verified against coordinates the DWARF app recorded on this device.

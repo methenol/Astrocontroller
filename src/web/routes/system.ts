@@ -3,7 +3,7 @@ import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config, setTelescopeHost } from '../../config.js';
 import { recentLogs } from '../../log.js';
-import { wireLines } from '../../dwarf/wirelog.js';
+import { wireLines } from '../../drivers/dwarf/wirelog.js';
 import * as library from '../../library/transfer.js';
 import { body, queryNumber, route } from '../http.js';
 import { publicConfig, type WebContext } from '../context.js';

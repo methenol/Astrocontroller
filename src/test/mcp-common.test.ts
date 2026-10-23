@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { exposureArgSeconds, text } from '../mcp/tools/common.js';
 import { withAstroBusyRecovery } from '../mcp/tools/astro.js';
-import type { Dwarf } from '../dwarf/device.js';
+import type { Dwarf } from '../drivers/dwarf/device.js';
 
 describe('tool helpers', () => {
   test('exposure text parses fractions, seconds and plain numbers; anything else is NaN', () => {

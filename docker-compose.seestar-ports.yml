@@ -1,0 +1,26 @@
+# Optional: publish the Seestar's services (through the seestar-portfwd tunnel) on the host, for
+# other software (SharpCap, NINA via ASCOM Alpaca, VLC on the RTSP streams, seestar_rpc.py, ssh…).
+# Astrocontroller does not need any of these: it talks to the tunnel on the seestar network.
+#
+# Enable it alongside the main file, in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.seestar-ports.yml
+# or per command: docker compose -f docker-compose.yml -f docker-compose.seestar-ports.yml up -d
+#
+# Each line is host-address:host-port:device-port. Delete the lines of services you do not want
+# exposed; change the host ports with the variables below (in .env). The services are
+# unauthenticated: keep SEESTAR_PUBLISH_ADDR on 127.0.0.1 unless the network is one you trust.
+services:
+  seestar-portfwd:
+    ports:
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_RPC_PORT:-4700}:4700"          # JSON-RPC control
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_IMAGE_PORT:-4800}:4800"        # image stream (tele)
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_WIDE_IMAGE_PORT:-4804}:4804"   # image stream (wide)
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_RTSP_PORT:-4554}:4554"         # RTSP video (tele)
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_WIDE_RTSP_PORT:-4555}:4555"    # RTSP video (wide)
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_HTTP_PORT:-8081}:80"           # file/image server (8080 is Astrocontroller's)
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_FILE_API_PORT:-4801}:4801"     # file API
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_ALPACA_PORT:-32323}:32323"     # ASCOM Alpaca
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_FW_CONTROL_PORT:-4350}:4350"   # firmware control
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_FW_UPLOAD_PORT:-4361}:4361"    # firmware upload
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_SMB_PORT:-4445}:445"           # SMB (images share)
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_SSH_PORT:-2222}:22"            # SSH

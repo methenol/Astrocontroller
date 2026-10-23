@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
-import { downloadFiles, downloadOne, toFtpPath, TransferCancelled } from '../dwarf/ftp.js';
+import { downloadFiles, downloadOne, toFtpPath, TransferCancelled } from '../drivers/dwarf/ftp.js';
 import { FakeFtp } from './fake-ftp.js';
 
 const bytes = (n: number, fill: number) => Buffer.alloc(n, fill);

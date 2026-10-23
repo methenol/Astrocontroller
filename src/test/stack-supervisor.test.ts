@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { StackTracker, type CameraName } from '../dwarf/stacking.js';
-import { StackSupervisor } from '../dwarf/stack-supervisor.js';
+import { StackTracker, type CameraName } from '../drivers/dwarf/stacking.js';
+import { StackSupervisor } from '../drivers/dwarf/stack-supervisor.js';
 
 function rig(o: { autoStopAfterMs?: number; stopFails?: boolean; canAct?: boolean } = {}) {
   let now = 10_000_000;

@@ -1,9 +1,9 @@
 /** The SD-card album, looking at and measuring images, and checking a session's raw subs. */
 import path from 'node:path';
 import { z } from 'zod';
-import { round } from '../../dwarf/device.js';
-import * as http from '../../dwarf/http.js';
-import { listDir } from '../../dwarf/ftp.js';
+import { round } from '../../drivers/dwarf/device.js';
+import * as http from '../../drivers/dwarf/http.js';
+import { listDir } from '../../drivers/dwarf/ftp.js';
 import { analyze, crop as cropImage, loadImage } from '../../media/images.js';
 import * as library from '../../library/transfer.js';
 import { median } from '../../util/stats.js';

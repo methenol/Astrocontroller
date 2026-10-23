@@ -19,9 +19,9 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
-import type { Dwarf, HorizonSurvey } from '../../dwarf/device.js';
-import { PITCH_RANGE, ROTATION_RANGE } from '../../dwarf/controller/motors.js';
-import { daylightRefusal } from '../../dwarf/controller/astro.js';
+import type { Dwarf, HorizonSurvey } from '../../drivers/dwarf/device.js';
+import { PITCH_RANGE, ROTATION_RANGE } from '../../drivers/dwarf/controller/motors.js';
+import { daylightRefusal } from '../../drivers/dwarf/controller/astro.js';
 import * as sky from '../../astro/sky.js';
 import { compass, describeMask, newMaskId, saveMask, unknownSectors, type HorizonMask } from '../../astro/horizon.js';
 import { loadImage, type FloatImage } from '../images.js';
@@ -223,6 +223,10 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
         let skyLevel: number | null = null;
         let fit: ReturnType<typeof fitMount> | null = null;
         let pole = mountPole(dwarf, loc.lat, notes);
+        // EQ: one-click GoTos, which plate-solve and refine at the anchor. A plain GoTo on the wedge can end
+        // far off (2026-10-21: SE and SW at 65° read rotation 131.3° and 300.5°, one-click 141.6° and 176.9°,
+        // the 35° their hour angles differ by).
+        const oneClick = mode === 'eq';
         for (const az of ANCHOR_AZ) {
           if (anchors.length >= MAX_ANCHORS || (anchors.length >= MIN_ANCHORS && fit && fit.residualDeg <= GOOD_FIT_DEG)) break;
           checkStop();
@@ -236,7 +240,7 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
           let target = sky.raDecFromAltAz(loc, az, ANCHOR_ALT);
           try {
             try {
-              await dwarf.gotoRaDec(target.raHours, target.decDeg, label, false);
+              await dwarf.gotoRaDec(target.raHours, target.decDeg, label, oneClick);
             } catch (e) {
               if (stopRequested) throw e;
               // no calibration yet, or lost with the last anchor's motor resets: calibrate where the scope looks (the last anchor's sky)
@@ -244,7 +248,7 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
               pole = mountPole(dwarf, loc.lat, notes);
               phase = 'anchor';
               target = sky.raDecFromAltAz(loc, az, ANCHOR_ALT);
-              await dwarf.gotoRaDec(target.raHours, target.decDeg, label, false);
+              await dwarf.gotoRaDec(target.raHours, target.decDeg, label, oneClick);
             }
           } catch (e) {
             if (stopRequested) throw new Error(STOPPED);
@@ -253,10 +257,36 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
             continue;
           }
           checkStop();
-          // the scope tracks the target until the reset stops it: that instant is where it points
-          const stopAt = new Date();
-          progress({ message: `re-referencing the motors at the ${compass(az)} anchor` });
-          const pos = await dwarf.rereferenceMotors();
+          // the scope tracks the target until the reset stops it (or, EQ, the read): that instant is where it points
+          let stopAt = new Date();
+          let pos;
+          if (mode === 'eq') {
+            // On the wedge the motors keep their reference through the GoTo and its tracking (2026-10-21:
+            // read at once after it, the pose agreeing with the Moon's to ~1°), while a reset does not
+            // reliably drive back to where it started (the same sky read rotation 256.9° then 1.6°) and
+            // moves the reference from under the telescope's own EQ alignment. So: read, no reset.
+            pos = await dwarf.readMotorPositions();
+          } else try {
+            progress({ message: `re-referencing the motors at the ${compass(az)} anchor` });
+            pos = await dwarf.rereferenceMotors();
+          } catch (e) {
+            if (stopRequested || !/stopped at its reference switch/.test(errMsg(e))) throw e;
+            // the pose is lost: GoTo the anchor again and re-reference once more
+            notes.push(`anchor ${compass(az)}: ${errMsg(e)}; went to it again`);
+            log.warn(`survey anchor ${compass(az)}: ${errMsg(e)}; going to it again`);
+            try {
+              target = sky.raDecFromAltAz(loc, az, ANCHOR_ALT);
+              await dwarf.gotoRaDec(target.raHours, target.decDeg, label, false);
+              checkStop();
+              stopAt = new Date();
+              pos = await dwarf.rereferenceMotors();
+            } catch (e2) {
+              if (stopRequested) throw new Error(STOPPED);
+              notes.push(`anchor ${compass(az)} failed again: ${errMsg(e2)}`);
+              log.warn(`survey anchor ${compass(az)} failed again: ${errMsg(e2)}`);
+              continue;
+            }
+          }
           if (pos.rotationDeg === undefined || pos.pitchDeg === undefined) {
             notes.push(`anchor ${compass(az)}: no motor position after the reset`);
             continue;
@@ -367,7 +397,7 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
         phase = 'returning';
         progress({ message: 'returning to the first anchor' });
         await dwarf.moveTo({ rotationDeg: anchors[0].rotationDeg, pitchDeg: anchors[0].pitchDeg }, MOVE_SPEED_DEG_S).catch((e) => notes.push(`could not return to the first anchor: ${errMsg(e)}`));
-        notes.push('the motor resets may have cleared the plate-solve calibration: use a one-click GoTo (or calibrate) for the next target');
+        if (mode === 'altaz') notes.push('the motor resets may have cleared the plate-solve calibration: use a one-click GoTo (or calibrate) for the next target');
         return { mask, summary: describeMask(mask), notes, panoramaJpeg };
       } finally {
         if (typeof prevGain === 'number') await dwarf.setSetting('wide', 'gain', prevGain).catch((e) => restoreErrors.push(`gain: ${errMsg(e)}`));

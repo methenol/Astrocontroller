@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { TravelGuard, type TravelDevice } from '../dwarf/travel-guard.js';
+import { TravelGuard, type TravelDevice } from '../drivers/dwarf/travel-guard.js';
 import * as sky from '../astro/sky.js';
 
 const SITE = { lat: 45.5, lon: -122.6, elev: 50 };

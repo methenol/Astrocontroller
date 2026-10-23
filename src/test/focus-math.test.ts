@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FloatImage } from '../media/images.js';
 import { starSharpness, sweepPositions, fitMinimum, checkSweepOptions, type FocusSample } from '../media/focus.js';
-import { FOCUS_MAX } from '../dwarf/device.js';
+import { FOCUS_MAX } from '../drivers/dwarf/device.js';
 
 /** A linear mono frame with Gaussian stars of one width on a flat, slightly noisy sky. */
 function starField(sigmaPx: number, o: { w?: number; h?: number; stars?: number; seed?: number } = {}): FloatImage {

@@ -1,0 +1,307 @@
+/**
+ * The Seestar's tools as an MCP server (`seestar`: they reach the agent as mcp__seestar__<tool>).
+ *
+ * The Seestar runs its own pipeline: a GoTo plate-solves and centres by itself, and a stack is
+ * registered and integrated on the scope, so these tools start and follow the scope's operations
+ * instead of driving each step. Catalog, planning and image analysis are the app's shared ones.
+ */
+import { z } from 'zod';
+import { config, planDefaults } from '../../config.js';
+import { describe as describeObject, findObject, gotoLabel, searchObjects } from '../../astro/catalog.js';
+import { horizonFor } from '../../astro/horizon.js';
+import { planNight } from '../../astro/planner.js';
+import * as rest from '../../astro/rest.js';
+import * as sky from '../../astro/sky.js';
+import * as weather from '../../astro/weather.js';
+import { starSharpness } from '../../media/focus/sharpness.js';
+import { analyze } from '../../media/images.js';
+import { imageResult, localTime, makeTool, text, type ToolFn } from '../../mcp/tools/common.js';
+import type { McpSpec } from '../types.js';
+import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
+import { listDevices } from './zwo-cloud.js';
+
+export const SERVER_NAME = 'seestar';
+
+/** Nominal S30 tele field (150 mm, 1920×1080 at 2.9 µm) until the scope reports its optics. */
+const NOMINAL_FOV = { h: 2.13, v: 1.2 };
+const SUN_WARN_DEG = 15;
+
+const INSTRUCTIONS = `Tools for a ZWO Seestar smart telescope, over its native JSON-RPC link (on the local network, or through ZWO Telescope Network via a seestar-portfwd tunnel on 127.0.0.1).
+Start with seestar_status. The Seestar runs its own pipeline: goto_target slews, plate-solves and centres in one operation and blocks until the scope reports it done; stacking is integrated on the scope (start_stacking / stop_stacking, get_image to look at the stack). Autofocus, park and polar alignment also block until the scope reports their end.
+Only one operation runs at a time. Over ZWO Telescope Network only one remote session exists per telescope: connecting takes it from the official app.
+Coordinates are J2000 (RA in hours, Dec in degrees). Never point at the Sun without the user confirming a solar filter.`;
+
+export function seestarMcpSpec(scope: Seestar): McpSpec {
+  return { name: SERVER_NAME, instructions: INSTRUCTIONS, register: (server) => registerSeestarTools(makeTool(server), scope) };
+}
+
+const json = (v: unknown) => text(v);
+
+export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
+  const tz = config.observer.timezone;
+  const fov = () => scope.state.fov ?? NOMINAL_FOV;
+  const plateScale = (width: number) => (fov().h * 3600) / width;
+
+  // ---- status & link -------------------------------------------------------
+
+  tool(
+    'seestar_status',
+    'Everything known about the Seestar: link and tunnel health, the device (model, firmware, optics, field of view), mount (pointing, tracking, EQ mode, parked), what the view and stack are doing (stacked/dropped frames), focuser, battery and temperature, storage, the last state of every operation, the latest alert and recent events, and the full device state as the scope reported it. refresh=true reads it from the scope first.',
+    { refresh: z.boolean().optional().describe('read the device and app state from the scope first (default true)') },
+    async ({ refresh }) => {
+      if (refresh !== false && scope.state.connected) await scope.refreshState();
+      return json({ ...scope.state, busy: scope.isBusy(), localTime: localTime() });
+    },
+  );
+
+  tool('seestar_connect', 'Connect (or reconnect) to the Seestar after a Disconnect: opens the control link, and over ZWO Telescope Network the tunnel too.', {}, async () => {
+    scope.connectLink();
+    return text('connecting; check seestar_status in a few seconds');
+  });
+
+  tool('seestar_disconnect', 'Release the Seestar: close every link (and the ZWO tunnel) so the official app can take it. It stays released, across restarts, until seestar_connect.', {}, async () => {
+    scope.release();
+    return text('released');
+  });
+
+  tool('zwo_devices', "The telescopes on the ZWO account (owned and shared, as a rented remote scope appears) with their network state: online, offline, shooting (busy with someone's session), occupied.", {}, async () => json(await listDevices()));
+
+  tool('tunnel_status', 'The ZWO Telescope Network tunnel: phase (starting, up, down, failed, unmanaged), whether the forwarded control port answers, restarts and its last output lines.', {}, async () =>
+    json(scope.tunnel?.status() ?? { phase: 'none', note: `connection is ${scope.state.connection}: no tunnel` }),
+  );
+
+  tool('tunnel_restart', 'Restart the ZWO Telescope Network tunnel (after it failed, or the remote session was taken).', {}, async () => {
+    if (!scope.tunnel) throw new Error(`connection is ${scope.state.connection}: there is no tunnel`);
+    scope.tunnel.restart();
+    return json(scope.tunnel.status());
+  });
+
+  tool('sync_time_location', "Push the host's clock and the observer location to the Seestar (it plans and solves with them). Done by itself on connect unless SEESTAR_AUTO_SYNC is false.", {}, async () => json({ synced: await scope.syncTimeLocation() }));
+
+  // ---- pointing ------------------------------------------------------------
+
+  tool(
+    'find_target',
+    'Look up an object in the catalog by name or designation (M 31, NGC 7000, Andromeda, Sh2-155): its coordinates, type, size and magnitude, and its altitude now.',
+    { name: z.string() },
+    async ({ name }) => {
+      const o = findObject(name);
+      if (!o) {
+        const near = searchObjects(name, 8).map((m) => describeObject(m));
+        throw new Error(`"${name}" is not in the catalog${near.length ? `; close matches:\n${near.join('\n')}` : ''}`);
+      }
+      const loc = scope.location();
+      const now = loc ? sky.altAz(loc, o.raHours, o.decDeg) : null;
+      return json({ ...o, gotoName: gotoLabel(o), description: describeObject(o), now, fovPercent: o.majorArcmin ? Math.round((o.majorArcmin / (fov().h * 60)) * 100) : undefined });
+    },
+  );
+
+  tool(
+    'goto_target',
+    'GoTo a target by catalog name, or by J2000 RA/Dec: the Seestar slews, plate-solves and centres it, and this blocks until it reports the GoTo done (or failed). stack=true starts stacking on arrival. The Sun is refused unless solar_filter_confirmed.',
+    {
+      name: z.string().optional().describe('catalog name or designation; or give ra_hours/dec_deg (and a name for the session)'),
+      ra_hours: z.number().min(0).lt(24).optional(),
+      dec_deg: z.number().min(-90).max(90).optional(),
+      lp_filter: z.boolean().optional().describe('the light-pollution (duo-band) filter for this target'),
+      stack: z.boolean().optional().describe('start stacking once centred'),
+      solar_filter_confirmed: z.boolean().optional(),
+    },
+    async (a) => {
+      let ra = a.ra_hours;
+      let dec = a.dec_deg;
+      let name = a.name?.trim();
+      if (ra === undefined || dec === undefined) {
+        if (!name) throw new Error('give a target name, or ra_hours and dec_deg');
+        const o = findObject(name);
+        if (!o) throw new Error(`"${name}" is not in the catalog: give ra_hours and dec_deg`);
+        [ra, dec, name] = [o.raHours, o.decDeg, gotoLabel(o)];
+      }
+      name ||= `RA ${ra.toFixed(3)}h Dec ${dec.toFixed(2)}°`;
+      const loc = scope.location();
+      if (loc) {
+        const sun = sky.bodyRaDec(loc, 'Sun');
+        if (sky.separationDeg(sun.raHours, sun.decDeg, ra, dec) < SUN_WARN_DEG && !a.solar_filter_confirmed) {
+          throw new Error(`${name} is within ${SUN_WARN_DEG}° of the Sun: refused without solar_filter_confirmed (a solar filter on the scope)`);
+        }
+        const pos = sky.altAz(loc, ra, dec);
+        if (pos.altitude < 0) throw new Error(`${name} is below the horizon (altitude ${pos.altitude.toFixed(1)}°)`);
+      }
+      const r = await scope.gotoTarget({ raHours: ra, decDeg: dec, name, lpFilter: a.lp_filter, stack: a.stack });
+      await scope.readPointing().catch(() => {});
+      return json({ target: name, raHours: ra, decDeg: dec, goto: { state: r.goto.state, seconds: Math.round(r.goto.ms / 1000) }, stacking: r.stacking, mount: scope.state.mount });
+    },
+  );
+
+  tool('stop', 'Stop what the view is doing (a GoTo, live view, stacking) and any manual motion.', {}, async () => {
+    await scope.stopMotion().catch(() => {});
+    return json(await scope.stopView());
+  });
+
+  tool(
+    'nudge',
+    `Move the mount by hand: direction as an angle (0 right, 90 up, 180 left, 270 down), speed (240 ≈ 1°/s, max ${NUDGE_MAX_SPEED}) for up to ${NUDGE_MAX_S} s.`,
+    { angle_deg: z.number(), speed: z.number().min(1).max(NUDGE_MAX_SPEED).optional(), seconds: z.number().gt(0).max(NUDGE_MAX_S) },
+    async ({ angle_deg, speed, seconds }) => json(await scope.nudge(angle_deg, speed ?? 240, seconds)),
+  );
+
+  tool('park', 'Park the Seestar (close the arm); blocks until it reports parked.', {}, async () => json(await scope.park()));
+
+  tool('open_arm', 'Raise the arm out of park to the horizon position; blocks until done.', {}, async () => json(await scope.openArm()));
+
+  tool('plate_solve', 'Plate-solve the current view: where the scope really points, and the field.', {}, async () => json(await scope.plateSolve()));
+
+  tool('polar_align', 'Run the Seestar polar alignment (EQ mode on a wedge): blocks until it reports done; the result carries the alignment error.', {}, async () => json(await scope.polarAlign()));
+
+  // ---- imaging -------------------------------------------------------------
+
+  tool(
+    'start_stacking',
+    'Start stacking on the current target (the scope registers and integrates each sub itself). restart=true begins a new stack instead of adding to the current one.',
+    { restart: z.boolean().optional() },
+    async ({ restart }) => json(await scope.startStack(!!restart)),
+  );
+
+  tool('stop_stacking', 'Stop stacking; the stack so far is kept and saved by the scope.', {}, async () => json(await scope.stopStack()));
+
+  tool('start_live_view', 'Live view without a target (no GoTo), e.g. to check the sky or focus.', { lp_filter: z.boolean().optional() }, async ({ lp_filter }) => json(await scope.startView(!!lp_filter)));
+
+  tool('autofocus', 'Run the Seestar autofocus; blocks until it reports done, with the focuser position it chose.', {}, async () => {
+    const r = await scope.autofocus();
+    const position = await scope.focuserPosition().catch(() => null);
+    return json({ ...r, position });
+  });
+
+  tool(
+    'move_focuser',
+    'Move the focuser to an absolute step, or by a relative amount; returns where it ended.',
+    { step: z.number().int().min(0).optional(), by: z.number().int().optional() },
+    async ({ step, by }) => {
+      if (step === undefined && by === undefined) throw new Error('give step or by');
+      const at = step !== undefined ? await scope.focusTo(step) : await scope.focusBy(by!);
+      return json({ position: at, maxStep: scope.state.focus.maxStep });
+    },
+  );
+
+  tool(
+    'set_exposure',
+    'Set the stack sub length and/or the live-view exposure, in seconds.',
+    { stack_s: z.number().positive().max(600).optional(), live_s: z.number().positive().max(60).optional() },
+    async ({ stack_s, live_s }) => json(await scope.setExposure({ stackMs: stack_s !== undefined ? stack_s * 1000 : undefined, continuousMs: live_s !== undefined ? live_s * 1000 : undefined })),
+  );
+
+  tool('set_gain', 'Set the camera gain.', { gain: z.number().int().min(0).max(400) }, async ({ gain }) => json(await scope.setGain(gain)));
+
+  tool(
+    'set_dither',
+    'Dithering during a stack: enable, the offset in pixels and every how many subs.',
+    { enable: z.boolean(), pixels: z.number().int().min(1).max(200).optional(), interval: z.number().int().min(1).max(100).optional() },
+    async ({ enable, pixels, interval }) => json(await scope.setDither({ enable, pix: pixels, interval })),
+  );
+
+  tool('get_settings', "The Seestar's settings as it reports them (get_setting).", {}, async () => json(await scope.settings()));
+
+  tool(
+    'set_settings',
+    'Change Seestar settings (set_setting) by their own keys, e.g. {"auto_af": true}, {"stack_after_goto": false}, {"stack_lenhance": true}, {"heater_enable": true}. Read get_settings for the keys.',
+    { settings: z.record(z.string(), z.unknown()) },
+    async ({ settings }) => json(await scope.setSetting(settings)),
+  );
+
+  tool(
+    'get_image',
+    'Look at the Seestar: the current stacked image (kind=stacked) or one live sub (kind=preview), with star count, HFR/FWHM and an assessment. camera wide for the wide-angle lens.',
+    { kind: z.enum(['stacked', 'preview']).optional(), camera: z.enum(['tele', 'wide']).optional(), analyze: z.boolean().optional().describe('add the numbers (default true)') },
+    async (a) => {
+      const camera = a.camera ?? 'tele';
+      const { image, frame } = await scope.grabImage(camera, a.kind ?? 'stacked');
+      const lines: string[] = [];
+      if (a.analyze !== false) {
+        const scale = camera === 'tele' ? plateScale(image.frameWidth ?? image.width) : undefined;
+        const an = analyze(image);
+        const hfr = an.stars.medianHfrPx;
+        const sharp = starSharpness(image, { arcsecPerPx: scale });
+        lines.push(
+          JSON.stringify(
+            {
+              stars: an.stars.count,
+              medianHfrPx: hfr,
+              medianFwhmArcsec: hfr !== undefined && scale ? +(hfr * 2 * scale).toFixed(2) : undefined,
+              plateScaleArcsecPerPx: scale ? +scale.toFixed(2) : undefined,
+              focus: sharp.ok ? { score: sharp.score, hfrArcsec: sharp.hfrArcsec } : { blocking: sharp.blocking },
+              background: an.stats.median,
+              saturatedPercent: an.saturatedPercent,
+              assessment: an.assessment,
+              stack: { stacked: scope.state.stack.stacked, dropped: scope.state.stack.dropped, imageId: frame.header.imageId },
+            },
+            null,
+            1,
+          ),
+        );
+      }
+      return imageResult(image, `seestar_${camera}_${a.kind ?? 'stacked'}`, { note: lines.join('\n') || undefined });
+    },
+  );
+
+  // ---- planning ------------------------------------------------------------
+
+  tool(
+    'plan_targets',
+    "Rank deep-sky targets for tonight for the Seestar's own field of view (from its reported optics), with the app's planner: framing, time up, integration worth after the Moon, detectability through the sky and filter, and the forecast. Quote its numbers; `hero` is the one to start with, `gotoName` the name to pass to goto_target.",
+    {
+      types: z.array(z.string()).optional(),
+      min_altitude: z.number().min(0).lt(90).optional(),
+      max_magnitude: z.number().optional(),
+      min_size_arcmin: z.number().optional(),
+      max_size_arcmin: z.number().optional(),
+      start: z.string().optional().describe('local time YYYY-MM-DDTHH:MM'),
+      end: z.string().optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+      bortle: z.number().int().min(1).max(9).optional(),
+      filter: z.string().optional().describe('"none", or "duo-band" for the light-pollution filter'),
+      ignore_rest: z.boolean().optional(),
+      ignore_horizon: z.boolean().optional(),
+    },
+    async (a) => {
+      const s = scope.requireLocation();
+      const f = fov();
+      const defaults = planDefaults();
+      const plan = planNight(s, {
+        conditions: (await weather.conditionsAt(s, tz)) ?? undefined,
+        types: a.types,
+        minAltitude: a.min_altitude ?? config.observer.minAltitudeDeg,
+        maxMagnitude: a.max_magnitude,
+        minSizeArcmin: a.min_size_arcmin,
+        maxSizeArcmin: a.max_size_arcmin,
+        start: a.start ? sky.parseLocal(a.start, tz) : undefined,
+        end: a.end ? sky.parseLocal(a.end, tz) : undefined,
+        limit: a.limit,
+        fovArcmin: { w: f.h * 60, h: f.v * 60 },
+        timezone: tz,
+        bortle: a.bortle ?? defaults.bortle,
+        filter: a.filter ?? 'none',
+        rig: { ...defaults.rig, plateScaleArcsecPerPx: plateScale(scope.state.device.chipSize?.[1] ?? 1920), apertureMm: scope.state.device.focalLengthMm && scope.state.device.fNumber ? scope.state.device.focalLengthMm / scope.state.device.fNumber : defaults.rig.apertureMm, mount: scope.state.mount.eqMode ? 'eq' : 'alt-az', guided: false },
+        applyRest: a.ignore_rest ? false : undefined,
+        horizon: a.ignore_horizon ? undefined : horizonFor(s),
+      });
+      if (!a.ignore_rest) rest.recordShown([{ name: plan.hero ?? '', role: 'hero' }, ...plan.targets.slice(0, 5).map((t) => ({ name: t.name, role: 'shortlist' as const }))], sky.localDate(new Date(), tz));
+      return json({ fovDeg: f, ...plan });
+    },
+  );
+
+  // ---- system --------------------------------------------------------------
+
+  tool(
+    'power',
+    'Shut the Seestar down or reboot it. Only when the user asked for it.',
+    { action: z.enum(['shutdown', 'reboot']), confirmed: z.literal(true).describe('the user asked for it') },
+    async ({ action }) => json(await scope.power(action)),
+  );
+
+  tool(
+    'raw_rpc',
+    'Send any JSON-RPC method to the Seestar and return its reply as sent (code, result, error). For methods the other tools do not cover, e.g. get_device_state, get_setting, get_view_state, iscope_get_app_state, get_stack_info, get_albums.',
+    { method: z.string().min(1), params: z.unknown().optional(), timeout_s: z.number().positive().max(300).optional() },
+    async ({ method, params, timeout_s }) => json(await scope.raw(method, params, timeout_s ? timeout_s * 1000 : undefined)),
+  );
+}

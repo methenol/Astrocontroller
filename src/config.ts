@@ -3,6 +3,7 @@ import { plateScaleArcsecPerPx } from './media/image/types.js';
 import path from 'node:path';
 import { Env } from './config/env.js';
 import { HostOverride } from './config/host.js';
+import { DRIVER_IDS, type DriverId } from './drivers/types.js';
 
 export { validHost } from './config/host.js';
 
@@ -11,10 +12,57 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 const THINKING_FORMATS = ['', 'openai', 'qwen', 'qwen-chat-template', 'zai', 'openrouter'] as const;
 const DATA_ACCESS = ['auto', 'shared', 'upload'] as const;
 
+const SEESTAR_CONNECTIONS = ['local', 'zwo'] as const;
+export type SeestarConnection = (typeof SEESTAR_CONNECTIONS)[number];
+
 const env = new Env();
-const dataDir = path.resolve(env.str('DATA_DIR', './data'));
+const driver = env.oneOf<DriverId>('TELESCOPE_DRIVER', DRIVER_IDS, 'dwarf');
+// Each driver keeps its own agent workspace, sessions and overrides unless DATA_DIR says otherwise.
+const dataDir = path.resolve(env.str('DATA_DIR', driver === 'dwarf' ? './data' : `./data-${driver}`));
+const seestarConnection = env.oneOf<SeestarConnection>('SEESTAR_CONNECTION', SEESTAR_CONNECTIONS, 'local');
+const zwo = seestarConnection === 'zwo';
+/**
+ * zwo: where seestar-portfwd's forwarded services are. In Docker that is its container on the
+ * compose network (SEESTAR_TUNNEL_HOST, set by docker-compose.yml); outside Docker the ports it
+ * publishes on loopback.
+ */
+const seestarHost = zwo ? env.host('SEESTAR_TUNNEL_HOST', env.host('SEESTAR_HOST', '127.0.0.1')) : env.host('SEESTAR_HOST', 'seestar.local');
+const LOOPBACK = ['127.0.0.1', 'localhost', '::1'];
 
 export const config = {
+  /** Which telescope this process drives (src/drivers/). */
+  telescope: { driver },
+  seestar: {
+    /** local: the Seestar's own address. zwo: ZWO Telescope Network, its services forwarded to this host by seestar-portfwd. */
+    connection: seestarConnection,
+    /** Where the native services are: the scope on the LAN, or the tunnel (its container, or loopback) for zwo. */
+    host: seestarHost,
+    rpcPort: env.port('SEESTAR_RPC_PORT', 4700),
+    imagePort: env.port('SEESTAR_IMAGE_PORT', 4800),
+    wideImagePort: env.port('SEESTAR_WIDE_IMAGE_PORT', 4804),
+    rtspPort: env.port('SEESTAR_RTSP_PORT', 4554),
+    wideRtspPort: env.port('SEESTAR_WIDE_RTSP_PORT', 4555),
+    /** seestar-portfwd publishes the device's port 80 as 8080 on the host; on the Docker network it is 80 */
+    httpPort: env.port('SEESTAR_HTTP_PORT', zwo && LOOPBACK.includes(seestarHost) ? 8080 : 80),
+    /** PEM private key for the firmware 7.18+ handshake (extracted by you from the official app; never shipped here) */
+    keyPath: env.str('SEESTAR_KEY_PATH', ''),
+    autoSyncTimeLocation: env.bool('SEESTAR_AUTO_SYNC_TIME_LOCATION', true),
+    /** Telescope Network account: the read-only status check, and what the tunnel logs in with */
+    account: {
+      user: env.str('SEESTAR_USER', ''),
+      password: env.str('SEESTAR_PASSWORD', ''),
+      /** the telescope's serial when the account holds several (the rented one) */
+      serial: env.str('SEESTAR_SN', ''),
+      country: env.str('SEESTAR_COUNTRY', 'US'),
+    },
+    tunnel: {
+      /** started and supervised for zwo when set, e.g. `docker compose -f /opt/seestar-portfwd/compose.yaml up`; empty = you run it */
+      command: env.str('SEESTAR_TUNNEL_COMMAND', ''),
+      cwd: env.str('SEESTAR_TUNNEL_CWD', ''),
+      /** how long the tunnel may take to come up before a start is called failed */
+      readyTimeoutS: env.num('SEESTAR_TUNNEL_READY_TIMEOUT_S', 180, { min: 10, max: 1800 }),
+    },
+  },
   dwarf: {
     host: env.host('DWARF_HOST', '192.168.88.1'),
     wsPort: env.port('DWARF_WS_PORT', 9900),
@@ -27,7 +75,7 @@ export const config = {
      * The `majorVersion`/`minorVersion` pair on every request packet. `app` (2.3) is what the official
      * DWARFLAB app writes (`rw4.d()`), so it is the default: we speak the device's own protocol.
      * `sdk` (1.20) is what `@alikh/dwarflab-sdk` writes and what this app sent before the wire layer was
-     * reconstructed — keep it as the fallback if a firmware refuses 2.3. See src/dwarf/wire/transport.ts.
+     * reconstructed — keep it as the fallback if a firmware refuses 2.3. See src/drivers/dwarf/wire/transport.ts.
      */
     protocolHeader: env.oneOf<'sdk' | 'app'>('DWARF_PROTOCOL_HEADER', ['sdk', 'app'] as const, 'app'),
     /** stop a live stack that has rejected every frame (or taken none) for this many minutes; 0 = only notify */
@@ -124,13 +172,18 @@ export const config = {
 if ((config.observer.latitude === null) !== (config.observer.longitude === null)) {
   env.report('OBSERVER_LATITUDE and OBSERVER_LONGITUDE must be set together (only one is set)');
 }
+if (driver === 'seestar' && zwo && LOOPBACK.includes(config.seestar.host) && config.seestar.httpPort === config.web.port) {
+  // seestar-portfwd publishes the scope's port 80 on 127.0.0.1:8080, the web UI's default port: one of the two fails to bind
+  env.report(`WEB_PORT ${config.web.port} is also where the ZWO tunnel forwards the Seestar's file server: set WEB_PORT to another port, or remap that port in seestar-portfwd's compose.yaml and set SEESTAR_HTTP_PORT to match`);
+}
 env.check();
 
 export type Config = typeof config;
 
-// The telescope address set from the web UI wins over DWARF_HOST.
-const hostOverride = new HostOverride(path.join(dataDir, 'telescope.json'), config.dwarf.host);
-config.dwarf.host = hostOverride.load() ?? config.dwarf.host;
+// The telescope address set from the web UI wins over DWARF_HOST (SEESTAR_HOST for the Seestar driver).
+const hostConfig = driver === 'seestar' ? config.seestar : config.dwarf;
+const hostOverride = new HostOverride(path.join(dataDir, 'telescope.json'), hostConfig.host);
+hostConfig.host = hostOverride.load() ?? hostConfig.host;
 
 /** Where the telescope address comes from: the web UI override, or .env (DWARF_HOST). */
 export function telescopeHostInfo(): {
@@ -139,7 +192,7 @@ export function telescopeHostInfo(): {
  envHost: string;
 } {
  return {
-  host: config.dwarf.host,
+  host: hostConfig.host,
   source: hostOverride.load() !== null ? 'ui' : 'env',
   envHost: hostOverride.envHost,
  };
@@ -150,8 +203,8 @@ export function telescopeHostInfo(): {
  * override and goes back to DWARF_HOST. Returns the address now in use.
  */
 export function setTelescopeHost(input: string): string {
-  config.dwarf.host = hostOverride.set(input);
-  return config.dwarf.host;
+  hostConfig.host = hostOverride.set(input);
+  return hostConfig.host;
 }
 
 export interface ObserverLocation {

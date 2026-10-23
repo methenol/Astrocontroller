@@ -3,12 +3,13 @@ import type { Express, Request, Response } from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerTools, type ToolContext } from './tools.js';
+import type { McpSpec } from '../drivers/types.js';
 import { logger, errMsg } from '../log.js';
 import { rejectCrossSite } from '../web/http.js';
 
 const log = logger('mcp');
 
-/** The MCP server's name: tools reach the agent as mcp__dwarf3__<tool>. */
+/** The Dwarf MCP server's name: tools reach the agent as mcp__dwarf3__<tool>. */
 const SERVER_NAME = 'dwarf3';
 const VERSION = ((): string => {
   try {
@@ -25,11 +26,22 @@ const INSTRUCTIONS = `Tools for a DWARFLAB Dwarf 3 smart telescope (two cameras:
 Start with telescope_status. Motors must be homed after power-on (motors_home). Long operations (calibrate, goto_target, polar_alignment, autofocus astro, motors_home, move_motors) block until the telescope reports them finished. Background work (dark masters, transfers, processing, a stack the scope ends itself) is reported to the agent by Astrocontroller as an event when it ends.
 Coordinates are J2000. Never point at the Sun without the user confirming a solar filter.`;
 
+/** The Dwarf 3 tools as an MCP server. */
+export function dwarfMcpSpec(ctx: ToolContext): McpSpec {
+  return { name: SERVER_NAME, instructions: INSTRUCTIONS, register: (server) => registerTools(server, ctx) };
+}
+
+/** The Dwarf 3 tools at /mcp. */
 export function mountMcp(app: Express, ctx: ToolContext): void {
+  mountMcpServer(app, dwarfMcpSpec(ctx));
+}
+
+/** A driver's MCP server at /mcp. */
+export function mountMcpServer(app: Express, spec: McpSpec): void {
   const handle = async (req: Request, res: Response) => {
     // Stateless: one server and transport per request, closed with the response.
-    const server = new McpServer({ name: SERVER_NAME, version: VERSION }, { instructions: INSTRUCTIONS });
-    registerTools(server, ctx);
+    const server = new McpServer({ name: spec.name, version: VERSION }, { instructions: spec.instructions });
+    spec.register(server);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
       transport.close().catch((e: unknown) => log.debug(`closing an MCP transport: ${errMsg(e)}`));

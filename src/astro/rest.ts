@@ -10,9 +10,10 @@
  * Parameters are deliberately gentler than the source engine's. It is a desktop planner for a
  * subscriber with a 600 mm scope and a long target list; this is a 135 mm smart scope whose
  * realistic shortlist is a few dozen objects, and a 60-point penalty for 60 days after a
- * capture would lock out the sky after a user's first three clear nights. A capture therefore
- * holds a target hard for two weeks and fades out over two months; an explicit snooze is
- * stronger, and "don't suggest this again" is permanent until lifted.
+ * capture would lock out the sky after a user's first three clear nights. A target is rested
+ * once its library captures add up to the user's integration goal (any capture when no goal is
+ * set) and stays rested for the user's rest length; an explicit snooze is stronger, and "don't
+ * suggest this again" is permanent until lifted.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,16 +33,63 @@ export interface RestRecord {
   role: RestRole;
 }
 
-/** [strongest penalty, days to full recovery]; a capture holds at full strength until `hold`. */
+/** [strongest penalty, days to full recovery]; a role holds at full strength until `hold`. */
 const ROLE: Record<RestRole, { penalty: number; recoveryDays: number; holdDays: number }> = {
   hero: { penalty: 10, recoveryDays: 14, holdDays: 0 },
   shortlist: { penalty: 6, recoveryDays: 14, holdDays: 0 },
-  shot: { penalty: 25, recoveryDays: 60, holdDays: 14 },
+  // the hold and recovery are the user's rest length (restSettings), filled in by role()
+  shot: { penalty: 25, recoveryDays: 0, holdDays: 0 },
   snoozed: { penalty: 40, recoveryDays: 60, holdDays: 30 },
   done: { penalty: 100, recoveryDays: 0, holdDays: 0 },
 };
 
+export interface RestSettings {
+  /** minutes of library integration (per camera, summed over sessions) before a capture rests a target; 0 = any capture */
+  integrationTargetMin: number;
+  /** days a target that met its integration goal is rested, at full strength, before it is suggested again */
+  restDays: number;
+}
+
+export const REST_DEFAULTS: RestSettings = { integrationTargetMin: 0, restDays: 14 };
+
 const restFile = () => path.join(config.paths.data, 'rest.json');
+const settingsFile = () => path.join(config.paths.data, 'rest-settings.json');
+let settingsCache: RestSettings | null = null;
+
+/** The user's integration goal and rest length; a missing or bad file is the defaults. */
+export function restSettings(): RestSettings {
+  if (settingsCache) return settingsCache;
+  let raw: Partial<RestSettings> = {};
+  try {
+    raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) ?? {};
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`ignoring unreadable ${settingsFile()}: ${errMsg(err)}`);
+  }
+  const num = (v: unknown, min: number, fallback: number) => (typeof v === 'number' && Number.isFinite(v) && v >= min ? v : fallback);
+  settingsCache = {
+    integrationTargetMin: num(raw.integrationTargetMin, 0, REST_DEFAULTS.integrationTargetMin),
+    restDays: Math.round(num(raw.restDays, 1, REST_DEFAULTS.restDays)),
+  };
+  return settingsCache;
+}
+
+export function saveRestSettings(next: Partial<RestSettings>): RestSettings {
+  const merged = { ...restSettings(), ...next };
+  const file = settingsFile();
+  const tmp = `${file}.tmp`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(tmp, `${JSON.stringify(merged, null, 2)}\n`);
+  fs.renameSync(tmp, file);
+  settingsCache = merged;
+  return merged;
+}
+
+/** A role's strength and timing; a capture's is the user's rest length, full strength throughout. */
+function role(r: RestRole): { penalty: number; recoveryDays: number; holdDays: number } {
+  if (r !== 'shot') return ROLE[r];
+  const days = restSettings().restDays;
+  return { ...ROLE.shot, holdDays: days - 1, recoveryDays: days };
+}
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const IMMEDIATE: readonly RestRole[] = ['shot', 'snoozed', 'done'];
 
@@ -95,20 +143,31 @@ const daysSince = (date: string, today: string): number => {
 };
 
 /** Fraction of a role's penalty still in force after `days` (a permanent role never decays). */
-function decay(role: RestRole, days: number): number {
-  const { recoveryDays, holdDays } = ROLE[role];
+function decay(r: RestRole, days: number): number {
+  const { recoveryDays, holdDays } = role(r);
   if (recoveryDays <= 0) return 1;
   if (days <= holdDays) return 1;
   return Math.max(0, (recoveryDays - days) / (recoveryDays - holdDays));
 }
 
-/** Library captures as rest records: the folder name is the target, the stamp is the date. */
-export function captureRecords(today: string): RestRecord[] {
+/**
+ * Library captures as rest records: the folder name is the target, the stamp is the date. A
+ * target's sessions are added up per camera, oldest first, and only the session that reaches the
+ * integration goal (and every later one) rests it: a short first night leaves it on the list.
+ */
+export function captureRecords(today: string, goalMin = restSettings().integrationTargetMin): RestRecord[] {
   const out: RestRecord[] = [];
-  for (const c of captureLog()) {
-    const date = (c.startedAt ?? '').slice(0, 10);
-    if (!DATE.test(date) || date > today) continue;
-    out.push({ name: targetKey(c.target), date, role: 'shot' });
+  const sums = new Map<string, number>();
+  const caps = captureLog()
+    .map((c) => ({ ...c, date: (c.startedAt ?? '').slice(0, 10) }))
+    .filter((c) => DATE.test(c.date) && c.date <= today)
+    .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
+  for (const c of caps) {
+    const name = targetKey(c.target);
+    const id = `${name}|${c.camera}`;
+    const total = (sums.get(id) ?? 0) + c.integrationS;
+    sums.set(id, total);
+    if (total >= goalMin * 60) out.push({ name, date: c.date, role: 'shot' });
   }
   return out;
 }
@@ -125,7 +184,7 @@ export function restPenalty(name: string, today: string, records: RestRecord[]):
     if (r.name !== key) continue;
     const days = daysSince(r.date, today);
     if (days === 0 && !IMMEDIATE.includes(r.role)) continue;
-    pen = Math.max(pen, ROLE[r.role].penalty * decay(r.role, days));
+    pen = Math.max(pen, role(r.role).penalty * decay(r.role, days));
   }
   return Math.round(pen * 10) / 10;
 }
@@ -143,11 +202,11 @@ export function restState(name: string, today: string, records: RestRecord[]): R
   let best: { rec: RestRecord; live: number } | null = null;
   for (const r of records) {
     if (r.name !== key) continue;
-    const live = ROLE[r.role].penalty * decay(r.role, daysSince(r.date, today));
+    const live = role(r.role).penalty * decay(r.role, daysSince(r.date, today));
     if (live > 0 && (!best || live > best.live)) best = { rec: r, live };
   }
   if (!best) return null;
-  const { recoveryDays, holdDays } = ROLE[best.rec.role];
+  const { recoveryDays, holdDays } = role(best.rec.role);
   const daysAgo = daysSince(best.rec.date, today);
   const until = recoveryDays <= 0 ? null : addDays(best.rec.date, Math.max(recoveryDays, holdDays + 1));
   return { kind: best.rec.role, until, daysAgo };

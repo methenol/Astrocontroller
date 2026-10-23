@@ -4,9 +4,9 @@
  * Both are exclusive telescope operations, and both put the camera back the way they found it.
  */
 import { decode, loadImage, type Crop, type FloatImage } from '../images.js';
-import { fetchFile } from '../../dwarf/http.js';
+import { fetchFile } from '../../drivers/dwarf/http.js';
 import { logger, errMsg } from '../../log.js';
-import { FOCUS_MAX, type Dwarf } from '../../dwarf/device.js';
+import { FOCUS_MAX, type Dwarf } from '../../drivers/dwarf/device.js';
 import type { StreamHub } from '../streams.js';
 import { median, round, sharpnessLine, starSharpness, type StarSharpness } from './sharpness.js';
 

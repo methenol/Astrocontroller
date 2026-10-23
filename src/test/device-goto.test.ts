@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { FakeHttpApi } from './fake-http.js';
 import { config } from '../config.js';
-import { Dwarf, AstroServiceHungError } from '../dwarf/device.js';
-import { daylightRefusal } from '../dwarf/controller/astro.js';
-import { DwarfCommandError } from '../dwarf/link.js';
-import { Cmd } from '../dwarf/protocol.js';
+import { Dwarf, AstroServiceHungError } from '../drivers/dwarf/device.js';
+import { daylightRefusal } from '../drivers/dwarf/controller/astro.js';
+import { DwarfCommandError } from '../drivers/dwarf/link.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 2026-10-13 00:00 and 2026-10-12 13:00 in Portland (45.5 N, 122.6 W, PDT) */

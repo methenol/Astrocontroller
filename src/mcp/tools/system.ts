@@ -1,10 +1,10 @@
 /** Status, connection, clock and location, power, device switches, and the raw-command escape hatch. */
 import { z } from 'zod';
 import { config } from '../../config.js';
-import type { Dwarf } from '../../dwarf/device.js';
-import type { SwitchResult } from '../../dwarf/controller/extras.js';
-import * as http from '../../dwarf/http.js';
-import { wireLines } from '../../dwarf/wirelog.js';
+import type { Dwarf } from '../../drivers/dwarf/device.js';
+import type { SwitchResult } from '../../drivers/dwarf/controller/extras.js';
+import * as http from '../../drivers/dwarf/http.js';
+import { wireLines } from '../../drivers/dwarf/wirelog.js';
 import { localTime, sleep, text, type ToolContext, type ToolFn } from './common.js';
 
 /** Reconnects are rate-limited per device across MCP requests (each request registers the tools anew). */

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { Cmd, requestType, responseType, protoTypeByName, decodeWith, rawDecode, decodeNotification, errorText, NOTIFY } from '../dwarf/protocol.js';
+import { Cmd, requestType, responseType, protoTypeByName, decodeWith, rawDecode, decodeNotification, errorText, NOTIFY } from '../drivers/dwarf/protocol.js';
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 

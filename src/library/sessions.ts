@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
-import { withLister, type FtpEntry } from '../dwarf/ftp.js';
+import { withLister, type FtpEntry } from '../drivers/dwarf/ftp.js';
 
 const log = logger('library');
 
@@ -128,9 +128,20 @@ export function librarySessionsFor(target: string, camera?: 'tele' | 'wide'): st
     .map((s) => s.folder);
 }
 
-/** Every library capture as (target, start time), read from the folder names alone. */
-export function captureLog(): Array<{ target: string; startedAt?: string }> {
-  return librarySessions().map((s) => ({ target: s.target, startedAt: s.startedAt }));
+/**
+ * Every library capture as (target, camera, start time, integration): the integration is the
+ * sub length in the folder name times the subs the stacker kept (failed_* are not counted).
+ */
+export function captureLog(): Array<{ target: string; camera: 'tele' | 'wide'; startedAt?: string; integrationS: number }> {
+  return librarySessions().map((s) => {
+    let lights = 0;
+    try {
+      lights = fs.readdirSync(sessionLocalDir(s)).filter((f) => isLight(f) && !f.startsWith('failed_')).length;
+    } catch (err) {
+      log.debug(`could not read ${s.folder}: ${errMsg(err)}`);
+    }
+    return { target: s.target, camera: s.camera, startedAt: s.startedAt, integrationS: lights * (s.exposureS ?? 0) };
+  });
 }
 
 export interface LibrarySession {

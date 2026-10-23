@@ -2,7 +2,7 @@ import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeHttpApi } from './fake-http.js';
 import { config } from '../config.js';
-import { deleteMedia } from '../dwarf/http.js';
+import { deleteMedia } from '../drivers/dwarf/http.js';
 
 const SESSION = '/DWARF3/Astronomy/DWARF_RAW_WIDE_C 20_EXP_15_GAIN_60_2026-10-12-04-34-34-512/stacked.jpg';
 
@@ -55,9 +55,35 @@ describe('album delete against the fake HTTP API', () => {
     api.route('POST /album/delete', (r) => ({ data: (r.body as { datas: Array<{ filePath: string }> }).datas.map((d) => ({ filePath: d.filePath, isSuccess: true })) }));
     const folder = SESSION.replace(/\/stacked\.jpg$/, '');
     await deleteMedia([{ filePath: SESSION }, { filePath: folder }, { filePath: '/DWARF3/Normal_Photos/DWARF_TELE_2026-10-11.jpg' }]);
-    const datas = (api.requestsFor('/album/delete')[0].body as { datas: Array<{ mediaType: number; fileName: string }> }).datas;
+    const datas = (api.requestsFor('/album/delete')[0].body as { datas: Array<{ mediaType: number; fileName: string; filePath: string }> }).datas;
     const name = 'DWARF_RAW_WIDE_C 20_EXP_15_GAIN_60_2026-10-12-04-34-34-512';
     assert.deepEqual(datas.map((d) => [d.mediaType, d.fileName]), [[4, name], [4, name], [1, 'DWARF_TELE_2026-10-11.jpg']]);
+    // the folder goes as its stacked image: the device deletes the folder a path is in (for the folder path, Astronomy/)
+    assert.equal(datas[1].filePath, SESSION);
+  });
+
+  test('Astronomy itself, CALI_FRAME and astro paths outside a session are refused before anything is sent', async () => {
+    api.route('POST /album/getMediaInfoByFilePath', (r) => ({ data: { filePath: (r.body as { filePath: string }).filePath, fileName: 'Astronomy', mediaType: 4 } }));
+    api.route('POST /album/delete', (r) => ({ data: (r.body as { datas: Array<{ filePath: string }> }).datas.map((d) => ({ filePath: d.filePath, isSuccess: true })) }));
+    for (const p of [
+      '/DWARF3/Astronomy',
+      '/DWARF3/Astronomy/',
+      '/DWARF3/Astronomy/stacked.jpg',
+      '/DWARF3/Astronomy/CALI_FRAME',
+      '/DWARF3/Astronomy/CALI_FRAME/dark/cam_0/dark_exp_60.000000_gain_60_bin_1_40C_stack_20.fits',
+      `${SESSION.replace(/\/stacked\.jpg$/, '')}/../stacked.jpg`,
+    ]) {
+      await assert.rejects(deleteMedia([{ filePath: SESSION }, { filePath: p, mediaType: 4 }]), /refused to delete/, p);
+    }
+    await assert.rejects(deleteMedia([{ filePath: '/DWARF3/Normal_Photos/x.jpg', mediaType: 4 }]), /not in a DWARF_RAW_/);
+    assert.equal(api.requestsFor('/album/delete').length, 0);
+  });
+
+  test('an album entry that points outside its session is refused', async () => {
+    api.route('POST /album/getMediaInfoByFilePath', () => ({ data: { filePath: '/DWARF3/Astronomy', fileName: 'Astronomy', mediaType: 4 } }));
+    api.route('POST /album/delete', () => ({ data: [] }));
+    await assert.rejects(deleteMedia([{ filePath: SESSION }]), /refused to delete \/DWARF3\/Astronomy:/);
+    assert.equal(api.requestsFor('/album/delete').length, 0);
   });
 
   test('a partial delete reports each path', async () => {

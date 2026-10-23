@@ -4,9 +4,9 @@ import { FakeDwarf } from './fake-dwarf.js';
 import { FakeHttpApi, dsoSchema } from './fake-http.js';
 import { FakeFocuser } from './fake-focuser.js';
 import { config } from '../config.js';
-import { Dwarf } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
-import { invalidateParamSchema } from '../dwarf/http.js';
+import { Dwarf } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
+import { invalidateParamSchema } from '../drivers/dwarf/http.js';
 import { starFocusSweep, measureTele } from '../media/focus.js';
 import type { StreamHub } from '../media/streams.js';
 

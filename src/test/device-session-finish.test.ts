@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { FakeHttpApi, dsoSchema } from './fake-http.js';
 import { config } from '../config.js';
-import { Dwarf } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
-import { invalidateParamSchema } from '../dwarf/http.js';
+import { Dwarf } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
+import { invalidateParamSchema } from '../drivers/dwarf/http.js';
 
 /** captureRawState as the device state read reports it: 3 = stopped but not finished */
 const STOPPED = 3;
@@ -178,7 +178,7 @@ describe('a camera stuck in a photo, as the state reads report it', () => {
     photoRunning(true);
     await dwarf.refreshState();
     assert.equal(dwarf.state.photoStuckSince?.tele, undefined, 'one read is no proof');
-    const { notePhotoState } = await import('../dwarf/controller/photo-watch.js');
+    const { notePhotoState } = await import('../drivers/dwarf/controller/photo-watch.js');
     const core = (dwarf as unknown as { core: Parameters<typeof notePhotoState>[0] }).core;
     notePhotoState(core, 'tele', true, Date.now() + 61_000);
     assert.ok(dwarf.state.photoStuckSince?.tele);

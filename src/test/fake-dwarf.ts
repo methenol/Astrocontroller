@@ -1,7 +1,7 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
 import { encodePacket, decodePacket, MessageType } from '@alikh/dwarflab-sdk';
-import { requestType, responseType, protoTypeByName, decodeWith, NOTIFY, type ProtoType } from '../dwarf/protocol.js';
+import { requestType, responseType, protoTypeByName, decodeWith, NOTIFY, type ProtoType } from '../drivers/dwarf/protocol.js';
 
 /**
  * An offline stand-in for the DWARF 3 control service (ws port 9900), for tests.

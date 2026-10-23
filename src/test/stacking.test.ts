@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { StackTracker, type StackHealth, type CameraName } from '../dwarf/stacking.js';
+import { StackTracker, type StackHealth, type CameraName } from '../drivers/dwarf/stacking.js';
 import { readWireLog, at, type WireLine } from './wirelog-replay.js';
 
 const FIXTURE = path.resolve('test-fixtures/2026-10-12-wide-c20.wire.log');

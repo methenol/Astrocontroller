@@ -109,7 +109,7 @@ export function capturedImages(text: string): string[] {
 
 /** A tool name as shown: the MCP server prefix dropped. */
 export function prettyTool(name: unknown): string {
-  return String(name ?? '').replace(/^mcp__dwarf3_+/, '');
+  return String(name ?? '').replace(/^mcp__(dwarf3|seestar)_+/, '');
 }
 
 /** An error field from omp: a string, or an object with a message. */

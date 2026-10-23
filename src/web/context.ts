@@ -1,5 +1,5 @@
 /** What every web route module is given. */
-import type { Dwarf } from '../dwarf/device.js';
+import type { Dwarf } from '../drivers/dwarf/device.js';
 import type { StreamHub } from '../media/streams.js';
 import type { AgentBridge } from '../agent/omp.js';
 import type { DutyLoop } from '../agent/duty.js';

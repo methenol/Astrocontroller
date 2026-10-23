@@ -1,7 +1,7 @@
 /** Shooting modes, camera settings, stills/video/timelapse, and looking through a camera. */
 import { z } from 'zod';
-import { BURST_MAX } from '../../dwarf/device.js';
-import * as http from '../../dwarf/http.js';
+import { BURST_MAX } from '../../drivers/dwarf/device.js';
+import * as http from '../../drivers/dwarf/http.js';
 import { crop as cropImage, loadImage } from '../../media/images.js';
 import { cameraArg, cropArg, exposureArgSeconds, imageResult, text, type ToolContext, type ToolFn } from './common.js';
 

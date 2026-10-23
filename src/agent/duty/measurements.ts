@@ -1,10 +1,10 @@
 /** A compact reading of everything the controller can measure, for the duty samples. */
 import { config } from '../../config.js';
-import type { Dwarf } from '../../dwarf/device.js';
-import type { StackSupervisor } from '../../dwarf/stack-supervisor.js';
+import type { Dwarf } from '../../drivers/dwarf/device.js';
+import type { StackSupervisor } from '../../drivers/dwarf/stack-supervisor.js';
 import * as library from '../../library/transfer.js';
 import * as processing from '../../processing/queue.js';
-import * as dhttp from '../../dwarf/http.js';
+import * as dhttp from '../../drivers/dwarf/http.js';
 import * as sky from '../../astro/sky.js';
 import { clock, fmtMin } from './time.js';
 

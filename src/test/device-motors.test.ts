@@ -2,8 +2,8 @@ import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { config } from '../config.js';
-import { Dwarf } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
+import { Dwarf } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
 
 before(() => {
   config.dwarf.host = '127.0.0.1';
@@ -99,8 +99,17 @@ describe('Dwarf motors against a fake mount', () => {
   test('a wrong reference after a reset (outside the travel) stops homing before any move', async () => {
     const m = new FakeMount(fake, { rotation: 80, pitch: 120 });
     m.pitchAfterReset = 323;
-    await assert.rejects(dwarf.homeMotors(), /pitch reports 323° after its reset, outside its 0–195° travel/);
+    await assert.rejects(dwarf.homeMotors(), /pitch reports 323° after its reset, outside the 0–250° it can reach/);
     assert.equal(fake.requestsFor(Cmd.STEP_MOTOR_RUN_TO).length, 0);
+  });
+
+  test('a pitch past the move range where an EQ GoTo left it is a valid reference (2026-10-21: 219.3°)', async () => {
+    const m = new FakeMount(fake, { rotation: 183, pitch: 219.3 });
+    const p = await dwarf.rereferenceMotors();
+    assert.deepEqual([p.homed, p.rotationDeg, p.pitchDeg], [true, 183, 219.3]);
+    const r = await dwarf.homeMotors();
+    assert.match(r, /homed: rotation 159° .* pitch 2\.5°/);
+    assert.deepEqual([m.pos[1], m.pos[2]], [159, 2.5]);
   });
 
   test('a power-off during homing stops it; nothing more is sent', async () => {

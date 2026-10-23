@@ -1,8 +1,8 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
-import { DwarfLink, DwarfCommandError, TelescopeUnresponsiveError, type LinkTiming } from '../dwarf/link.js';
-import { Cmd } from '../dwarf/protocol.js';
+import { DwarfLink, DwarfCommandError, TelescopeUnresponsiveError, type LinkTiming } from '../drivers/dwarf/link.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

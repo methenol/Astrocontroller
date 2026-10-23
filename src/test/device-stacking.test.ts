@@ -2,9 +2,9 @@ import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { config } from '../config.js';
-import { Dwarf } from '../dwarf/device.js';
-import { DwarfCommandError } from '../dwarf/link.js';
-import { Cmd } from '../dwarf/protocol.js';
+import { Dwarf } from '../drivers/dwarf/device.js';
+import { DwarfCommandError } from '../drivers/dwarf/link.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

@@ -21,7 +21,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../../config.js';
 import { logger, errMsg } from '../../log.js';
-import type { CameraName, Dwarf } from '../../dwarf/device.js';
+import type { CameraName, Dwarf } from '../../drivers/dwarf/device.js';
 import { JpegSplitter } from './jpeg.js';
 import { Source, type Frame } from './source.js';
 

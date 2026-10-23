@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
-import { toFtpPath } from '../dwarf/ftp.js';
+import { toFtpPath } from '../drivers/dwarf/ftp.js';
 import { startJob, cancelJob, getJob, drainJobs } from '../library/jobs.js';
 import { parseSessionFolder, librarySessionsFor, listLibrary, isTransferred, sessionLocalDir } from '../library/sessions.js';
 import { albumLocalPath, deleteDeviceSessions, distinctPaths, missingLights } from '../library/transfer.js';

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
 import { FakeHttpApi, dsoSchema } from './fake-http.js';
 import { config } from '../config.js';
-import { Dwarf } from '../dwarf/device.js';
-import { Cmd } from '../dwarf/protocol.js';
-import { invalidateParamSchema } from '../dwarf/http.js';
+import { Dwarf } from '../drivers/dwarf/device.js';
+import { Cmd } from '../drivers/dwarf/protocol.js';
+import { invalidateParamSchema } from '../drivers/dwarf/http.js';
 
 /** the Normal-mode burst count as fw 1.5.3.9 lists it */
 const BURST_COUNT = '401';

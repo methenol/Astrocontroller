@@ -6,8 +6,8 @@
 #   2 JdxBulk.java   <apk>    <out>      JADX headless decompile             -> $DWARFLAB_WORK/dwarflab-src
 #   3 proto_recover.py                   serialized FileDescriptorProtos     -> $REA_PROJECTS/dwarflab/recovered
 #   4 proto_emit.py                      readable .proto from those bytes    -> .../recovered/proto
-#   5 gen_ts.py                          recovered.root JSON + WsCmd ids     -> src/dwarf/wire/{generated,proto}
-#   6 gen_device_ts.py                   schemas, catalogue, camera params   -> src/dwarf/wire/generated
+#   5 gen_ts.py                          recovered.root JSON + WsCmd ids     -> src/drivers/dwarf/wire/{generated,proto}
+#   6 gen_device_ts.py                   schemas, catalogue, camera params   -> src/drivers/dwarf/wire/generated
 # Steps 5 and 6 read the extracted facts from the committed evidence/ directory, so the
 # TypeScript regenerates without re-running 1-4; those steps are only needed against a new APK.
 # Deterministic: re-running must not change the committed files.
@@ -118,7 +118,7 @@ measure = subprocess.run([sys.executable, '-c', 'pass'], capture_output=True)
 js = r'''
 const require = (await import('module')).createRequire('__REPO__/');
 const protobuf = require('protobufjs'); const fs = require('fs');
-const dir = '__REPO__/src/dwarf/wire/proto';
+const dir = '__REPO__/src/drivers/dwarf/wire/proto';
 const root = new protobuf.Root();
 root.loadSync(fs.readdirSync(dir).filter(f => f.endsWith('.proto')).map(f => dir + '/' + f), { keepCase: false });
 process.stdout.write(JSON.stringify(root.toJSON({ keepCaseDefaults: false })));
