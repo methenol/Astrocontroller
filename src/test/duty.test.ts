@@ -169,6 +169,43 @@ describe('DutyLoop', () => {
     assert.equal(agent.prompts.length, 2);
   });
 
+  test('a new session starts clean: events queued for the old one are not delivered, and the first sample says so', async () => {
+    duty.start({ objective: 'image the Moon', intervalS: 300, by: 'user' });
+    duty.tick();
+    await flush();
+    assert.match(agent.prompts[0], /fresh start/, 'a new duty begins fresh');
+    agent.set({ busy: true });
+    duty.event('tele stack on Moon is COLLECTING NOTHING');
+    duty.newSession();
+    agent.set({ busy: false });
+    assert.equal(duty.status().pendingEvents, 0);
+    now += 300_000;
+    duty.tick();
+    await flush();
+    assert.equal(agent.prompts.length, 2);
+    assert.doesNotMatch(agent.prompts[1], /COLLECTING NOTHING|Events since/);
+    assert.match(agent.prompts[1], /fresh start/);
+    agent.set({ busy: true });
+    agent.set({ busy: false });
+    now += 300_000;
+    duty.tick();
+    await flush();
+    assert.doesNotMatch(agent.prompts[2], /fresh start/, 'only the first sample of the session');
+  });
+
+  test('a new user duty drops the previous duty\'s events', async () => {
+    duty.start({ objective: 'image the Moon', by: 'user' });
+    duty.event('tele stack on Moon is COLLECTING NOTHING');
+    duty.start({ objective: 'soak IC 1848', by: 'user' });
+    duty.tick();
+    await flush();
+    // the event's own delivery timer must not bring it back either
+    await new Promise((r) => setTimeout(r, 3100));
+    assert.equal(agent.prompts.length, 1);
+    assert.match(agent.prompts[0], /soak IC 1848/);
+    assert.doesNotMatch(agent.prompts[0], /Moon/);
+  });
+
   test('the agent cannot end a duty before its end time', () => {
     duty.start({ objective: 'x', until: new Date(now + 3600_000).toISOString(), by: 'user' });
     assert.throws(() => duty.complete('done'), /refused: this duty runs until/);

@@ -48,7 +48,7 @@ While the tele stack is **not** collecting (`stacking_status.tele.state` not run
 1. `telescope_status` → read `bodyMode`, `motors.homed`, `link.state`, `stacking`.
 2. If `motors.homed` is false: `motors_home`, then `sync_time_and_location`.
    - Once per night, at the first P1: `map_obstructions` (status). If its `map` says none for this site: `map_obstructions action=run` (~20 min; it fixes its own pointing by plate solving and saves the map for this site). If it fails, go on without it: the plan still works, on the minimum altitude alone.
-3. Choose the target. Use the one the owner named; otherwise `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; `altitudeNow` ≥ 25 (it is up **now**; the plan also lists targets that rise later); `obstructedNow` not true (behind the site's mapped trees or buildings now); not on tonight's obscured list; `azimuthNow` at least 45° from every obscured azimuth (P3). Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
+3. Choose the target. Use the one the owner named; otherwise `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; `altitudeNow` ≥ 25 (it is up **now**; the plan also lists targets that rise later); `obstructedNow` not true (behind the site's horizon now: its mapped trees and buildings, and every view found blocked tonight). Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
 4. Run **P2** on it.
 Nothing else comes first: no skills, no todo, no forecast, no notes.
 
@@ -59,7 +59,7 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
    - `VISIBLE` → continue with step 3.
    - `BLOCKED` → **P3** at once. Do not focus, do not stack, do not retry the same target.
    - Never use `view_camera`, `analyze_image` or `sky_check` to decide whether a target is visible: a dark wide frame, a star count or a "clear" sky verdict says nothing about what is in front of the tele lens.
-   - Report one line: "<target> az <azimuthNow> alt <altitudeNow>: VISIBLE (<reason>)" or "…: BLOCKED (<reason>)".
+   - Report one line: "<target> az <azimuthNow> alt <altitudeNow>: VISIBLE (<reason>)" or "…: BLOCKED (<reason>), clears <clearsAt or 'not tonight'>".
    - Three different targets in a row BLOCKED = possibly cloud: `sky_check` and `weather_forecast`, then keep trying targets on every sample.
 3. (`tele_visibility` left the focuser at infinity: go on.)
 4. `autofocus mode=astro`.
@@ -74,16 +74,19 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
 ## P3 — The owner says obscured / not visible / blocked, or `tele_visibility` says BLOCKED
 The owner's word is final. Do not run `sky_check` to test it. Do not argue.
 1. `live_stacking action=stop` if a stack is running on it.
-2. Add the target to tonight's **obscured list**: name, `azimuthNow`, `altitudeNow`. Repeat the list at the end of every reply until a stack is collecting; after that, keep it in the todo list.
-3. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated`, has `altitudeNow` ≥ 25, `obstructedNow` not true, and whose `azimuthNow` is **at least 45° away from every azimuth on the obscured list**. Go down the list once and act.
+2. If the owner said it (not `tele_visibility`): `mark_blocked`. A BLOCKED `tele_visibility` has already recorded it.
+   What is recorded is the patch of sky (azimuth, altitude) at that time, not the target: the sky turns, so the target comes clear later (its `clearsAt`), and any other target passing through that patch is behind the same obstruction. Keep no list of blocked targets or azimuths yourself; the plan carries it.
+3. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated`, has `altitudeNow` ≥ 25 and `obstructedNow` not true. Go down the list once and act.
 4. Run **P2** on it.
-Never GoTo a target on the obscured list again tonight unless the owner tells you to.
+A blocked target comes back on its own: when the plan shows it with `obstructedNow` false (after its `clearsAt`), it is a candidate again like any other row.
+If the blocked target is the one the owner named (the priority target): put "return to <target> at <clearsAt>" in the todo list. Its return is scheduled, not optional (P4 step 4). `clearsAt` null = it does not clear tonight; say so in one line.
 
 ## P4 — Duty sample while a stack is collecting
 1. `stacking_status` → stacked vs taken.
 2. `analyze_subs count=3` → stars, hfrPx, roundness (QC rules: session-qc skill).
 3. If stacked is not growing, or a COLLECTING NOTHING / STALLED event arrived: stop the stack, find the cause (section 7) and get a stack running again in this turn.
-4. Housekeeping as needed (section 4), then end your turn. Pick `duty action=next_check in_s=…` (600 s while healthy).
+4. If the owner's priority target is not the one stacking and the todo list has its return time: at or after that time, run **P5** to it (its P2 `tele_visibility` is the check; BLOCKED again files a higher patch and gives a later `clearsAt`). Before that time, pick `next_check` so a sample falls at it.
+5. Housekeeping as needed (section 4), then end your turn. Pick `duty action=next_check in_s=…` (600 s while healthy).
 
 ## P5 — Changing target (scheduled change, or the objective's handover)
 1. `live_stacking action=stop` on the current target.
@@ -157,7 +160,7 @@ They **never** hold:
 - anything about one night: what happened, targets shot, counts, temperatures, inventories, timings, weather;
 - assumptions, interpretations or guesses, including your own explanations of failures.
 
-Before writing, ask: is this true of this scope on every night, at any site? If not, it does not get written. Tonight's facts (the obscured list, the plan) live in the todo list, which is housekeeping (section 4).
+Before writing, ask: is this true of this scope on every night, at any site? If not, it does not get written. Tonight's facts (the plan) live in the todo list, which is housekeeping (section 4).
 
 Skill file format:
 ```

@@ -15,6 +15,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { errMsg, logger } from '../log.js';
 import { writeFileAtomic } from '../util/fs.js';
+import { sightingsFor, withSightings } from './sightings.js';
 
 const log = logger('horizon');
 
@@ -126,10 +127,14 @@ export function horizonOf(mask: HorizonMask): Horizon {
   return { limit: (az) => limitAt(mask, az), summary: describeMask(mask) };
 }
 
-/** The mask in use at a site as a planner horizon, or undefined when there is none. */
-export function horizonFor(site: { lat: number; lon: number } | null | undefined): Horizon | undefined {
+/**
+ * The horizon the planner uses at a site: the mask in use, raised wherever the tele was found
+ * blocked tonight (sightings.ts); undefined when there is neither.
+ */
+export function horizonFor(site: { lat: number; lon: number } | null | undefined, now = new Date()): Horizon | undefined {
   const m = maskFor(site);
-  return m ? horizonOf(m) : undefined;
+  const base = m ? horizonOf(m) : undefined;
+  return site ? withSightings(base, sightingsFor(site, now)) : base;
 }
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];

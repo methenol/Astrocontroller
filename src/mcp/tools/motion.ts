@@ -2,13 +2,47 @@
 import { z } from 'zod';
 import { FOCUS_MAX } from '../../drivers/dwarf/device.js';
 import { Cmd } from '../../drivers/dwarf/protocol.js';
-import { measureTele, starFocusSweep } from '../../media/focus.js';
+import { filterOf, isNarrowband, measureTele, starFocusSweep } from '../../media/focus.js';
+import { config } from '../../config.js';
+import type { Site } from '../../astro/sky.js';
+import { findObject } from '../../astro/catalog.js';
+import { horizonFor } from '../../astro/horizon.js';
+import { clearsAt, recordBlocked } from '../../astro/sightings.js';
+import { altAz, fmtTime, nightWindow } from '../../astro/sky.js';
 import { capturedLine, cropArg, displayJpeg, saveCapture, text, withImage, type ToolContext, type ToolFn } from './common.js';
 
 const MAX_RELATIVE_DEG = 60;
 /** tele_visibility: a sky frame at infinity focus shows at least this many measurable stars, no softer than this (sharp here is ~2 px; a roof at infinity focus measured 20 px). */
 const VISIBLE_MIN_STARS = 20;
 const VISIBLE_MAX_HFR_PX = 6;
+/**
+ * The visibility still is a verdict on the sky, not a focus reading: the focus measurement's
+ * 0.5–1 s frames come back black through the Astro filter and call a clear sky blocked. A
+ * deep-sky sub's worth of light (the mount is tracking after a GoTo) shows the stars that are there.
+ */
+const VISIBLE_EXPOSURE_S = 10;
+const VISIBLE_EXPOSURE_NARROWBAND_S = 30;
+const VISIBLE_GAIN = 80;
+/**
+ * File a blocked verdict as the patch of sky it was seen in, now, and say when the target comes
+ * clear of it as the sky turns. Without a resolvable target there is no position to file.
+ */
+function blockedAt(site: Site, target: string | undefined, reason: string): { blockedAt: Record<string, unknown> | string; clearsAt: string | null } {
+  const o = target ? findObject(target) : undefined;
+  if (!o) return { blockedAt: `not recorded: ${target ? `"${target}" is not in the catalog` : 'no GoTo target known'}, so its position is unknown (pass target=)`, clearsAt: null };
+  const tz = config.observer.timezone;
+  const now = new Date();
+  const { azimuth, altitude } = altAz(site, o.raHours, o.decDeg, now);
+  recordBlocked(site, o.id, azimuth, altitude, reason, now);
+  const w = nightWindow(site, now);
+  const until = w.astroDawn && w.astroDawn > now ? w.astroDawn : new Date(now.getTime() + 12 * 3600e3);
+  const clear = clearsAt(site, o.raHours, o.decDeg, config.observer.minAltitudeDeg, horizonFor(site, now), now, until);
+  return {
+    blockedAt: { target: o.id, time: fmtTime(now, tz), azimuth: Math.round(azimuth), altitude: Math.round(altitude) },
+    clearsAt: fmtTime(clear, tz),
+  };
+}
+
 const NUDGE_ANGLES: Record<string, number> = { up: 0, 'up-right': 45, right: 90, 'down-right': 135, down: 180, 'down-left': 225, left: 270, 'up-left': 315 };
 
 export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): void {
@@ -98,12 +132,16 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
 
   tool(
     'tele_visibility',
-    'THE test for "is the target visible in the tele frame" after a GoTo — the one answer to trust, not the wide view or a star count. Drives the focuser to the stored infinity position, takes one tele still and measures its stars. At infinity focus anything near the scope (a roof, a dock, a pole, branches) is a large blur while stars are points, so: VISIBLE = at least 20 measurable stars with a median HFR at most 6 px; anything else is BLOCKED (obstruction, cloud or dew). Refuses while the tele camera is stacking. Leaves the focuser at infinity (the starting point for autofocus).',
-    {},
-    async () => {
+    `THE test for "is the target visible in the tele frame" after a GoTo — the one answer to trust, not the wide view or a star count. Drives the focuser to the stored infinity position, takes one tele still at a deep-sky exposure (${VISIBLE_EXPOSURE_S} s, ${VISIBLE_EXPOSURE_NARROWBAND_S} s through a narrowband filter, gain ${VISIBLE_GAIN}; the gain is restored after) and measures its stars. At infinity focus anything near the scope (a roof, a dock, a pole, branches) is a large blur while stars are points, so: VISIBLE = at least ${VISIBLE_MIN_STARS} measurable stars with a median HFR at most ${VISIBLE_MAX_HFR_PX} px; anything else is BLOCKED (obstruction, cloud or dew). A BLOCKED verdict is remembered as that patch of sky (azimuth and altitude) at that time, not as the target: plan_targets then raises the site's horizon there for tonight, and both this result and plan_targets give \`clearsAt\`, when the target comes clear as the sky turns (null = not tonight). Refuses while the tele camera is stacking. Leaves the focuser at infinity (the starting point for autofocus).`,
+    {
+      target: z.string().optional().describe('the target the scope is pointing at; default the last GoTo target'),
+      exposure_s: z.number().min(1).max(60).optional().describe(`override the still's exposure (default ${VISIBLE_EXPOSURE_S} s, ${VISIBLE_EXPOSURE_NARROWBAND_S} s through a narrowband filter)`),
+    },
+    async (a) => {
+      const exposureS = a.exposure_s ?? (isNarrowband(await filterOf(dwarf)) ? VISIBLE_EXPOSURE_NARROWBAND_S : VISIBLE_EXPOSURE_S);
       const inf = await dwarf.infinityFocusPosition();
       const at = await dwarf.focusTo(inf);
-      const { img, sharp } = await measureTele({ dwarf, hub });
+      const { img, sharp } = await measureTele({ dwarf, hub }, { exposureS, gain: VISIBLE_GAIN });
       const jpeg = await displayJpeg(img, 1024);
       const saved = saveCapture(jpeg, 'tele_visibility');
       const visible = sharp.ok && sharp.starsUsed >= VISIBLE_MIN_STARS && sharp.hfrPx <= VISIBLE_MAX_HFR_PX;
@@ -112,16 +150,30 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
         : sharp.starsUsed < VISIBLE_MIN_STARS
           ? `only ${sharp.starsUsed} measurable stars`
           : `median HFR ${sharp.hfrPx.toFixed(1)} px at infinity focus: blurred near structure, not stars`;
+      const blocked = visible ? null : blockedAt(dwarf.requireLocation(), a.target ?? dwarf.state.goto.target ?? dwarf.state.tracking.target, why ?? 'not visible');
       const report = {
         verdict: visible ? 'VISIBLE' : 'BLOCKED',
-        next: visible ? 'continue on this target (autofocus, then star focus)' : 'the target is NOT visible: do not focus or stack here — choose another target',
+        next: visible
+          ? 'continue on this target (autofocus, then star focus)'
+          : blocked?.clearsAt
+            ? `not visible now: do not focus or stack here now. It clears at ${blocked.clearsAt}; choose another target until then`
+            : 'not visible now: do not focus or stack here — choose another target',
         reason: visible ? `${sharp.starsUsed} stars, median HFR ${sharp.hfrPx.toFixed(1)} px` : why,
+        ...(blocked ?? {}),
+        exposure: `${exposureS} s, gain ${VISIBLE_GAIN}`,
         focusPosition: at,
         captured: capturedLine(img) || undefined,
         image: `captures/${saved}`,
       };
       return withImage(jpeg, JSON.stringify(report, null, 1));
     },
+  );
+
+  tool(
+    'mark_blocked',
+    "Record that the owner says the tele's view is blocked here (a tree, a roof, the house): the patch of sky the target is in right now (azimuth, altitude) at this time, exactly as a BLOCKED tele_visibility files it. plan_targets then raises the site's horizon there for tonight and gives each target's `clearsAt`, when the turning sky brings it clear. Returns when this target clears (null = not tonight).",
+    { target: z.string().optional().describe('the target the scope is pointing at; default the last GoTo target') },
+    async (a) => text(blockedAt(dwarf.requireLocation(), a.target ?? dwarf.state.goto.target ?? dwarf.state.tracking.target, 'the owner said the view is blocked')),
   );
 
   tool(

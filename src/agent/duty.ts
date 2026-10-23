@@ -124,6 +124,8 @@ export class DutyLoop extends SafeEmitter {
    * telescope down.
    */
   private userStopped = false;
+  /** the next sample is the first of a new session or a new duty: say so, and that nothing earlier applies */
+  private fresh = false;
   private readonly now: () => number;
   private readonly stopSensors: () => void;
   private readonly onStatus = () => this.onAgentStatus();
@@ -228,13 +230,32 @@ export class DutyLoop extends SafeEmitter {
     };
     if (o.by === 'user') {
       this.userStopped = false;
-      // the user is directing a new duty: the previous one's undelivered END steps no longer apply
-      this.finalPending = null;
+      // the user is directing a new duty: the previous one's undelivered events and END steps no longer apply
+      this.dropPending();
     }
     log.info(`duty started by the ${o.by}: "${objective}"${until ? ` until ${until.label}` : ''}`);
     this.agent.note('info', `Duty started${until ? ` until ${until.label}` : ''}: ${objective}`);
     this.save();
     return this.state;
+  }
+
+  /**
+   * A new agent session: a fresh start, like a coding agent's. Events and END steps queued for
+   * the old conversation are dropped, so its first wake carries nothing from before it.
+   */
+  newSession(): void {
+    this.dropPending();
+    this.publish();
+  }
+
+  private dropPending(): void {
+    if (this.events.length) log.info(`dropping ${this.events.length} event(s) queued before the fresh start`);
+    this.events = [];
+    this.finalPending = null;
+    // their delivery too: it would wake the fresh start with an empty sample of its own
+    if (this.deliverTimer) clearTimeout(this.deliverTimer);
+    this.deliverTimer = null;
+    this.fresh = true;
   }
 
   /** Stop pressed on the agent: pause the duty and hold every automatic wake. */
@@ -389,6 +410,7 @@ export class DutyLoop extends SafeEmitter {
       if (kind !== 'event-only') this.state.wakes++;
       this.save();
       await this.agent.prompt(text, [], 'followUp');
+      this.fresh = false;
     } catch (e) {
       // not delivered: keep the events (an END wake: the whole message), try again at the next sample (or, off duty, a little later)
       if (kind === 'final' && text !== undefined) this.finalPending = text;
@@ -422,6 +444,12 @@ export class DutyLoop extends SafeEmitter {
       `[Astrocontroller duty ${kind === 'final' ? 'END' : 'sample'}: automatic, not typed by the user]`,
       `Objective from the user${st.untilLabel ? `, in force until ${st.untilLabel}` : ''}: ${st.objective}`,
     ];
+    if (this.fresh) {
+      lines.push(
+        '',
+        'This is a fresh start: the first sample of this duty. Nothing from earlier sessions or earlier duties applies — no earlier objectives, targets, events, tool results or plans. The objective above is your whole instruction; what the scope is doing now comes from the measurements below and from tools.',
+      );
+    }
     if (events.length) lines.push('', 'Events since your last turn:', ...this.eventLines(events));
     lines.push('', 'Measurements now:', ...measurements(this.dwarf, this.now(), this.stackSupervisor), '');
     if (kind === 'final') {

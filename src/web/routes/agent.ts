@@ -62,7 +62,14 @@ export function agentRoutes({ agent, duty }: WebContext): Router {
       await agent.abort();
     }),
   );
-  api.post('/agent/new', route(async () => agent.newSession()));
+  api.post(
+    '/agent/new',
+    route(async () => {
+      // a new session starts clean: nothing queued for the old conversation is delivered to it
+      duty.newSession();
+      await agent.newSession();
+    }),
+  );
   api.post(
     '/agent/thinking',
     route(async (req) => {

@@ -48,7 +48,7 @@ const IR_PASS_EXPOSURE_S = 1;
 /** Below this a narrowband measurement is noise-dominated. */
 const NARROWBAND_MIN_S = 2;
 
-const isNarrowband = (filter: string) => /duo|band|h-?a\b|oiii/i.test(filter);
+export const isNarrowband = (filter: string) => /duo|band|h-?a\b|oiii/i.test(filter);
 
 /** The exposure that shows enough stars through the tele filter in use. */
 export function measureExposureFor(filter: string): number {
@@ -76,7 +76,8 @@ function filterNotes(filter: string, exposureS: number | null, tracking: boolean
   return out;
 }
 
-const filterOf = async (dwarf: Dwarf): Promise<string> => String(currentOf((await dwarf.cameraSettings('tele').catch(() => null))?.settings.filter) ?? '');
+/** The tele filter in use, by name ('' when the scope does not say). */
+export const filterOf = async (dwarf: Dwarf): Promise<string> => String(currentOf((await dwarf.cameraSettings('tele').catch(() => null))?.settings.filter) ?? '');
 /** A fitted optimum this close to the best sample is the best sample. */
 const FIT_MIN_SHIFT = 2;
 /** The best sample beats the start by more than this percentage to count as an improvement. */

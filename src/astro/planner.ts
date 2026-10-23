@@ -26,6 +26,7 @@ import { subPlan, type Rig } from './exposure.js';
 import { captureRecords, loadRest, restPenalty, restState, type RestRecord } from './rest.js';
 import type { HourConditions } from './weather.js';
 import type { Horizon } from './horizon.js';
+import { clearsAt } from './sightings.js';
 
 export interface PlanOptions {
   start?: Date;
@@ -81,8 +82,10 @@ export interface PlannedTarget {
   altitudeNow: number;
   /** compass direction now, 0 = N, 90 = E: two targets with close azimuths sit behind the same obstruction */
   azimuthNow: number;
-  /** above the minimum altitude now but behind the site's mapped obstructions; null without a horizon mask */
+  /** above the minimum altitude now but behind the site's horizon (its mapped obstructions and tonight's blocked views); null without one */
   obstructedNow: boolean | null;
+  /** when an obstructed target comes clear tonight; null when it is not obstructed now or does not clear before the window ends */
+  clearsAt: string | null;
   moonSeparationDeg: number;
   framing: string;
   suggestedFilter: string;
@@ -579,11 +582,15 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
         hoursAboveMin: vis.hoursAboveMin,
         visibleFrom: fmtTime(vis.firstAbove, opts.timezone),
         visibleUntil: fmtTime(vis.lastAbove, opts.timezone),
-        ...(({ altitude, azimuth }) => ({
-          altitudeNow: Math.round(altitude),
-          azimuthNow: Math.round(azimuth),
-          obstructedNow: opts.horizon ? altitude >= opts.minAltitude && altitude < opts.horizon.limit(azimuth) : null,
-        }))(altAz(site, o.raHours, o.decDeg, now)),
+        ...(({ altitude, azimuth }) => {
+          const obstructed = opts.horizon ? altitude >= opts.minAltitude && altitude < opts.horizon.limit(azimuth) : null;
+          return {
+            altitudeNow: Math.round(altitude),
+            azimuthNow: Math.round(azimuth),
+            obstructedNow: obstructed,
+            clearsAt: obstructed ? fmtTime(clearsAt(site, o.raHours, o.decDeg, opts.minAltitude, opts.horizon, now, end), opts.timezone) : null,
+          };
+        })(altAz(site, o.raHours, o.decDeg, now)),
         moonSeparationDeg: Math.round(moonSep),
         framing: fr.text,
         suggestedFilter: perTarget ? `${glassUsed} (${d.reason})` : suggestFilter(o, moon.illuminationPercent),
