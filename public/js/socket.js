@@ -9,6 +9,7 @@ import { renderDuty } from './duty.js';
 import { renderJobs, renderProcessing, addCapture } from './library.js';
 import { resetLog, addLog } from './logs.js';
 import { renderStreamHealth } from './video.js';
+import { onStellariumMessage } from './stellarium.js';
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 10000;
@@ -57,6 +58,7 @@ const HANDLERS = {
   },
   error: (m) => toast(m.message, true),
   streams: (m) => renderStreamHealth(m.streams, m.now),
+  stellarium: onStellariumMessage,
 };
 
 function handle(raw) {

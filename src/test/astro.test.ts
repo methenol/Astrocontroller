@@ -473,7 +473,8 @@ describe('target memory', () => {
   });
 
   test('the plan holds a captured target back and names it instead of hiding it', () => {
-    const opts = { minAltitude: 30, timezone: LA, fovArcmin: { w: 168, h: 94 }, limit: 8 };
+    // the evening of TODAY: planned on the real date, a moonlit night gates every row and leaves no hero to compare
+    const opts = { minAltitude: 30, timezone: LA, fovArcmin: { w: 168, h: 94 }, limit: 8, now: new Date(`${TODAY}T20:00:00Z`) };
     const clean = planNight(SITE, opts);
     const captured = clean.targets[0].name;
     const rested = planNight(SITE, { ...opts, today: TODAY, restRecords: shot(2, captured) });

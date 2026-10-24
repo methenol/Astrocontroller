@@ -39,7 +39,8 @@ export interface Sockets {
 
 /** Create the socket servers on `server` and return the broadcaster; `ctx.broadcast` may call it later. */
 export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadcast'>): Sockets {
-  const { dwarf, hub, agent, duty } = ctx;
+  const { scope, agent, duty } = ctx;
+  const hub = scope.hub;
   const wss = new WebSocketServer({ noServer: true, maxPayload: STATE_MAX_PAYLOAD });
   const videoWss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: VIDEO_MAX_PAYLOAD });
 
@@ -132,14 +133,14 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
     clients.add(ws);
     reply(ws, {
       type: 'hello',
-      telescope: dwarf.state,
+      telescope: scope.state,
       agent: agent.status(),
       duty: duty.status(),
       history: agent.history,
       jobs: library.listJobs(),
       processing: processing.listItems(30),
       logs: recentLogs(150),
-      config: publicConfig(dwarf),
+      config: publicConfig(scope),
     });
     const ping = setInterval(() => ws.readyState === ws.OPEN && ws.ping(), PING_MS);
     ws.on('close', () => {
@@ -171,8 +172,8 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
     em.on(ev, f);
     offs.push(() => em.off(ev, f));
   };
-  on(dwarf, 'state', (s: unknown) => broadcast({ type: 'telescope', state: s }));
-  on(dwarf, 'notification', (n: { name: string; data: unknown; ts: number }) => {
+  on(scope, 'state', (s: unknown) => broadcast({ type: 'telescope', state: s }));
+  on(scope, 'notification', (n: { name: string; data: unknown; ts: number }) => {
     if (!QUIET_NOTIFICATIONS.has(n.name)) broadcast({ type: 'notify', name: n.name, data: n.data, ts: n.ts });
   });
   on(agent, 'event', (e: unknown) => broadcast({ type: 'agent', event: e }));
@@ -182,6 +183,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
   on(library.jobBus, 'job', (j: unknown) => broadcast({ type: 'job', job: j }));
   on(processing.processingBus, 'item', (it: unknown) => broadcast({ type: 'processing', item: it }));
   on(toolEvents, 'image', (i: object) => broadcast({ type: 'capture', ...i }));
+  on(toolEvents, 'stellarium', (t: object) => broadcast({ type: 'stellarium', ...t }));
   // Frame freshness per stream, so the UI can show a stalled view instead of a frozen-looking one.
   const streamTimer = setInterval(() => broadcast({ type: 'streams', streams: hub.status(), now: Date.now() }), STREAM_STATUS_MS);
   streamTimer.unref();

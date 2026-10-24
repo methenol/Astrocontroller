@@ -15,8 +15,15 @@ import type { WebContext } from '../web/context.js';
 async function withSystemRoutes(fn: (post: (p: string, b: unknown) => Promise<{ status: number; body: Record<string, unknown> }>, calls: string[]) => Promise<void>) {
   const calls: string[] = [];
   const ctx = {
-    dwarf: { state: {}, location: () => null, setHost: (h: string) => calls.push(`setHost ${h}`) },
-    hub: { retarget: () => calls.push('retarget'), release: () => calls.push('release') },
+    scope: {
+      driver: 'dwarf',
+      label: 'DWARFLAB Dwarf 3',
+      capabilities: {},
+      state: {},
+      location: () => null,
+      setHost: (h: string) => calls.push(`setHost ${h}`),
+      hub: { retarget: () => calls.push('retarget'), release: () => calls.push('release') },
+    },
     agent: { status: () => ({}) },
     duty: { event: () => undefined, status: () => ({}) },
     broadcast: (m: { type: string }) => calls.push(`broadcast ${m.type}`),
@@ -100,7 +107,7 @@ describe('media routes', () => {
     for (const n of [...names].reverse()) fs.writeFileSync(path.join(dir, 'agent', n), '');
     fs.writeFileSync(path.join(dir, 'agent', 'notes.txt'), '');
     const app = express();
-    app.use('/api', mediaRoutes({ hub: {} } as unknown as WebContext, new ThumbCache()));
+    app.use('/api', mediaRoutes({ scope: { hub: {}, capabilities: {} } } as unknown as WebContext, new ThumbCache()));
     const server = app.listen(0, '127.0.0.1');
     await new Promise((r) => server.once('listening', r));
     try {

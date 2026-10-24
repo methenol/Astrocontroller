@@ -47,6 +47,7 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `LIBRARY_PATH` | Host folder for your imagery library (mounted at `/library`). |
 | `WEB_PORT` | Host port for the UI and MCP endpoint. |
 | `LIVE_STREAM_FPS` / `LIVE_STREAM_WIDTH` | Browser live-view rate and size. |
+| `STELLARIUM_STREAM` / `STELLARIUM_DATA_URL` | The Stellarium tab works offline from the bundled sky data; `true` also streams the online surveys (DSS colour imagery, Gaia stars, the full deep-sky catalog, planet textures) from `data.stellarium.org` or a mirror. Default `false`. |
 | `PUID` / `PGID` | (Linux) uid/gid that owns files written to `./data` and the library. Default 1000. |
 | `ASTROPHOTO_URL` | AstroPhoto Studio server (e.g. `http://gpu-box:8000` over Tailscale). Empty = processing off. |
 | `ASTROPHOTO_PROFILE` | Restoration profile, by name, from the server's `/api/v1/profiles`: `default` (the server's default: ImageMM with its Noise2Noise pass), `imagemm` (without it), `n2n-network` (fast), `n2n-rl`. |
@@ -99,6 +100,19 @@ The UI is one page, one screen at a time, sized for gloves and dark skies. Nothi
 - **Keyboard-safe**: the composer grows as you type, always ends above the keyboard, and its text is 16 px so iOS does not zoom the page when it is focused.
 - **Tap targets** are floored at 44 px tall on touch layouts; secondary controls (the view buttons, header chips, small chips under tiles) sit at 38-42 px, and nothing at phone widths is smaller than a gloved fingertip.
 - **Installable**: Add to Home Screen gives a standalone app (manifest + icons, `display_override` falls back to minimal-ui where window controls overlay is not implemented). It honours the notch and home indicator safe areas. Home-screen install and fullscreen need a secure context — plain HTTP on the LAN works fine in a browser tab; put a reverse proxy or Tailscale Serve in front for HTTPS.
+
+## Stellarium tab
+
+A planetarium ([Stellarium Web Engine](https://github.com/Stellarium/stellarium-web-engine)) with the sky as it is at your site: the observer is `OBSERVER_LATITUDE` / `OBSERVER_LONGITUDE` / `OBSERVER_ELEVATION_M` and the clock runs live in `OBSERVER_TIMEZONE`. −1h / +1h and the date field step through the night; **Now** goes back to live.
+
+- **Search** any object the engine knows, or anything in the catalog (Sharpless regions and the rest are found through the Database and dropped on the map). Tap an object for its magnitude, position, and altitude and azimuth at the shown time.
+- **GoTo** sends the telescope there (refused below 5° or for the Sun). A planet goes through the solar-system GoTo; a catalog object keeps its catalog label, so sessions shot from the map and from the app land in the same folder. **Ask the agent to image it** drafts the request in the chat.
+- **Telescope FOV**: a dashed rectangle the size of the tele field (2.95° × 1.66°), turned the way an alt-az head frames it (north-up in EQ mode). The scope's own pointing is drawn in solid green while it is tracking or slewing, with the target's name; **Telescope** centres the view on it.
+- **Framing**: press **Frame**, then drag the sky until the dashed rectangle holds the shot you want. The card shows how far the frame centre is from the object, and **GoTo frame** points at the frame centre while keeping the object's name for the session. The rectangle's rotation is an approximation; check the first frame.
+- **Sky options**: the frame and wide-angle rectangles, your horizon obstructions and minimum altitude as a shaded mask, Tonight's targets as markers, constellations, atmosphere, deep-sky objects, DSS imagery (streaming only), azimuthal and equatorial grids, and the ground.
+- **Sky** buttons on Tonight's rows and **View in Stellarium** in the Database open the target here, and the agent's `show_in_stellarium` tool can show you an object (at a given time) while you chat.
+
+The engine is AGPL-3.0, vendored unmodified in `public/vendor/stellarium/` (source commit and licence there); `scripts/stellarium/build-engine.sh` rebuilds it.
 
 ## Imagery library
 
@@ -166,7 +180,7 @@ For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `nod
 
 ## ZWO Seestar (`TELESCOPE_DRIVER=seestar`)
 
-The telescope protocol is a driver (`src/drivers/`): `dwarf` (the default) and `seestar`. `TELESCOPE_DRIVER` picks one at startup. The Seestar driver keeps its own data folder (`./data-seestar` unless `DATA_DIR` is set), agent prompt (`agent/drivers/seestar/`) and MCP server (`seestar`, so its tools reach the agent as `mcp__seestar__<tool>`). The web page at `/` is a Seestar control page in this mode; the Dwarf-only services (duty loop, travel guard, stack supervisor, charge watch, live streams) do not run.
+The telescope protocol is a driver (`src/drivers/`): `dwarf` (the default) and `seestar`. `TELESCOPE_DRIVER` picks one at startup. The Seestar driver keeps its own data folder (`./data-seestar` unless `DATA_DIR` is set), agent prompt (`agent/drivers/seestar/`) and MCP server (`seestar`, so its tools reach the agent as `mcp__seestar__<tool>`). The driver changes only how Astrocontroller talks to the telescope: the web UI at `/` is the same page with the same tabs (Agent, Tonight, Stellarium, Database, Library, Skills, Log), live views, stacking bar, Aim/Focus/Polar/Camera groups, duty loop and agent. Each driver declares what its device can do, and a control the Seestar has no equivalent of is greyed out with a note saying so (the API answers it with 501): level, photo, burst, record, timelapse, astro autofocus and the star-focus search, shooting modes, the RGB light, the Album and SD-card sessions, the obstruction survey (import a horizon file instead) and the wire log. The live views come from the Seestar's RTSP streams (`rtsp://<host>:SEESTAR_RTSP_PORT/stream` for tele, default 4554, and `SEESTAR_WIDE_RTSP_PORT`, default 4555, for wide) and the stacked image from the image socket. **Home** opens the arm. The Dwarf's own background services (travel guard, stack supervisor, charge watch) do not run.
 
 It speaks the Seestar's native protocol: JSON-RPC on TCP `:4700` (requests, replies and pushed events, with a `test_connection` heartbeat) and the image sockets `:4800` (tele) and `:4804` (wide) for stacked and preview frames. Firmware 7.18+ requires a signed handshake: set `SEESTAR_KEY_PATH` to the PEM private key extracted from your copy of the official app (seestarpy's `extract_pem`). The key is not shipped.
 
@@ -197,7 +211,7 @@ Alternatively, set `SEESTAR_TUNNEL_COMMAND` (and `SEESTAR_TUNNEL_CWD`) so Astroc
 
 Only one remote session exists per telescope: the official app connecting takes it over (and the other way round). The `zwo_devices` tool lists the account's scopes and whether each is online, shooting or occupied.
 
-Seestar tools: `seestar_status`, `seestar_connect`, `seestar_disconnect`, `zwo_devices`, `tunnel_status`, `tunnel_restart`, `sync_time_location`, `find_target`, `goto_target` (slew + plate solve + centre, optional `stack`), `stop`, `nudge`, `park`, `open_arm`, `plate_solve`, `polar_align`, `start_stacking`, `stop_stacking`, `start_live_view`, `autofocus`, `move_focuser`, `set_exposure`, `set_gain`, `set_dither`, `get_settings`, `set_settings`, `get_image`, `plan_targets`, `power`, `raw_rpc`.
+Seestar tools: `seestar_status`, `seestar_connect`, `seestar_disconnect`, `zwo_devices`, `tunnel_status`, `tunnel_restart`, `sync_time_location`, `find_target`, `goto_target` (slew + plate solve + centre, optional `stack`), `stop`, `nudge`, `park`, `open_arm`, `plate_solve`, `polar_align`, `start_stacking`, `stop_stacking`, `start_live_view`, `autofocus`, `move_focuser`, `set_exposure`, `set_gain`, `set_dither`, `get_settings`, `set_settings`, `get_image`, `plan_targets`, `power`, `raw_rpc`. The shared tools come with them: duty, Stellarium, sky conditions and weather, the catalog and plan helpers, and the library (without the Dwarf's SD-card transfer tools and wide-camera `sky_check`).
 
 The Seestar driver is tested against a simulated scope only; it has not yet run against real hardware.
 

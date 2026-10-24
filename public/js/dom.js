@@ -3,6 +3,8 @@ import { isSafeUrl } from './safe-url.js';
 
 export const $ = (s, el = document) => el.querySelector(s);
 export const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+/** A control the telescope cannot carry out (capabilities.js): a screen's own busy toggles must leave it off. */
+export const unsupported = (el) => !!el?.classList.contains('unsupported');
 
 const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 /** Escapes anything for HTML text or a quoted attribute; null and undefined become ''. */

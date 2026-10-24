@@ -137,6 +137,7 @@ export class AstroControl {
   /** GoTo a deep-sky position (RA hours, Dec degrees). Requires a prior calibration unless oneClick. */
   async gotoRaDec(raHours: number, decDeg: number, name: string, oneClick: boolean): Promise<string> {
     this.assertMayMove('GoTo');
+    this.core.store.publish({ pointing: { target: name, raHours, decDeg, at: Date.now() } });
     // a missing location refuses before the mode switch
     const loc = oneClick ? this.core.requireLocation() : null;
     if (loc) this.assertDark(`the one-click GoTo to ${name}`, loc);
@@ -155,6 +156,7 @@ export class AstroControl {
     const index = SOLAR_SYSTEM_INDEX[key];
     const loc = this.core.requireLocation();
     const pretty = key[0].toUpperCase() + key.slice(1);
+    this.core.store.publish({ pointing: { target: pretty, body: key, at: Date.now() } });
     if (oneClick) {
       this.assertDark(`the one-click GoTo to ${pretty}`, loc, pretty === 'Moon' ? ' For the Moon in daylight use track_sun_moon.' : '');
       const mode = await http.resolveShootingMode(pretty === 'Moon' ? 'Moon' : pretty === 'Sun' ? 'Sun' : 'Planet');

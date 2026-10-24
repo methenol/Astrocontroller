@@ -13,6 +13,7 @@ import { registerLibraryTools } from './tools/library.js';
 import { registerMediaTools } from './tools/media.js';
 import { registerMotionTools } from './tools/motion.js';
 import { registerPlanningTools } from './tools/planning.js';
+import { registerStellariumTools } from './tools/stellarium.js';
 import { registerSystemTools } from './tools/system.js';
 
 export { toolEvents, type ToolContext } from './tools/common.js';
@@ -22,11 +23,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerSystemTools(tool, ctx);
   registerCameraTools(tool, ctx);
   registerMotionTools(tool, ctx);
-  registerPlanningTools(tool, ctx);
+  registerPlanningTools(tool, { site: () => ctx.dwarf.requireLocation(), teleFov: () => ctx.dwarf.state.fov.tele ?? null, dwarf: ctx.dwarf, hub: ctx.hub });
   registerHorizonTools(tool, ctx);
   registerAstroTools(tool, ctx);
   registerMediaTools(tool, ctx);
   registerLibraryTools(tool);
   registerDarkTools(tool, ctx);
   registerDutyTools(tool, ctx);
+  registerStellariumTools(tool);
 }

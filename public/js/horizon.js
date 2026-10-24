@@ -2,11 +2,19 @@
 import { $, esc, fmtClock, lightbox, toast } from './dom.js';
 import { api, apiToast } from './api.js';
 import { on } from './bus.js';
+import { state } from './state.js';
 
 const PLOT_W = 720;
 const PLOT_H = 160;
 const PLOT_MIN_ALT = 30;
 const COMPASS = [[0, 'N'], [45, 'NE'], [90, 'E'], [135, 'SE'], [180, 'S'], [225, 'SW'], [270, 'W'], [315, 'NW'], [360, 'N']];
+
+/** The survey drives the Dwarf's motors and wide camera: other drivers import a horizon file instead. */
+function surveyButton() {
+  const c = state.config;
+  if (c?.capabilities?.horizonSurvey === false) return `<button id="hz-run" class="unsupported" disabled title="The obstruction survey is not available on the ${esc(c.driverLabel ?? 'telescope')}: import a horizon file instead">Map obstructions</button>`;
+  return '<button id="hz-run" title="Pan all round with the wide camera and map the trees and buildings (night only, ~20 min)">Map obstructions</button>';
+}
 
 let mask = null;
 let survey = null;
@@ -48,7 +56,7 @@ function render() {
   const el = $('#horizon');
   const running = !!survey?.running;
   const buttons = `<div class="ctl-row hz-buttons">
-      ${running ? '<button id="hz-stop">Stop survey</button>' : '<button id="hz-run" title="Pan all round with the wide camera and map the trees and buildings (night only, ~20 min)">Map obstructions</button>'}
+      ${running ? '<button id="hz-stop">Stop survey</button>' : surveyButton()}
       ${mask && !running ? '<button class="ghost" id="hz-clear" title="Forget this site\'s map: the planner goes back to the minimum altitude alone">Clear</button>' : ''}
       ${mask ? '<button class="ghost" id="hz-export" title="Download as azimuth altitude lines for other planners">Export</button>' : ''}
       ${running ? '' : '<button class="ghost" id="hz-import-btn" title="A horizon file of azimuth altitude lines (N.I.N.A., Stellarium, Clear Night Coach, Telescopius)">Import</button><input type="file" id="hz-import" accept=".hrz,.txt,.csv,text/plain" hidden>'}

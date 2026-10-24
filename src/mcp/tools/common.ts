@@ -35,7 +35,15 @@ export type Result = { content: Content[]; isError?: boolean };
 /** Registers one tool; arguments are validated against `shape` before `fn` runs. */
 export type ToolFn = <S extends z.ZodRawShape>(name: string, description: string, shape: S, fn: (args: z.infer<z.ZodObject<S>>) => Promise<Result>) => void;
 
-/** 'call' {name, args, at}, 'done' {name, ok, ms, error?}, 'image' {path, label, at} — for the web UI. */
+/** `tool` without the named tools (a driver that has its own, or no equivalent). */
+export function except(tool: ToolFn, names: Iterable<string>): ToolFn {
+  const skip = new Set(names);
+  return (name, description, shape, fn) => {
+    if (!skip.has(name)) tool(name, description, shape, fn);
+  };
+}
+
+/** 'call' {name, args, at}, 'done' {name, ok, ms, error?}, 'image' {path, label, at}, 'stellarium' {name?, raHours?, decDeg?, time?, fovDeg?, at} — for the web UI. */
 export const toolEvents = new SafeEmitter();
 
 export const text = (v: unknown): Result => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : toJson(v, 1) }] });

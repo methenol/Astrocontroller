@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import { text, type ToolContext, type ToolFn } from './common.js';
 
-export function registerDutyTools(tool: ToolFn, { duty }: ToolContext): void {
+export function registerDutyTools(tool: ToolFn, { duty }: Pick<ToolContext, 'duty'>): void {
   tool(
     'duty',
     'Your duty loop: while on duty, Astrocontroller wakes you with the objective and fresh measurements every few minutes and on events, so ending your turn never ends the work. start: when the user gives you an objective to carry out unattended (a night of imaging, a dark library, transfers to see through), start a duty with the user\'s instruction as the objective, word for word, and an end time (until: "dawn" for night imaging unless the user said otherwise, "HH:MM", or "none"). next_check: choose when the next sample comes (in_s 30-900) when the default does not fit, e.g. 60 s while sweeping for clear sky, 600 s while a long stack runs fine; this replaces waiting. status: the duty as it stands. complete: only when the objective is fully done; refused before the end time. Only the user can stop or pause a duty.',

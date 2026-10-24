@@ -1,4 +1,4 @@
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -185,9 +185,10 @@ describe('deleting sessions from the SD card', () => {
     http.route('POST /album/getMediaInfoByFilePath', (r) => ({ data: info((r.body as { filePath: string }).filePath) }));
     http.route('POST /album/delete', (r) => ({ data: answer(r.body as { datas: Array<{ filePath: string }> }) }));
   };
-  const stop = async () => {
+  // stopped after every test, pass or fail: a server left listening keeps the test process alive
+  afterEach(async () => {
     await http?.stop();
-  };
+  });
   /** a session folder in the library; `complete` writes the metadata a finished transfer leaves */
   const cardSession = (folder: string, complete: boolean) => {
     const d = path.join(dir, folder);
@@ -200,13 +201,25 @@ describe('deleting sessions from the SD card', () => {
     cardSession(F, true);
     await serve(
       (b) => b.datas.map((d) => ({ filePath: d.filePath, isSuccess: true })),
-      (filePath) => ({ filePath, fileName: F, mediaType: 4, astroSubType: 2 }),
+      // the album entry of a session is its stacked image (the device deletes the folder a path is in)
+      (filePath) => ({ filePath: `${filePath}/stacked.jpg`, fileName: F, mediaType: 4, astroSubType: 2 }),
     );
     const out = await deleteDeviceSessions([`${F}/`]);
     assert.deepEqual(out, [{ folder: F, deleted: true }]);
     const datas = (http.requestsFor('/album/delete')[0].body as { datas: Array<{ mediaType: number; fileName: string; filePath: string }> }).datas;
-    assert.deepEqual(datas, [{ mediaType: 4, filePath: `/DWARF3/Astronomy/${F}`, fileName: F, subType: 2 }]);
-    await stop();
+    assert.deepEqual(datas, [{ mediaType: 4, filePath: `/DWARF3/Astronomy/${F}/stacked.jpg`, fileName: F, subType: 2 }]);
+  });
+
+  test('an album entry that names the session folder itself is never sent: it would delete all of Astronomy', async () => {
+    cardSession(F, true);
+    await serve(
+      (b) => b.datas.map((d) => ({ filePath: d.filePath, isSuccess: true })),
+      (filePath) => ({ filePath, fileName: F, mediaType: 4, astroSubType: 2 }),
+    );
+    const out = await deleteDeviceSessions([F]);
+    assert.equal(out[0].deleted, false);
+    assert.match(out[0].note ?? '', /refused to delete/);
+    assert.equal(http.requestsFor('/album/delete').length, 0);
   });
 
   test('a session not complete in the library is refused; force deletes it anyway', async () => {
@@ -219,7 +232,6 @@ describe('deleting sessions from the SD card', () => {
     const forced = await deleteDeviceSessions([F], { force: true });
     assert.equal(forced[0].deleted, true);
     assert.equal(http.requestsFor('/album/delete').length, 1);
-    await stop();
   });
 
   test('a bad folder and a device refusal are reported per folder without stopping the rest', async () => {
@@ -232,7 +244,6 @@ describe('deleting sessions from the SD card', () => {
     assert.equal(out[1].deleted, true);
     assert.equal(out[2].deleted, false);
     assert.match(out[2].note ?? '', /refused/);
-    await stop();
   });
 });
 

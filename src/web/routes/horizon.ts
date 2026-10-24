@@ -3,8 +3,8 @@ import express, { type Router } from 'express';
 import { z } from 'zod';
 import { errMsg, logger } from '../../log.js';
 import { clearMasks, describeMask, maskFor, newMaskId, parseHorizonText, saveMask, toHorizonText, unknownSectors } from '../../astro/horizon.js';
-import { assertSurveyAllowed, stopSurvey, surveyObstructions } from '../../media/horizon/survey.js';
 import { body, notFound, route } from '../http.js';
+import { unsupported } from '../telescope.js';
 import { requireSite, type WebContext } from '../context.js';
 
 const log = logger('horizon');
@@ -12,16 +12,16 @@ const log = logger('horizon');
 const SurveyBody = z.object({ calibrate: z.boolean().optional() });
 const ImportBody = z.object({ text: z.string().min(1).max(200_000) });
 
-export function horizonRoutes({ dwarf, hub, duty }: WebContext): Router {
+export function horizonRoutes({ scope, duty }: WebContext): Router {
   const api = express.Router();
 
   api.get(
     '/horizon',
     route(async () => {
-      const m = maskFor(requireSite(dwarf));
+      const m = maskFor(requireSite(scope));
       return {
         mask: m ? { ...m, summary: describeMask(m), notObserved: unknownSectors(m), panoramaUrl: m.survey?.panorama ? `/captures/${m.survey.panorama}` : null } : null,
-        survey: dwarf.state.horizonSurvey ?? null,
+        survey: scope.state.horizonSurvey ?? null,
       };
     }),
   );
@@ -31,9 +31,11 @@ export function horizonRoutes({ dwarf, hub, duty }: WebContext): Router {
     '/horizon/survey',
     route(async (req) => {
       const b = body(req, SurveyBody);
-      assertSurveyAllowed(dwarf);
+      const survey = scope.horizonSurvey;
+      if (!survey) throw unsupported(scope, 'The obstruction survey');
+      survey.assertAllowed();
       duty.event('the user started the obstruction survey (map_obstructions) from the web UI: the scope pans all round for ~20 min', true);
-      surveyObstructions({ dwarf, hub }, { calibrate: b.calibrate }).then(
+      survey.start({ calibrate: b.calibrate }).then(
         (r) => duty.event(`the obstruction survey finished: ${r.summary}`, true),
         (e) => {
           log.warn(`obstruction survey failed: ${errMsg(e)}`);
@@ -46,19 +48,22 @@ export function horizonRoutes({ dwarf, hub, duty }: WebContext): Router {
 
   api.post(
     '/horizon/stop',
-    route(async () => ({ stopping: await stopSurvey(dwarf) })),
+    route(async () => {
+      if (!scope.horizonSurvey) throw unsupported(scope, 'The obstruction survey');
+      return { stopping: await scope.horizonSurvey.stop() };
+    }),
   );
 
   api.delete(
     '/horizon',
-    route(async () => ({ cleared: clearMasks(requireSite(dwarf)) })),
+    route(async () => ({ cleared: clearMasks(requireSite(scope)) })),
   );
 
   api.post(
     '/horizon/import',
     route(async (req) => {
       const b = body(req, ImportBody);
-      const s = requireSite(dwarf);
+      const s = requireSite(scope);
       const m = saveMask({ id: newMaskId(), site: { lat: s.lat, lon: s.lon }, createdAt: new Date().toISOString(), source: 'import', profile: parseHorizonText(b.text) });
       return { summary: describeMask(m) };
     }),
@@ -67,7 +72,7 @@ export function horizonRoutes({ dwarf, hub, duty }: WebContext): Router {
   api.get(
     '/horizon/export',
     route(async (_req, res) => {
-      const m = maskFor(requireSite(dwarf));
+      const m = maskFor(requireSite(scope));
       if (!m) throw notFound('this site has no obstruction map');
       res.type('text/plain').attachment(`horizon-${m.createdAt.slice(0, 10)}.hrz`).send(toHorizonText(m));
     }),

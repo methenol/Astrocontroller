@@ -5,9 +5,14 @@ import { errMsg } from '../../log.js';
 import * as library from '../../library/transfer.js';
 import * as processing from '../../processing/queue.js';
 import * as studio from '../../processing/studio.js';
-import { localTime, text, type ToolFn } from './common.js';
+import { except, localTime, text, type ToolFn } from './common.js';
 
-export function registerLibraryTools(tool: ToolFn): void {
+/** The tools that read the telescope's SD card (the Dwarf's album and sessions). */
+const DEVICE_TOOLS = ['list_device_sessions', 'transfer_session', 'transfer_files'];
+
+/** device: the telescope has an SD card to transfer from (the Dwarf); otherwise only the library and processing. */
+export function registerLibraryTools(all: ToolFn, o: { device: boolean } = { device: true }): void {
+  const tool = o.device ? all : except(all, DEVICE_TOOLS);
   tool(
     'list_device_sessions',
     'List deep-sky imaging sessions stored on the telescope (folder, target, camera, exposure, gain, start time, FITS count, size) and whether each is already in the local library.',

@@ -94,7 +94,7 @@ If the blocked target is the one the owner named (the priority target): put "ret
 3. Once the new stack is collecting: `transfer_session` for the previous target's session (it queues processing when auto-processing is on).
 
 ## P6 — The owner asks a question
-Answer it in one or two sentences from fresh tool results or the owner's own words; "unknown" when you have neither. Then continue the procedure you were in, in the same turn. A question is never a reason to stop working.
+Answer it in one or two sentences from fresh tool results or the owner's own words; "unknown" when you have neither. When the question is where something is in the sky or what it looks like, `show_in_stellarium` puts it on the owner's Stellarium tab. Then continue the procedure you were in, in the same turn. A question is never a reason to stop working.
 
 ## P7 — The owner gives an order
 Do it now, exactly. It replaces whatever you were doing. If it changes a procedure for the rest of the night (a focus centre, a step size, a setting), apply it on every later target too.

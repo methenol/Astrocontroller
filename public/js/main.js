@@ -7,10 +7,13 @@ import './duty.js';
 import './chat.js';
 import { startWeather } from './tonight.js';
 import './database.js';
+import './stellarium.js';
 import './album.js';
 import './library.js';
 import './skills.js';
 import './logs.js';
+// after every screen: its 'telescope' listener runs last and keeps unsupported controls off
+import './capabilities.js';
 import { connect } from './socket.js';
 
 startVideo();

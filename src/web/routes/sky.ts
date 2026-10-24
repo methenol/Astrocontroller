@@ -23,14 +23,14 @@ const RestSettingsBody = z.object({
   restDays: z.number().int().min(1).max(3650).optional(),
 });
 
-export function skyRoutes({ dwarf }: WebContext): Router {
+export function skyRoutes({ scope }: WebContext): Router {
   const api = express.Router();
   const tz = () => config.observer.timezone;
 
   api.get(
     '/conditions',
     route(async () => {
-      const s = requireSite(dwarf);
+      const s = requireSite(scope);
       const w = sky.nightWindow(s);
       return {
         sunAltitude: Math.round(sky.bodyAlt(s, 'Sun') * 10) / 10,
@@ -40,16 +40,16 @@ export function skyRoutes({ dwarf }: WebContext): Router {
     }),
   );
 
-  api.get('/weather', route(async () => weather.tonight(requireSite(dwarf), tz())));
+  api.get('/weather', route(async () => weather.tonight(requireSite(scope), tz())));
 
   api.get(
     '/plan',
     route(async (req) => {
-      const site = requireSite(dwarf);
+      const site = requireSite(scope);
       const types = list(queryString(req, 'types'));
       const minFovPercent = queryNumber(req, 'minFovPercent');
       const conditions = (await weather.conditionsAt(site, tz())) ?? undefined;
-      const plan = planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, minFovPercent, limit: 20, fovArcmin: teleFovArcmin(dwarf), timezone: tz(), conditions, ...planDefaults(), horizon: horizonFor(site) });
+      const plan = planNight(site, { types, minAltitude: config.observer.minAltitudeDeg, minFovPercent, limit: 20, fovArcmin: teleFovArcmin(scope), timezone: tz(), conditions, ...planDefaults(), horizon: horizonFor(site) });
       // The tab showing a target is what the memory rotates against, same as an agent plan call:
       // idempotent per night and role, so polling the tab tonight cannot stack penalties on itself.
       rest.recordShown([{ name: plan.hero ?? '', role: 'hero' }, ...plan.targets.slice(0, 5).map((t) => ({ name: t.name, role: 'shortlist' as const }))], sky.localDate(new Date(), tz()));
@@ -104,7 +104,7 @@ export function skyRoutes({ dwarf }: WebContext): Router {
         offset: queryNumber(req, 'offset'),
         limit: queryNumber(req, 'limit'),
       };
-      return queryCatalog(query, observerSite(dwarf), tz(), { teleFovWidthArcmin: teleFovArcmin(dwarf).w });
+      return queryCatalog(query, observerSite(scope), tz(), { teleFovWidthArcmin: teleFovArcmin(scope).w });
     }),
   );
 
@@ -114,7 +114,7 @@ export function skyRoutes({ dwarf }: WebContext): Router {
       const id = queryString(req, 'id') ?? '';
       const o = findObject(id);
       if (!o) throw notFound(`"${id}" is not in the database`);
-      return objectDetails(o, observerSite(dwarf), tz(), { minAlt: config.observer.minAltitudeDeg, fovArcmin: teleFovArcmin(dwarf) });
+      return objectDetails(o, observerSite(scope), tz(), { minAlt: config.observer.minAltitudeDeg, fovArcmin: teleFovArcmin(scope) });
     }),
   );
 

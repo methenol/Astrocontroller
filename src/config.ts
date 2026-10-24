@@ -125,6 +125,13 @@ export const config = {
     liveFps: env.num('LIVE_STREAM_FPS', 8, { min: 1, max: 30 }),
     liveWidth: env.num('LIVE_STREAM_WIDTH', 1280, { min: 160, max: 3840, int: true }),
   },
+  /** The Stellarium tab: the bundled sky works offline; streaming adds the online surveys. */
+  stellarium: {
+    /** stream DSS imagery, Gaia stars, the full deep-sky catalog and the planet textures */
+    stream: env.bool('STELLARIUM_STREAM', false),
+    /** where the surveys are streamed from (a mirror of data.stellarium.org's layout) */
+    dataUrl: env.url('STELLARIUM_DATA_URL', 'https://data.stellarium.org'),
+  },
   paths: {
     data: dataDir,
     library: path.resolve(env.str('LIBRARY_DIR', path.join(dataDir, 'library'))),
@@ -190,8 +197,11 @@ export function telescopeHostInfo(): {
  host: string;
  source: 'ui' | 'env';
  envHost: string;
+ /** the .env variable the address comes from when the UI sets none */
+ envVar: string;
 } {
  return {
+  envVar: driver === 'seestar' ? (config.seestar.connection === 'zwo' ? 'SEESTAR_TUNNEL_HOST' : 'SEESTAR_HOST') : 'DWARF_HOST',
   host: hostConfig.host,
   source: hostOverride.load() !== null ? 'ui' : 'env',
   envHost: hostOverride.envHost,

@@ -15,6 +15,7 @@ import { horizonRoutes } from './routes/horizon.js';
 import { mediaRoutes, streamRoute, ThumbCache } from './routes/media.js';
 import { controlRoutes } from './routes/control.js';
 import { agentRoutes } from './routes/agent.js';
+import { stellariumRoutes } from './routes/stellarium.js';
 
 const log = logger('web');
 
@@ -39,6 +40,9 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(mediaRoutes(ctx, thumbs));
   api.use(controlRoutes(ctx));
   api.use(agentRoutes(ctx));
+  api.use(stellariumRoutes());
+  // the driver's own API (the Seestar's tunnel and raw RPC)
+  if (deps.scope.routes) api.use(deps.scope.routes());
   api.use((req, res) => res.status(404).json({ error: `no such API route: ${req.method} ${req.path}` }));
 
   app.get('/stream/:name', streamRoute(ctx));

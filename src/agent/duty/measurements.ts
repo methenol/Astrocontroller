@@ -8,14 +8,20 @@ import * as dhttp from '../../drivers/dwarf/http.js';
 import * as sky from '../../astro/sky.js';
 import { clock, fmtMin } from './time.js';
 
-export type MeasuredDevice = Pick<Dwarf, 'state' | 'isTracking' | 'requireLocation'>;
+export type MeasuredDwarf = Pick<Dwarf, 'state' | 'isTracking' | 'requireLocation'>;
+/** what the shared measurements need of any telescope */
+export interface MeasuredDevice {
+  requireLocation(): { lat: number; lon: number; elev: number };
+  /** the driver's own lines */
+  measure(now: number): string[];
+}
 
 const FINISHED = new Set(['done', 'failed', 'cancelled']);
 
-function timeLine(dwarf: MeasuredDevice, now: number): string {
+function timeLine(scope: MeasuredDevice, now: number): string {
   const tz = config.observer.timezone;
   try {
-    const loc = dwarf.requireLocation();
+    const loc = scope.requireLocation();
     const site = { lat: loc.lat, lon: loc.lon, elev: loc.elev };
     const at = new Date(now);
     const w = sky.nightWindow(site, at);
@@ -27,7 +33,7 @@ function timeLine(dwarf: MeasuredDevice, now: number): string {
   }
 }
 
-function telescopeLines(dwarf: MeasuredDevice): string[] {
+function telescopeLines(dwarf: MeasuredDwarf): string[] {
   const d = dwarf.state;
   if (d.released) return ['- telescope: RELEASED by the user (Disconnect in the web UI); nothing can be sent until they press Connect'];
   if (d.link?.state === 'unresponsive') return [`- telescope: NOT RESPONDING — ${d.link.detail}`];
@@ -44,7 +50,7 @@ function telescopeLines(dwarf: MeasuredDevice): string[] {
   return out;
 }
 
-function stackLines(dwarf: MeasuredDevice, now: number, supervisor?: StackSupervisor): string[] {
+function stackLines(dwarf: MeasuredDwarf, now: number, supervisor?: StackSupervisor): string[] {
   const d = dwarf.state;
   const out: string[] = [];
   for (const cam of ['tele', 'wide'] as const) {
@@ -67,12 +73,22 @@ function stackLines(dwarf: MeasuredDevice, now: number, supervisor?: StackSuperv
   return out;
 }
 
-function backgroundLines(dwarf: MeasuredDevice, now: number): string[] {
+function darkLines(dwarf: MeasuredDwarf, now: number): string[] {
   const d = dwarf.state;
   const out: string[] = [];
   const dc = d.darkCapture;
   if (dc?.state === 'running') out.push(`- dark capture: running (${dc.exposureS} s × ${dc.frames}, about ${dc.expectedEndAt ? fmtMin(Math.max(0, dc.expectedEndAt - now)) : '?'} left)`);
   if (d.ndLock) out.push('- ND filter fitted: motion locked');
+  return out;
+}
+
+/** The Dwarf's own lines: the telescope, its stacks (with the supervisor's alarms), darks. */
+export function dwarfLines(dwarf: MeasuredDwarf, now: number, supervisor?: StackSupervisor): string[] {
+  return [...telescopeLines(dwarf), ...stackLines(dwarf, now, supervisor), ...darkLines(dwarf, now)];
+}
+
+function backgroundLines(): string[] {
+  const out: string[] = [];
   const jobs = library.listJobs().filter((j) => j.status === 'running' || j.status === 'queued');
   if (jobs.length) out.push(`- transfers: ${jobs.map((j) => `${j.description} ${j.status}${j.progress ? ` ${j.progress.filesDone}/${j.progress.filesTotal} files` : ''}`).join('; ')}`);
   const proc = processing.listItems(10).filter((i) => !FINISHED.has(i.state));
@@ -80,6 +96,6 @@ function backgroundLines(dwarf: MeasuredDevice, now: number): string[] {
   return out;
 }
 
-export function measurements(dwarf: MeasuredDevice, now: number, supervisor?: StackSupervisor): string[] {
-  return [timeLine(dwarf, now), ...telescopeLines(dwarf), ...stackLines(dwarf, now, supervisor), ...backgroundLines(dwarf, now)];
+export function measurements(scope: MeasuredDevice, now: number): string[] {
+  return [timeLine(scope, now), ...scope.measure(now), ...backgroundLines()];
 }

@@ -1,6 +1,6 @@
 /**
  * What a telescope driver is to the rest of the application. A driver owns everything that speaks
- * its telescope's protocol (the link, the device model, its MCP tools and its web UI); the
+ * its telescope's protocol (the link, the device model, its MCP tools and its adapter for the one shared web UI); the
  * framework (src/index.ts) only picks one by TELESCOPE_DRIVER, starts it and stops it.
  *
  *   dwarf     DWARFLAB Dwarf 3: protobuf over WebSocket, HTTP, FTP, RTSP (src/drivers/dwarf/)

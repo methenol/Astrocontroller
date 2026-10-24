@@ -9,6 +9,7 @@ import { Dwarf } from './device.js';
 import { StreamHub } from '../../media/streams.js';
 import { dwarfMcpSpec } from '../../mcp/server.js';
 import { mountWeb } from '../../web/server.js';
+import { dwarfWeb } from './web.js';
 import { watchCharging, type ChargeWatch } from '../../agent/charge-watch.js';
 import { DutyLoop } from '../../agent/duty.js';
 import { clock } from '../../agent/duty/time.js';
@@ -16,21 +17,23 @@ import { TravelGuard } from './travel-guard.js';
 import { StackSupervisor } from './stack-supervisor.js';
 import { cancelActiveJobs } from '../../library/transfer.js';
 import { flushWire } from './wirelog.js';
+import { dwarfDuty } from './duty.js';
 import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const dwarf = new Dwarf();
   const hub = new StreamHub(dwarf);
-  const duty = new DutyLoop(dwarf, agent);
+  const dutyScope = dwarfDuty(dwarf);
+  const duty = new DutyLoop(dutyScope, agent);
   const travelGuard = new TravelGuard(dwarf, (t) => duty.event(t));
   const stackSupervisor = new StackSupervisor(dwarf, (t) => duty.event(t), { autoStopAfterMs: config.dwarf.stackAutoStopMin * 60_000, clock: (t) => clock(t) });
-  duty.stackSupervisor = stackSupervisor;
+  dutyScope.stackSupervisor = stackSupervisor;
   let chargeWatch: ChargeWatch | null = null;
 
   return {
     device: dwarf,
     mcp: dwarfMcpSpec({ dwarf, hub, duty }),
-    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { dwarf, hub, agent, duty }),
+    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: dwarfWeb(dwarf, hub), agent, duty }),
     start() {
       dwarf.start();
       travelGuard.start();

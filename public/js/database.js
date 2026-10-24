@@ -232,6 +232,7 @@ async function detail(id, el) {
       <div class="ctl-row db-actions">
         <button type="button" class="primary" data-db-goto="${esc(d.id)}" data-label="${esc(d.gotoName)}"${low ? ' disabled title="below the horizon"' : ''}>GoTo ${esc(d.gotoName)}</button>
         <button type="button" data-db-agent="${esc(d.gotoName)}">Ask the agent to image it</button>
+        <button type="button" class="ghost" data-sky="${esc(d.gotoName)}" data-ra="${esc(d.raHours ?? '')}" data-dec="${esc(d.decDeg ?? '')}">View in Stellarium</button>
       </div>`;
   } catch (e) {
     el.innerHTML = `<span class="muted small">${esc(e.message)}</span>`;

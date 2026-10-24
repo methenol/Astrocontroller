@@ -6,6 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { config } from '../config.js';
 import { DutyLoop } from '../agent/duty.js';
+import { dwarfDuty } from '../drivers/dwarf/duty.js';
 import type { Dwarf } from '../drivers/dwarf/device.js';
 import type { AgentBridge } from '../agent/omp.js';
 import { startJob, cancelJob, drainJobs } from '../library/jobs.js';
@@ -59,7 +60,7 @@ describe('DutyLoop', () => {
   let agent: StubAgent;
   let dwarf: StubDwarf;
   let duty: DutyLoop;
-  const make = () => new DutyLoop(dwarf as unknown as Dwarf, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
+  const make = () => new DutyLoop(dwarfDuty(dwarf as unknown as Dwarf), agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
 
   // Never write the real DATA_DIR: a duty.json left here resumes in the running app on its next
   // start (a test duty woke the agent on 2026-10-17), and startJob would persist test jobs to jobs.json.

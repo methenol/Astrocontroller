@@ -1,22 +1,20 @@
 /**
- * Manual control from the web UI. Each action is validated before anything is sent; the
- * controller's own guards (ND lock, exclusive operations, a running stack) still apply.
+ * Manual control from the web UI, for every driver. Each action is validated and checked against
+ * what the driver's telescope can do before anything is sent; GoTo targets are resolved and
+ * checked here (altitude, the Sun) and the driver only carries them out. The drivers' own guards
+ * (the Dwarf's ND lock, exclusive operations, a running stack) still apply.
  */
 import express, { type Router } from 'express';
 import { z } from 'zod';
-import { BURST_MAX, type CameraName } from '../../drivers/dwarf/device.js';
 import * as sky from '../../astro/sky.js';
 import { findObject, gotoLabel } from '../../astro/catalog.js';
-import { measureTele, starFocusSweep, sharpnessLine } from '../../media/focus.js';
-import { measurePolarReport, withAstroBusyRecovery } from '../../mcp/tools/astro.js';
+import { resolveSkyTarget } from '../../astro/sky-target.js';
 import { body, notFound, badRequest, route } from '../http.js';
 import { requireSite, type WebContext } from '../context.js';
+import { unsupported, type Capabilities } from '../telescope.js';
 
 /** GoTo from the UI refuses targets lower than this (the firmware would fail them anyway). */
 const MIN_GOTO_ALTITUDE_DEG = 5;
-const LEVEL_PITCH_DEG = 90;
-/** the web UI's Burst button takes at least this many frames */
-const BURST_MIN_UI = 3;
 
 const camera = z.enum(['tele', 'wide']).optional();
 const num = z.coerce.number().refine(Number.isFinite, 'must be a number');
@@ -40,102 +38,88 @@ export const ControlBody = z.discriminatedUnion('action', [
   z.object({ action: z.literal('rgb'), on: z.boolean().optional() }),
   z.object({ action: z.literal('find'), name: z.string().default('') }),
   z.object({ action: z.literal('goto'), name: z.string().min(1), oneClick: z.boolean().optional() }),
+  z.object({ action: z.literal('goto_sky'), name: z.string().trim().max(120).optional(), raHours: num.min(0).lt(24), decDeg: num.min(-90).max(90), oneClick: z.boolean().optional() }),
 ]);
 
-export function controlRoutes({ dwarf, hub, duty }: WebContext): Router {
+/** A control the driver carries out (GoTo and find are resolved here first). */
+export type ControlAction = Exclude<z.infer<typeof ControlBody>, { action: 'find' | 'goto' | 'goto_sky' }>;
+
+/** The capability each driver action needs, and what the refusal calls it. */
+const NEEDS: Record<ControlAction['action'], [keyof Capabilities, string]> = {
+  nudge: ['nudge', 'Manual slewing'],
+  stop: ['nudge', 'Stopping motion'],
+  home: ['home', 'Homing the motors'],
+  park: ['park', 'Park'],
+  level: ['level', 'Level'],
+  goto_stop: ['goto', 'Stopping a GoTo'],
+  polar_align: ['polarAlign', 'Polar alignment'],
+  polar_stop: ['polarAlign', 'Polar alignment'],
+  sync: ['sync', 'Time and location sync'],
+  liveview: ['liveView', 'Live view'],
+  reboot: ['reboot', 'Reboot'],
+  shutdown: ['shutdown', 'Shut down'],
+  photo: ['photo', 'Taking a photo'],
+  burst: ['burst', 'Burst'],
+  record: ['record', 'Video recording'],
+  timelapse: ['timelapse', 'Timelapse'],
+  stack_start: ['stack', 'Live stacking'],
+  stack_stop: ['stack', 'Live stacking'],
+  autofocus: ['autofocus', 'Autofocus'],
+  focus: ['focusSteps', 'Manual focus'],
+  star_measure: ['starFocus', 'Star sharpness'],
+  star_sweep: ['starTune', 'Star focus tuning'],
+  mode: ['modes', 'Shooting modes'],
+  setting: ['exposure', 'Camera settings'],
+  settings: ['exposure', 'Camera settings'],
+  rgb: ['rgb', 'The ring light'],
+};
+
+export function controlRoutes({ scope, duty }: WebContext): Router {
   const api = express.Router();
 
   api.post(
     '/control',
     route(async (req) => {
       const b = body(req, ControlBody);
-      const cam: CameraName = 'camera' in b && b.camera === 'wide' ? 'wide' : 'tele';
       switch (b.action) {
-        case 'nudge':
-          await dwarf.nudge(b.angle, b.speed, b.ms);
-          return dwarf.readMotorPositions();
-        case 'stop':
-          await dwarf.stopMotion();
-          return { ok: true };
-        case 'home':
-          return { result: await dwarf.homeMotors() };
-        case 'park':
-          return { result: await dwarf.park() };
-        case 'level':
-          return { result: await dwarf.moveTo({ pitchDeg: LEVEL_PITCH_DEG }) };
-        case 'photo':
-          return { item: await dwarf.takePhoto(cam) };
-        case 'burst':
-          return { result: await dwarf.burst(cam, Math.max(BURST_MIN_UI, Math.min(BURST_MAX, b.count))) };
-        case 'record':
-          return { result: await dwarf.record(cam, b.on ? 'start' : 'stop') };
-        case 'timelapse':
-          return { result: await dwarf.timelapse(cam, b.on ? 'start' : 'stop', b.intervalS, b.totalS) };
-        case 'stack_start':
-          // the same recovery as the agent's start: -11501 while nothing runs is the stuck astro service
-          return { result: await withAstroBusyRecovery(dwarf, 'starting live stacking', () => dwarf.startStackingWith(cam, { startedBy: 'ui' })) };
-        case 'stack_stop':
-          await dwarf.stopStacking(cam, !!b.fast);
-          return { ok: true };
-        case 'autofocus':
-          return { result: await dwarf.autofocus(b.mode === 'astro' ? 'astro' : 'normal') };
-        case 'focus':
-          return { result: await dwarf.focusStep(b.direction === 'near' ? 'near' : 'far', b.steps) };
-        case 'star_measure': {
-          // One tele frame measured for star sharpness; the camera's exposure is restored by the helper.
-          const { sharp } = await measureTele({ dwarf, hub }, { exposureS: b.exposureS });
-          return { result: sharpnessLine(sharp), focusPosition: dwarf.state.focusPosition, ...sharp };
-        }
-        case 'star_sweep': {
-          // The search writes its own plain-language verdict; the UI toasts it and the progress arrives
-          // over the state socket, so the response only has to be the summary.
-          const r = await starFocusSweep({ dwarf, hub }, { center: b.center, range: b.range, step: b.step, apply: b.apply !== false });
-          return { result: [r.verdict, ...r.notes].join(' — '), ...r };
-        }
-        case 'mode':
-          return dwarf.setShootingMode(b.mode);
-        case 'setting':
-          return { result: await dwarf.setSetting(cam, b.setting, b.value) };
-        case 'settings':
-          return dwarf.cameraSettings(cam);
-        case 'polar_align': {
-          // takes 1-3 min; the outcome is also published as state.polarAlign for the Polar group's readout
-          duty.event('the user started an EQ polar alignment measurement from the web UI', true);
-          return { result: (await measurePolarReport(dwarf)).summary };
-        }
-        case 'polar_stop':
-          await dwarf.stopPolarAlignment();
-          return { result: 'Polar alignment stopped' };
-        case 'goto_stop':
-          await dwarf.stopGoto();
-          return { ok: true };
-        case 'sync':
-          return { result: await dwarf.syncTimeLocation() };
-        case 'liveview':
-          await dwarf.ensureLiveView(true);
-          return { ok: true };
-        case 'rgb':
-          await dwarf.power(b.on ? 'rgb_on' : 'rgb_off');
-          return { ok: true };
-        case 'reboot':
-          await dwarf.power('reboot');
-          duty.event('the user rebooted the telescope from the web UI (it reconnects in about a minute; then motors_home and sync_time_and_location)', true);
-          return { result: 'Reboot sent: the telescope reconnects in about a minute' };
-        case 'shutdown':
-          await dwarf.power('shutdown');
-          duty.event('the user shut the telescope down from the web UI', true);
-          return { result: 'Shutdown sent' };
         case 'find':
           return findObject(b.name) ?? { error: 'not found' };
         case 'goto': {
           // GoTo from the Database tab: a catalog object by name, one-click (calibrate + GoTo) by default.
+          if (!scope.capabilities.goto) throw unsupported(scope, 'GoTo');
           const o = findObject(b.name);
           if (!o) throw notFound(`"${b.name}" is not in the database`);
-          const alt = sky.altAz(requireSite(dwarf), o.raHours, o.decDeg).altitude;
+          const alt = sky.altAz(requireSite(scope), o.raHours, o.decDeg).altitude;
           if (alt < MIN_GOTO_ALTITUDE_DEG) throw badRequest(`${o.id} is below the horizon (altitude ${alt.toFixed(1)}°)`);
           const label = gotoLabel(o);
           duty.event(`the user started a GoTo to ${label} from the web UI`, true);
-          return { result: await withAstroBusyRecovery(dwarf, `GoTo ${label}`, () => dwarf.withPointingRecovery('GoTo', () => dwarf.gotoRaDec(o.raHours, o.decDeg, label, b.oneClick !== false))) };
+          return { result: await scope.goto({ kind: 'position', label, raHours: o.raHours, decDeg: o.decDeg, oneClick: b.oneClick !== false }) };
+        }
+        case 'goto_sky': {
+          // GoTo from the Stellarium tab: whatever was picked on the map, a planet, a catalog object or a bare position.
+          if (!scope.capabilities.goto) throw unsupported(scope, 'GoTo');
+          const site = requireSite(scope);
+          const t = resolveSkyTarget(b.name, b.raHours, b.decDeg);
+          const oneClick = b.oneClick !== false;
+          if (t.kind === 'body' && t.body === 'Sun') throw badRequest('Pointing at the Sun requires the solar filter fitted; use Sun tracking after fitting it');
+          const alt = t.kind === 'body' ? sky.bodyAlt(site, t.body) : sky.altAz(site, t.raHours, t.decDeg).altitude;
+          if (alt < MIN_GOTO_ALTITUDE_DEG) throw badRequest(`${t.label} is below the horizon (altitude ${alt.toFixed(1)}°)`);
+          const framing = t.kind === 'catalog' && t.framed ? ` framed off-centre at RA ${sky.hoursToHms(t.raHours)} Dec ${sky.degToDms(t.decDeg)}` : '';
+          duty.event(`the user started a GoTo to ${t.label}${framing} from the Stellarium tab`, true);
+          const go = t.kind === 'body' ? { kind: 'body' as const, body: t.body, label: t.label, oneClick } : { kind: 'position' as const, label: t.label, raHours: t.raHours, decDeg: t.decDeg, oneClick };
+          return { result: await scope.goto(go), target: t.label };
+        }
+        default: {
+          const [cap, what] = NEEDS[b.action];
+          const astroAf = b.action === 'autofocus' && b.mode === 'astro';
+          const gainOnly = (b.action === 'setting' && b.setting === 'gain') || b.action === 'settings';
+          const able = astroAf ? scope.capabilities.autofocusAstro : gainOnly ? scope.capabilities.gain || scope.capabilities.exposure : scope.capabilities[cap];
+          if (!able) throw unsupported(scope, astroAf ? 'Astro autofocus' : what);
+          if (b.action === 'polar_align') duty.event('the user started an EQ polar alignment measurement from the web UI', true);
+          const r = await scope.control(b);
+          if (b.action === 'reboot') duty.event(`the user rebooted the telescope from the web UI (it reconnects in about a minute${scope.driver === 'dwarf' ? '; then motors_home and sync_time_and_location' : ''})`, true);
+          if (b.action === 'shutdown') duty.event('the user shut the telescope down from the web UI', true);
+          return r;
         }
       }
     }),

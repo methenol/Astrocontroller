@@ -22,6 +22,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { config } from '../../config.js';
 import { logger, errMsg } from '../../log.js';
 import type { CameraName, Dwarf } from '../../drivers/dwarf/device.js';
+import { passthroughFrames } from './ffmpeg.js';
 import { JpegSplitter } from './jpeg.js';
 import { Source, type Frame } from './source.js';
 
@@ -345,7 +346,7 @@ export class CameraSource extends Source {
       // No fps filter (it duplicates the last frame with a fresh timestamp whenever the camera
       // pauses, which made old images look current): every real frame passes, rate-limited below.
       // Native 1920×1080 for the agent; browsers get a downscaled copy (video WebSocket).
-      '-an', '-fps_mode', 'passthrough',
+      '-an', ...passthroughFrames(),
       '-q:v', '4', '-f', 'mjpeg', 'pipe:1',
     ];
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });

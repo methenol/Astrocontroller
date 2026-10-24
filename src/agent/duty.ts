@@ -22,11 +22,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
-import type { Dwarf } from '../drivers/dwarf/device.js';
+import type { ObserverLocation } from '../config.js';
 import type { AgentBridge } from './omp.js';
-import type { StackSupervisor } from '../drivers/dwarf/stack-supervisor.js';
 import { measurements } from './duty/measurements.js';
-import { watchSensors } from './duty/sensors.js';
+import { watchSensors, type EventSink } from './duty/sensors.js';
 import { clampInterval, clock, parseUntil } from './duty/time.js';
 import { writeFileAtomic } from '../util/fs.js';
 import { SafeEmitter } from '../util/events.js';
@@ -71,7 +70,17 @@ interface PendingEvent {
 
 type WakeKind = 'tick' | 'event' | 'event-only' | 'final';
 
-export type DutyDevice = Pick<Dwarf, 'state' | 'stackControl' | 'isTracking' | 'requireLocation' | 'on' | 'off'>;
+/** The telescope as the duty loop sees it, whatever the driver (each driver's adapter: drivers/<id>/duty.ts). */
+export interface DutyDevice {
+  readonly state: { released?: boolean };
+  requireLocation(): ObserverLocation;
+  /** the telescope's lines in a sample's measurements */
+  measure(now: number): string[];
+  /** the driver's telescope sensors (events worth waking the agent for); returns the function that stops them */
+  watch(now: () => number, event: EventSink): () => void;
+  /** how a duty is closed out at its end, in the driver's tool names */
+  closeOut(): string;
+}
 export type DutyAgent = Pick<AgentBridge, 'ready' | 'busy' | 'note' | 'prompt' | 'on' | 'off'>;
 
 const STATUSES = new Set<DutyState['status']>(['off', 'active', 'paused']);
@@ -105,8 +114,6 @@ function savedDuty(raw: unknown): Partial<DutyState> | null {
 
 export class DutyLoop extends SafeEmitter {
   state: DutyState = { status: 'off', intervalS: config.agent.dutyIntervalS, wakes: 0 };
-  /** acts on stacks that collect nothing (set by index.ts); its alarms show in the samples */
-  stackSupervisor?: StackSupervisor;
 
   private events: PendingEvent[] = [];
   private deliverTimer: NodeJS.Timeout | null = null;
@@ -131,7 +138,7 @@ export class DutyLoop extends SafeEmitter {
   private readonly onStatus = () => this.onAgentStatus();
 
   constructor(
-    private readonly dwarf: DutyDevice,
+    private readonly scope: DutyDevice,
     private readonly agent: DutyAgent,
     opts: { now?: () => number; tickMs?: number; file?: string } = {},
   ) {
@@ -144,7 +151,7 @@ export class DutyLoop extends SafeEmitter {
       this.tickTimer = setInterval(() => this.tick(), opts.tickMs ?? TICK_MS);
       this.tickTimer.unref();
     }
-    this.stopSensors = watchSensors(dwarf, this.now, (text, onlyOnDuty) => this.event(text, onlyOnDuty));
+    this.stopSensors = watchSensors(scope, this.now, (text, onlyOnDuty) => this.event(text, onlyOnDuty));
   }
 
   /** Stop the clock and every listener (shutdown, tests). The duty itself stays saved. */
@@ -208,7 +215,7 @@ export class DutyLoop extends SafeEmitter {
     const objective = o.objective.trim();
     if (!objective) throw new Error('objective required');
     const until = parseUntil(o.until, this.now(), () => {
-      const loc = this.dwarf.requireLocation();
+      const loc = this.scope.requireLocation();
       return { lat: loc.lat, lon: loc.lon, elev: loc.elev };
     });
     const prev = this.state;
@@ -390,7 +397,7 @@ export class DutyLoop extends SafeEmitter {
       this.end(`end time reached (${label})`);
       return;
     }
-    if (this.dwarf.state.released) return; // the user has the telescope
+    if (this.scope.state.released) return; // the user has the telescope
     if (st.nextWakeAt && now >= st.nextWakeAt && this.agent.ready && !this.agent.busy) void this.wake('tick');
   }
 
@@ -451,13 +458,10 @@ export class DutyLoop extends SafeEmitter {
       );
     }
     if (events.length) lines.push('', 'Events since your last turn:', ...this.eventLines(events));
-    lines.push('', 'Measurements now:', ...measurements(this.dwarf, this.now(), this.stackSupervisor), '');
+    lines.push('', 'Measurements now:', ...measurements(this.scope, this.now()), '');
     if (kind === 'final') {
       lines.push(
-        'The duty window has ended. Carry out the end steps that the objective above states, if it states any, exactly as written; then always close the duty out: park the scope (move_motors pitch_deg=2.5) and transfer every session still on the telescope\'s SD card (check list_device_sessions, then transfer_session — never assume what is on the card)' +
-          (config.studio.autoProcess
-            ? '; each transfer queues processing in AstroPhoto Studio by itself (processing_status shows the queue).'
-            : '; auto-process is off in .env, so do not queue processing unless the objective says so.') +
+        `The duty window has ended. Carry out the end steps that the objective above states, if it states any, exactly as written; then always close the duty out: ${this.scope.closeOut()}` +
           ' Then report what was done, from tool results. Do not start anything else the objective does not name (no shutdown unless it says so).',
       );
     } else {

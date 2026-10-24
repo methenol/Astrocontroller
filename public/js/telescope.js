@@ -1,5 +1,5 @@
 /** The telescope's state: header chips, the status grid, the stacking bar, the address and the link. */
-import { $, $$, esc, fmtDur, fixed, toast, fmtClock } from './dom.js';
+import { $, $$, esc, fmtDur, fixed, toast, fmtClock, unsupported } from './dom.js';
 import { api } from './api.js';
 import { on, emit } from './bus.js';
 import { state } from './state.js';
@@ -87,7 +87,7 @@ function darkText(d) {
 /** The Focus group's readout line: what the last measurement said, or where a search has got to. */
 function renderFocusTune(t) {
   const ft = t.focusTune;
-  for (const b of $$('#grp-focus button')) b.disabled = !!ft?.running;
+  for (const b of $$('#grp-focus button')) b.disabled = !!ft?.running || unsupported(b);
   if (!ft?.message) return;
   $('#focus-note').textContent = ft.running ? `Star tune: ${ft.message}` : `${fmtClock(ft.finishedAt ?? ft.startedAt)} · ${ft.message}`;
 }
@@ -95,7 +95,7 @@ function renderFocusTune(t) {
 /** The Polar group's readout line: measuring, or the last result with the adjustment to make. */
 function renderPolarAlign(t) {
   const pa = t.polarAlign;
-  $('#btn-polar').disabled = !!pa?.running;
+  $('#btn-polar').disabled = !!pa?.running || unsupported($('#btn-polar'));
   if (!pa?.message) return;
   const note = $('#polar-note');
   note.textContent = pa.running ? `Polar alignment: ${pa.message}` : `${fmtClock(pa.finishedAt ?? pa.startedAt)} · ${pa.message}`;
@@ -157,7 +157,7 @@ for (const b of $$('[data-power]')) {
   b.addEventListener('click', async () => {
     const act = b.dataset.power;
     const reboot = act === 'reboot';
-    if (!confirm(reboot ? `Reboot the telescope?${stackWarning()} It reconnects in about a minute; the motors then need homing.` : `Shut the telescope down?${stackWarning()}`)) return;
+    if (!confirm(reboot ? `Reboot the telescope?${stackWarning()} It reconnects in about a minute${state.config?.driver === 'seestar' ? '' : '; the motors then need homing'}.` : `Shut the telescope down?${stackWarning()}`)) return;
     b.disabled = true;
     try {
       const r = await api('control', { action: act });
@@ -165,7 +165,7 @@ for (const b of $$('[data-power]')) {
     } catch (e) {
       toast(`${reboot ? 'Reboot' : 'Shut down'}: ${e.message}`, true);
     } finally {
-      b.disabled = false;
+      b.disabled = unsupported(b);
     }
   });
 }
@@ -194,7 +194,8 @@ export function renderHost() {
   if (!h) return;
   const inp = $('#inp-host');
   if (document.activeElement !== inp) inp.value = h.host;
-  $('#host-note').textContent = h.source === 'ui' ? `Set here (overrides DWARF_HOST ${h.envHost}; clear the field to go back to it).` : 'From DWARF_HOST in .env.';
+  const v = h.envVar ?? 'DWARF_HOST';
+  $('#host-note').textContent = h.source === 'ui' ? `Set here (overrides ${v} ${h.envHost}; clear the field to go back to it).` : `From ${v} in .env.`;
 }
 on('config', renderHost);
 

@@ -11,7 +11,9 @@ import { horizonFor } from '../../astro/horizon.js';
 import * as rest from '../../astro/rest.js';
 import * as sky from '../../astro/sky.js';
 import * as weather from '../../astro/weather.js';
-import { capturedLine, localTime, saveCapture, text, withImage, type ToolContext, type ToolFn } from './common.js';
+import type { Dwarf } from '../../drivers/dwarf/device.js';
+import type { StreamHub } from '../../media/streams.js';
+import { capturedLine, except, localTime, saveCapture, text, withImage, type ToolFn } from './common.js';
 
 const PLANETS = ['Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune'] as const;
 const DEFAULT_TELE_FOV = { h: 2.95, v: 1.66 };
@@ -45,10 +47,25 @@ export function skyVerdict(o: { blank: boolean; background: number; stars: numbe
   return 'cloudy (no usable stars)';
 }
 
-export function registerPlanningTools(tool: ToolFn, { dwarf, hub }: ToolContext): void {
+export interface PlanningContext {
+  site(): { lat: number; lon: number; elev: number };
+  /** the tele field in degrees, or null for the nominal Dwarf 3 one */
+  teleFov(): { h: number; v: number } | null;
+  /** the Dwarf, for sky_check (it photographs with the wide camera); without it sky_check is not registered */
+  dwarf?: Dwarf;
+  hub?: StreamHub;
+  /** tools the driver has its own of */
+  skip?: string[];
+}
+
+export function registerPlanningTools(all: ToolFn, o: PlanningContext): void {
   const tz = config.observer.timezone;
-  const site = () => dwarf.requireLocation();
-  const teleFov = () => dwarf.state.fov.tele ?? DEFAULT_TELE_FOV;
+  const tool = except(all, [...(o.skip ?? []), ...(o.dwarf && o.hub ? [] : ['sky_check'])]);
+  // only sky_check uses these, and it is registered only when they are given
+  const dwarf = o.dwarf as Dwarf;
+  const hub = o.hub as StreamHub;
+  const site = () => o.site();
+  const teleFov = () => o.teleFov() ?? DEFAULT_TELE_FOV;
 
   tool(
     'sky_conditions',

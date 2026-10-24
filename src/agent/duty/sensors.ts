@@ -1,7 +1,8 @@
 /**
- * The duty loop's sensors: changes of the telescope's state, transfer jobs and processing items
- * that are worth waking the agent for. Each becomes an event; `onlyOnDuty` events are dropped when
- * no duty is active.
+ * The duty loop's sensors: changes of the telescope's state (the driver's own sensors: the Dwarf's
+ * are here, the Seestar's in drivers/seestar/duty.ts), transfer jobs and processing items that are
+ * worth waking the agent for. Each becomes an event; `onlyOnDuty` events are dropped when no duty
+ * is active.
  */
 import type { Dwarf } from '../../drivers/dwarf/device.js';
 import * as library from '../../library/transfer.js';
@@ -9,7 +10,12 @@ import * as processing from '../../processing/queue.js';
 import * as dhttp from '../../drivers/dwarf/http.js';
 
 export type EventSink = (text: string, onlyOnDuty?: boolean) => void;
-export type SensedDevice = Pick<Dwarf, 'state' | 'stackControl' | 'on' | 'off'>;
+export type SensedDwarf = Pick<Dwarf, 'state' | 'stackControl' | 'on' | 'off'>;
+/** what the shared sensors need of any telescope */
+export interface SensedDevice {
+  readonly state: { released?: boolean };
+  watch(now: () => number, event: EventSink): () => void;
+}
 
 /** A stack that ends within this long of a stop command was stopped on request. */
 const REQUESTED_STOP_MS = 180_000;
@@ -19,8 +25,8 @@ const SEEN_KEPT = 500;
 const JOB_FINISHED = new Set(['done', 'partial', 'failed', 'cancelled']);
 
 /** Battery bands: a wake on entering a lower one. */
-const band = (b?: number) => (b === undefined ? 9 : b <= 10 ? 0 : b <= 15 ? 1 : b <= 25 ? 2 : 9);
-const special = (x?: string) => x === 'unresponsive' || x === 'contended';
+export const band = (b?: number) => (b === undefined ? 9 : b <= 10 ? 0 : b <= 15 ? 1 : b <= 25 ? 2 : 9);
+export const special = (x?: string) => x === 'unresponsive' || x === 'contended';
 
 /** Remembers the last state reported per id, bounded. */
 class Seen {
@@ -36,7 +42,8 @@ class Seen {
   }
 }
 
-function watchTelescope(d: SensedDevice, now: () => number, event: EventSink): () => void {
+/** The Dwarf's telescope sensors. */
+export function watchDwarf(d: SensedDwarf, now: () => number, event: EventSink): () => void {
   let stack = { tele: d.state.stacking.tele.state, wide: d.state.stacking.wide.state };
   let dark = d.state.darkCapture?.state;
   let connected = d.state.connected;
@@ -130,7 +137,7 @@ function watchProcessing(event: EventSink): () => void {
 
 /** Start every sensor; returns the function that stops them. */
 export function watchSensors(d: SensedDevice, now: () => number, event: EventSink): () => void {
-  const offs = [watchTelescope(d, now, event), watchJobs(d, event), watchProcessing(event)];
+  const offs = [d.watch(now, event), watchJobs(d, event), watchProcessing(event)];
   return () => {
     for (const off of offs.splice(0)) off();
   };

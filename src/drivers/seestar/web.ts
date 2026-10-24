@@ -1,138 +1,275 @@
 /**
- * The seestar driver's web UI: a REST API under /api/seestar and one self-contained page at /.
- * The Dwarf UI (public/) speaks the Dwarf's API and is not served in this mode.
+ * The Seestar behind the shared web UI (public/): its state projected onto the field names the UI
+ * renders, the UI's controls mapped onto the Seestar's commands, its live views, and the
+ * Seestar-only API under /api/seestar (tunnel, ZWO devices, raw RPC, the stacked image).
  */
-import type http from 'node:http';
-import express, { type Express } from 'express';
+import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
-import { recentLogs } from '../../log.js';
-import type { AgentBridge } from '../../agent/omp.js';
+import * as sky from '../../astro/sky.js';
 import { displayJpeg } from '../../mcp/tools/common.js';
-import { body, rejectCrossSite, route } from '../../web/http.js';
-import type { Seestar } from './device.js';
+import { sharpnessLine, starSharpness } from '../../media/focus.js';
+import { body, route } from '../../web/http.js';
+import { unsupported, type Capabilities, type GotoTarget, type WebTelescope } from '../../web/telescope.js';
+import type { ControlAction } from '../../web/routes/control.js';
+import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
+import { NOMINAL_FOV } from './mcp.js';
+import { TERMINAL_STATES, type OperationState, type SeestarState } from './state.js';
+import type { SeestarEvent } from './rpc.js';
+import { SeestarVideoHub } from './video.js';
 import { listDevices } from './zwo-cloud.js';
 
-export function mountSeestarWeb(app: Express, _server: http.Server, deps: { scope: Seestar; agent: AgentBridge }): { close(): void } {
-  const { scope, agent } = deps;
-  const api = express.Router();
-  api.use(rejectCrossSite);
+const LABEL = 'ZWO Seestar';
 
-  api.get('/seestar/status', route(async () => ({ ...scope.state, busy: scope.isBusy(), driver: config.telescope.driver })));
-  api.post('/seestar/refresh', route(async () => scope.refreshState()));
-  api.get('/seestar/events', route(async () => scope.state.recent));
-  api.get('/seestar/logs', route(async () => recentLogs(200)));
-  api.post('/seestar/connect', route(async () => scope.connectLink()));
-  api.post('/seestar/disconnect', route(async () => scope.release()));
-  api.get('/seestar/tunnel', route(async () => scope.tunnel?.status() ?? null));
-  api.post('/seestar/tunnel/restart', route(async () => scope.tunnel?.restart()));
-  api.get('/seestar/zwo-devices', route(async () => listDevices()));
-  api.post(
-    '/seestar/rpc',
-    route(async (req) => {
-      const b = body(req, z.object({ method: z.string().min(1), params: z.unknown().optional() }));
-      return scope.raw(b.method, b.params);
-    }),
-  );
-  api.post('/seestar/stop', route(async () => scope.stopView()));
-  api.post('/seestar/park', route(async () => scope.park()));
-  api.post('/seestar/autofocus', route(async () => scope.autofocus()));
-  // blocks until the scope reports the end; the page reads progress and the correction from status.polarAlign
-  api.post('/seestar/polar-align', route(async () => scope.polarAlign()));
-  api.post('/seestar/polar-align/stop', route(async () => scope.stopPolarAlign()));
-  api.post('/seestar/stack/start', route(async () => scope.startStack()));
-  api.post('/seestar/stack/stop', route(async () => scope.stopStack()));
-  api.get(
-    '/seestar/image.jpg',
-    route(async (req, res) => {
-      const camera = req.query.camera === 'wide' ? 'wide' : 'tele';
-      const kind = req.query.kind === 'preview' ? 'preview' : 'stacked';
-      const { image } = await scope.grabImage(camera, kind);
-      const jpeg = await displayJpeg(image, 1600);
-      res.setHeader('Cache-Control', 'no-store');
-      res.type('jpeg').send(jpeg);
-    }),
-  );
-  api.get('/agent/status', route(async () => ({ enabled: config.agent.enabled, ...agent.status(), history: agent.history.slice(-40) })));
-  api.post(
-    '/agent/prompt',
-    route(async (req) => {
-      const b = body(req, z.object({ text: z.string().min(1) }));
-      await agent.prompt(b.text);
-    }),
-  );
-  api.use((req, res) => res.status(404).json({ error: `no such API route: ${req.method} ${req.path}` }));
+const CAPABILITIES: Capabilities = {
+  nudge: true,
+  home: true,
+  level: false,
+  park: true,
+  goto: true,
+  photo: false,
+  burst: false,
+  record: false,
+  timelapse: false,
+  stack: true,
+  autofocus: true,
+  autofocusAstro: false,
+  focusSteps: true,
+  starFocus: true,
+  starTune: false,
+  polarAlign: true,
+  modes: false,
+  exposure: true,
+  gain: true,
+  sync: true,
+  liveView: true,
+  rgb: false,
+  reboot: true,
+  shutdown: true,
+  album: false,
+  sessions: false,
+  transfer: false,
+  horizonSurvey: false,
+  wire: false,
+  video: ['tele', 'wide', 'stack'],
+};
 
-  app.use('/captures', express.static(config.paths.captures, { maxAge: '1h' }));
-  app.use('/api', api);
-  app.get(['/', '/index.html'], (_req, res) => {
-    res.setHeader('Cache-Control', 'no-cache');
-    res.type('html').send(PAGE);
-  });
-  return { close: () => {} };
+/** The UI's operation words for what the Seestar is busy with. */
+const OPERATION: Record<string, string> = { goto: 'GoTo', parking: 'parking', autofocus: 'autofocus', 'polar alignment': 'polar alignment', 'dark library': 'dark library', stacking: '' };
+
+/** An operation's state as the UI words it (the Dwarf's idle / running / done / failed). */
+function opWord(o: OperationState | undefined): string {
+  if (!o) return 'idle';
+  if (o.state === 'complete') return 'done';
+  if (o.state === 'fail') return 'failed';
+  if (o.state === 'cancel') return 'cancelled';
+  if (o.state === 'idle' || o.state === 'off') return 'idle';
+  return 'running';
 }
 
-const PAGE = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Astrocontroller · Seestar</title>
-<style>
-:root{--bg:#0d1014;--fg:#d8dee6;--mut:#8a96a3;--card:#161b21;--line:#26303a;--acc:#c0392b;--ok:#3fa36b;--warn:#d08a2c}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
-header{display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
-h1{font-size:16px;margin:0}main{display:grid;gap:12px;padding:12px 16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
-section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
-h2{font-size:13px;margin:0 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
-button{background:#222a33;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer;margin:2px}
-button:hover{border-color:var(--mut)}input,textarea{background:#0f1317;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px;width:100%}
-.pill{padding:2px 8px;border-radius:99px;font-size:12px;background:#2a2f36}.ok{background:var(--ok);color:#fff}.bad{background:var(--acc);color:#fff}.wait{background:var(--warn);color:#111}
-dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0}dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;background:#0f1317;padding:8px;border-radius:6px;font-size:12px;margin:6px 0 0}
-img{max-width:100%;border-radius:6px;display:block;margin-top:8px}.chat div{margin:4px 0}.mut{color:var(--mut)}
-</style></head><body>
-<header><h1>Astrocontroller · Seestar</h1><span id="link" class="pill">…</span><span id="tunnel" class="pill" hidden></span><span id="busy" class="pill" hidden></span>
-<span style="flex:1"></span><button onclick="post('connect')">Connect</button><button onclick="post('disconnect')">Disconnect</button></header>
-<main>
-<section><h2>Scope</h2><dl id="dev"></dl></section>
-<section><h2>Control</h2>
-<button onclick="post('stop')">Stop</button><button onclick="post('stack/start')">Start stack</button><button onclick="post('stack/stop')">Stop stack</button>
-<button onclick="post('autofocus')">Autofocus</button><button onclick="post('park')">Park</button><button onclick="post('refresh')">Refresh</button>
-<div style="margin-top:8px"><button id="pa-btn" onclick="polar()" title="EQ mode on a wedge: measure the polar alignment deviation (several minutes)">Polar align</button><button onclick="post('polar-align/stop')">Stop polar align</button></div>
-<p id="pa" class="mut" style="margin:6px 0 0">Polar align measures the EQ deviation and says how far to pitch up/down and rotate clockwise/counter-clockwise.</p>
-<div style="margin-top:8px"><button onclick="img('stacked')">Stacked image</button><button onclick="img('preview')">Live sub</button><button onclick="img('stacked','wide')">Wide</button></div>
-<img id="img" alt="" hidden></section>
-<section><h2>Agent</h2><div id="chat" class="chat"></div><textarea id="prompt" rows="2" placeholder="Ask the agent (e.g. plan tonight and start on the best target)"></textarea><button onclick="ask()">Send</button></section>
-<section><h2>Raw RPC</h2><input id="m" placeholder="method, e.g. get_device_state"><textarea id="p" rows="2" placeholder='params JSON (optional)'></textarea><button onclick="rpc()">Send</button><pre id="rpcout"></pre></section>
-<section><h2>Events</h2><pre id="events"></pre></section>
-<section><h2>Tunnel</h2><pre id="tun" class="mut">local connection</pre></section>
-<section><h2>Device state</h2><pre id="raw"></pre></section>
-</main>
-<script>
-const $=id=>document.getElementById(id);
-const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-async function api(p,o){const r=await fetch('/api/'+p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
-async function post(p){try{await api('seestar/'+p,{method:'POST'})}catch(e){alert(e.message)}tick()}
-async function polar(){if(!confirm('Measure the polar alignment? The Seestar must be tilted on its wedge in EQ mode, with a clear view of the sky.'))return;post('polar-align')}
-async function img(kind,camera='tele'){const i=$('img');i.hidden=false;i.src='/api/seestar/image.jpg?kind='+kind+'&camera='+camera+'&t='+Date.now()}
-async function rpc(){let params;const t=$('p').value.trim();try{if(t)params=JSON.parse(t)}catch(e){$('rpcout').textContent='params: '+e.message;return}
-try{$('rpcout').textContent=JSON.stringify(await api('seestar/rpc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method:$('m').value.trim(),params})}),null,1)}catch(e){$('rpcout').textContent=e.message}}
-async function ask(){const text=$('prompt').value.trim();if(!text)return;$('prompt').value='';try{await api('agent/prompt',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text})})}catch(e){alert(e.message)}}
-const t=ms=>ms?new Date(ms).toLocaleTimeString():'';
-async function tick(){try{const s=await api('seestar/status');
-const l=$('link');l.textContent=s.released?'released':s.connected?'connected '+(s.link?.host||''):'connecting…';l.className='pill '+(s.connected?'ok':s.released?'':'wait');
-const b=$('busy');b.hidden=!s.busy;b.textContent=s.busy||'';b.className='pill wait';
-if(s.tunnel){const tu=$('tunnel');tu.hidden=false;tu.textContent='tunnel '+s.tunnel.phase;tu.className='pill '+(s.tunnel.phase==='up'?'ok':s.tunnel.phase==='failed'?'bad':'wait');$('tun').textContent=JSON.stringify(s.tunnel,null,1)}
-const d=s.device,m=s.mount,p=s.power,st=s.stack;
-const rows=[['Model',d.model],['Name',d.name],['Serial',d.serial],['Firmware',d.firmware],['FOV',s.fov?s.fov.h+'° × '+s.fov.v+'°':''],
-['RA / Dec',m.raHours!=null?m.raHours.toFixed(4)+'h  '+m.decDeg.toFixed(3)+'°':''],['Alt / Az',m.altDeg!=null?m.altDeg.toFixed(1)+'°  '+m.azDeg.toFixed(1)+'°':''],
-['Mount',[m.eqMode?'EQ':'Alt-Az',m.tracking?'tracking':'',m.parked?'parked':''].filter(Boolean).join(', ')],['Target',s.view.target],['View',[s.view.state,s.view.stage].filter(Boolean).join(' / ')],
-['Stack',st.state?st.state+' · '+(st.stacked??0)+' stacked, '+(st.dropped??0)+' dropped':''],['Focuser',s.focus.position!=null?s.focus.position+' / '+(s.focus.maxStep??'?'):''],
-['Battery',p.batteryPct!=null?p.batteryPct+'%'+(p.charging?' (charging)':''):''],['Temp',p.tempC!=null?p.tempC+' °C':''],['Free',s.storage.freeMB!=null?s.storage.freeMB+' MB':''],
-['Alert',s.alert?.error?s.alert.error+' ('+t(s.alert.at)+')':''],['Link error',s.link?.lastError]];
-$('dev').innerHTML=rows.filter(r=>r[1]!==undefined&&r[1]!==''&&r[1]!==null).map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join('');
-$('events').textContent=s.recent.slice().reverse().map(e=>t(e.at)+'  '+e.name+(e.state?' '+e.state:'')+(e.error?'  '+e.error:'')).join('\\n');
-$('raw').textContent=JSON.stringify(s.deviceState??{},null,1);
-const pa=s.polarAlign;$('pa-btn').disabled=!!pa?.running;if(pa?.message){$('pa').textContent=(pa.running?'Polar alignment: ':t(pa.finishedAt||pa.startedAt)+' · ')+pa.message;$('pa').style.color=pa.ok===false?'var(--acc)':''}
-const a=await api('agent/status');$('chat').innerHTML=a.enabled?(a.history||[]).slice(-8).map(h=>'<div><b>'+esc(h.kind==='tool'?h.name:h.kind)+'</b> '+esc((h.kind==='tool'?h.status:h.text||'').slice(0,600))+'</div>').join(''):'<span class="mut">agent disabled</span>';
-}catch(e){$('link').textContent='server unreachable';$('link').className='pill bad'}}
-tick();setInterval(tick,2000);
-</script></body></html>`;
+/** The control link in the UI's terms (its state and a plain-language detail). */
+function linkView(st: SeestarState): { state: string; detail: string; health: SeestarState['link'] } {
+  const l = st.link;
+  const where = l ? `${l.host}:${l.port}` : config.seestar.host;
+  if (st.released) return { state: 'released', detail: 'released by the user (Disconnect in the web UI)', health: l };
+  if (st.connected) return { state: 'connected', detail: `connected to the Seestar at ${where}`, health: l };
+  return { state: 'connecting', detail: `connecting to the Seestar at ${where}${l?.lastError ? `: ${l.lastError}` : ''}`, health: l };
+}
+
+const gb = (mb: number | undefined) => (mb === undefined ? undefined : +(mb / 1024).toFixed(1));
+
+/** The Seestar's state in the UI's field names; the fields it has no equivalent of are left out. */
+export function projectState(st: SeestarState, busy: string | null): WebTelescope['state'] {
+  const stackRunning = !!st.stack.state && !TERMINAL_STATES.has(st.stack.state) && st.stack.state !== 'idle';
+  const taken = (st.stack.stacked ?? 0) + (st.stack.dropped ?? 0);
+  const target = st.view.target;
+  const raDec = st.view.targetRaDec;
+  const operation = busy && busy !== 'stacking' ? (OPERATION[busy] ?? busy) : undefined;
+  return {
+    driver: 'seestar',
+    connected: st.connected,
+    released: st.released,
+    link: linkView(st),
+    tunnel: st.tunnel,
+    device: { name: st.device.name ?? st.device.model, model: st.device.model, serial: st.device.serial, firmware: st.device.firmware },
+    battery: st.power.batteryPct,
+    charging: st.power.charging,
+    temperatureC: st.power.tempC,
+    operation,
+    bodyMode: st.mount.eqMode === undefined ? undefined : st.mount.eqMode ? 'eq' : 'altaz',
+    storage: st.storage.totalMB !== undefined ? { availableGB: gb(st.storage.freeMB) ?? 0, totalGB: gb(st.storage.totalMB) ?? 0 } : undefined,
+    goto: { state: opWord(st.ops.AutoGoto), target },
+    tracking: { state: st.mount.tracking === undefined ? 'idle' : st.mount.tracking ? 'running' : 'idle', target: st.mount.tracking ? target : undefined },
+    focusPosition: st.focus.position,
+    autofocus: { state: opWord(st.ops.AutoFocus) },
+    fov: { tele: st.fov ?? NOMINAL_FOV },
+    capture: {},
+    stacking: {
+      tele: { state: stackRunning ? 'running' : 'idle', currentCount: taken || undefined, stackedCount: st.stack.stacked, totalCount: st.stack.total, target },
+      wide: { state: 'idle' },
+    },
+    polarAlign: st.polarAlign,
+    pointing: target && raDec ? { target, raHours: raDec[0], decDeg: raDec[1], at: st.ops.AutoGoto?.at ?? Date.now() } : undefined,
+    mount: st.mount,
+    alert: st.alert,
+  };
+}
+
+/** "30", "30s", "500ms", "1/100" → milliseconds. */
+function exposureMs(v: string | number | boolean): number {
+  const s = String(v).trim().toLowerCase();
+  const frac = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(s);
+  const ms = frac ? (1000 * +frac[1]) / +frac[2] : s.endsWith('ms') ? parseFloat(s) : parseFloat(s) * 1000;
+  if (!Number.isFinite(ms) || ms <= 0) throw new Error(`exposure "${v}" is not a duration (seconds, e.g. 10, or a fraction, e.g. 1/100)`);
+  return ms;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export function seestarWeb(scope: Seestar): WebTelescope {
+  const hub = new SeestarVideoHub(scope, () => config.seestar.host);
+
+  const control = async (b: ControlAction): Promise<unknown> => {
+    switch (b.action) {
+      case 'nudge': {
+        // the UI's angle is the screen's (0 up, 90 right), the Seestar's the math one (0 right, 90 up);
+        // the Seestar moves for whole seconds, so the move is stopped after the UI's duration
+        await scope.nudge(90 - b.angle, b.speed * NUDGE_MAX_SPEED, Math.min(NUDGE_MAX_S, Math.max(1, Math.ceil(b.ms / 1000))));
+        await sleep(b.ms);
+        await scope.stopMotion();
+        return scope.readPointing();
+      }
+      case 'stop':
+        await scope.stopMotion();
+        return { ok: true };
+      case 'home':
+        // the Seestar keeps its own axis positions: home is raising the arm out of park
+        return { result: (await scope.openArm()).state };
+      case 'park':
+        return { result: (await scope.park()).state };
+      case 'stack_start':
+        await scope.startStack();
+        return { result: 'Live stacking started' };
+      case 'stack_stop':
+        await scope.stopStack();
+        return { ok: true };
+      case 'autofocus':
+        return { result: `autofocus ${(await scope.autofocus()).state}` };
+      case 'focus': {
+        const at = await scope.focusBy(b.direction === 'near' ? -b.steps : b.steps);
+        return { result: `focuser at ${at ?? '?'}` };
+      }
+      case 'star_measure': {
+        // one live sub, measured; the plate scale comes from the tele field
+        const { image } = await scope.grabImage('tele', 'preview');
+        const fov = scope.state.fov ?? NOMINAL_FOV;
+        const sharp = starSharpness(image, { arcsecPerPx: (fov.h * 3600) / (image.frameWidth ?? image.width) });
+        return { result: sharpnessLine(sharp), focusPosition: scope.state.focus.position, ...sharp };
+      }
+      case 'setting': {
+        if (b.setting === 'exposure') return { result: await scope.setExposure({ stackMs: exposureMs(b.value), continuousMs: exposureMs(b.value) }) };
+        if (b.setting === 'gain') {
+          const g = Number(b.value);
+          if (!Number.isFinite(g)) throw new Error(`gain "${b.value}" is not a number`);
+          return { result: await scope.setGain(g) };
+        }
+        return { result: await scope.setSetting({ [b.setting]: b.value }) };
+      }
+      case 'settings':
+        return scope.settings();
+      case 'polar_align':
+        // takes minutes; progress and the outcome are published as state.polarAlign for the Polar group's readout
+        return { result: (await scope.polarAlign()).summary };
+      case 'polar_stop':
+        await scope.stopPolarAlign();
+        return { result: 'Polar alignment stopped' };
+      case 'goto_stop':
+        await scope.stopView();
+        return { ok: true };
+      case 'sync':
+        return { result: (await scope.syncTimeLocation()).join(', ') };
+      case 'liveview':
+        await scope.startView();
+        return { ok: true };
+      case 'reboot':
+        await scope.power('reboot');
+        return { result: 'Reboot sent: the telescope reconnects in about a minute' };
+      case 'shutdown':
+        await scope.power('shutdown');
+        return { result: 'Shutdown sent' };
+      default:
+        // the route checks the capabilities first; this is a control the table above marks unsupported
+        throw unsupported({ label: LABEL }, `"${b.action}"`);
+    }
+  };
+
+  const goto = async (t: GotoTarget): Promise<string> => {
+    // the Seestar takes a fixed position: a planet's is computed for now
+    const p = t.kind === 'body' ? sky.bodyRaDec(scope.requireLocation(), t.body) : t;
+    const r = await scope.gotoTarget({ raHours: p.raHours, decDeg: p.decDeg, name: t.label });
+    return `GoTo ${t.label}: ${r.goto.state} after ${(r.goto.ms / 1000).toFixed(0)} s`;
+  };
+
+  const routes = (): Router => {
+    const api = express.Router();
+    api.get('/seestar/status', route(async () => ({ ...scope.state, busy: scope.isBusy() })));
+    api.post('/seestar/refresh', route(async () => scope.refreshState()));
+    api.get('/seestar/events', route(async () => scope.state.recent));
+    api.get('/seestar/tunnel', route(async () => scope.tunnel?.status() ?? null));
+    api.post('/seestar/tunnel/restart', route(async () => scope.tunnel?.restart()));
+    api.get('/seestar/zwo-devices', route(async () => listDevices()));
+    api.post(
+      '/seestar/rpc',
+      route(async (req) => {
+        const b = body(req, z.object({ method: z.string().min(1), params: z.unknown().optional() }));
+        return scope.raw(b.method, b.params);
+      }),
+    );
+    api.get(
+      '/seestar/image.jpg',
+      route(async (req, res) => {
+        const camera = req.query.camera === 'wide' ? 'wide' : 'tele';
+        const kind = req.query.kind === 'preview' ? 'preview' : 'stacked';
+        const { image } = await scope.grabImage(camera, kind);
+        const jpeg = await displayJpeg(image, 1600);
+        res.setHeader('Cache-Control', 'no-store');
+        res.type('jpeg').send(jpeg);
+      }),
+    );
+    return api;
+  };
+
+  // the UI's 'state' is the projection; the Seestar's event frames are its notifications
+  const listeners = new Map<(...a: any[]) => void, (...a: any[]) => void>();
+  const wrap = (event: 'state' | 'notification', fn: (...a: any[]) => void) => {
+    const w = event === 'state' ? () => fn(projectState(scope.state, scope.isBusy())) : (e: SeestarEvent) => fn({ name: e.Event, data: e, ts: e.at });
+    listeners.set(fn, w);
+    return w;
+  };
+
+  return {
+    driver: 'seestar',
+    label: LABEL,
+    get state() {
+      return projectState(scope.state, scope.isBusy());
+    },
+    capabilities: CAPABILITIES,
+    hub,
+    location: () => scope.location(),
+    requireLocation: () => scope.requireLocation(),
+    teleFovDeg: () => scope.state.fov ?? NOMINAL_FOV,
+    connectLink: () => scope.connectLink(),
+    release: () => scope.release(),
+    setHost: (host) => scope.setHost(host),
+    control,
+    goto,
+    routes,
+    on: (event, fn) => scope.on(event === 'state' ? 'state' : 'event', wrap(event, fn)),
+    off: (event, fn) => {
+      const w = listeners.get(fn);
+      if (!w) return scope;
+      listeners.delete(fn);
+      return scope.off(event === 'state' ? 'state' : 'event', w);
+    },
+  };
+}

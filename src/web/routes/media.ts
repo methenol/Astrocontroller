@@ -5,12 +5,12 @@ import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { errMsg } from '../../log.js';
-import * as dhttp from '../../drivers/dwarf/http.js';
 import * as library from '../../library/transfer.js';
 import * as processing from '../../processing/queue.js';
 import * as studio from '../../processing/studio.js';
 import { badRequest, body, notFound, queryNumber, queryString, route } from '../http.js';
 import type { WebContext } from '../context.js';
+import { unsupported, type Capabilities } from '../telescope.js';
 
 const ALBUM_PAGE_SIZE = 24;
 const THUMB_TTL_MS = 3600e3;
@@ -107,14 +107,21 @@ function targetSessions(target: string, camera: 'tele' | 'wide' | undefined): st
   return tele.length ? tele : wide;
 }
 
-export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
+export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
   const api = express.Router();
+  const hub = scope.hub;
+  const need = (cap: keyof Capabilities, what: string) => {
+    if (!scope.capabilities[cap]) throw unsupported(scope, what);
+  };
+  // the SD-card album and its files are the Dwarf's HTTP API: loaded only when the driver has them
+  const album = () => import('../../drivers/dwarf/http.js');
 
   api.get(
     '/snapshot/:name',
     route(async (req, res) => {
       const name = String(req.params.name);
       if (!['tele', 'wide', 'stack'].includes(name)) throw notFound(`unknown stream ${name}`);
+      if (!(scope.capabilities.video as string[]).includes(name)) throw unsupported(scope, `The ${name} view`);
       const f = await hub.get(name).snapshot(SNAPSHOT_MAX_AGE_MS, SNAPSHOT_TIMEOUT_MS);
       res.setHeader('Content-Type', 'image/jpeg');
       res.setHeader('Cache-Control', 'no-store');
@@ -126,6 +133,8 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
   api.get(
     '/album',
     route(async (req) => {
+      need('album', 'The SD-card album');
+      const dhttp = await album();
       const type = queryNumber(req, 'type') ?? 0;
       const page = Math.max(0, Math.floor(queryNumber(req, 'page') ?? 0));
       const [counts, items] = await Promise.all([dhttp.getMediaCounts(), dhttp.listMedia(type, page, ALBUM_PAGE_SIZE)]);
@@ -137,6 +146,8 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
   api.get(
     '/device-file',
     route(async (req, res) => {
+      need('album', 'The SD-card album');
+      const dhttp = await album();
       const p = queryString(req, 'path') ?? '';
       // fileUrl encodes each segment and refuses what leaves the card; this only keeps the route to the album
       if (!p.startsWith('/DWARF3/') || p.split('/').some((s) => s === '..' || s === '.')) throw badRequest('bad path');
@@ -156,6 +167,8 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
   api.post(
     '/album/delete',
     route(async (req) => {
+      need('album', 'The SD-card album');
+      const dhttp = await album();
       const b = body(req, AlbumDeleteBody);
       const outcomes = await dhttp.deleteMedia(b.paths.map((p) => ({ filePath: p, mediaType: b.mediaType })));
       thumbs.clear(); // a deleted file must not live on in the thumbnail cache
@@ -164,11 +177,18 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
   );
 
   // ---- sessions, library, transfers
-  api.get('/sessions', route(async (req) => library.listDeviceSessions(req.query.counts === '1')));
+  api.get(
+    '/sessions',
+    route(async (req) => {
+      need('sessions', 'Listing the sessions on the telescope');
+      return library.listDeviceSessions(req.query.counts === '1');
+    }),
+  );
   api.get('/library', route(async () => ({ root: config.paths.library, targets: library.listLibrary() })));
   api.post(
     '/transfer',
     route(async (req) => {
+      need('transfer', 'Transferring from the telescope');
       const b = body(req, TransferBody);
       if ('session' in b) {
         return library.transferSession(b.session, { includeSubframes: b.subframes !== false, includeCalibration: b.calibration !== false, process: b.process, origin: 'ui' });
@@ -183,6 +203,7 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
   api.post(
     '/sessions/delete',
     route(async (req) => {
+      need('sessions', 'Deleting sessions on the telescope');
       const b = body(req, SessionDeleteBody);
       const outcomes = await library.deleteDeviceSessions(b.folders, { force: b.force });
       thumbs.clear();
@@ -244,10 +265,10 @@ export function mediaRoutes({ hub }: WebContext, thumbs: ThumbCache): Router {
 }
 
 /** The MJPEG stream of one source (tele, wide, stack). */
-export function streamRoute({ hub }: WebContext): express.RequestHandler {
+export function streamRoute({ scope }: Pick<WebContext, 'scope'>): express.RequestHandler {
   return (req, res) => {
     try {
-      hub.get(String(req.params.name)).attach(res);
+      scope.hub.get(String(req.params.name)).attach(res);
     } catch (err) {
       // plain text: the message carries the requested name, which must never be rendered as HTML
       res.status(404).type('text/plain').send(errMsg(err));

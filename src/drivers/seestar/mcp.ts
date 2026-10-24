@@ -16,6 +16,11 @@ import * as weather from '../../astro/weather.js';
 import { starSharpness } from '../../media/focus/sharpness.js';
 import { analyze } from '../../media/images.js';
 import { imageResult, localTime, makeTool, text, type ToolFn } from '../../mcp/tools/common.js';
+import { registerDutyTools } from '../../mcp/tools/duty.js';
+import { registerLibraryTools } from '../../mcp/tools/library.js';
+import { registerPlanningTools } from '../../mcp/tools/planning.js';
+import { registerStellariumTools } from '../../mcp/tools/stellarium.js';
+import type { DutyLoop } from '../../agent/duty.js';
 import type { McpSpec } from '../types.js';
 import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
 import { listDevices } from './zwo-cloud.js';
@@ -23,7 +28,7 @@ import { listDevices } from './zwo-cloud.js';
 export const SERVER_NAME = 'seestar';
 
 /** Nominal S30 tele field (150 mm, 1920×1080 at 2.9 µm) until the scope reports its optics. */
-const NOMINAL_FOV = { h: 2.13, v: 1.2 };
+export const NOMINAL_FOV = { h: 2.13, v: 1.2 };
 const SUN_WARN_DEG = 15;
 
 const INSTRUCTIONS = `Tools for a ZWO Seestar smart telescope, over its native JSON-RPC link (on the local network, or through ZWO Telescope Network via a seestar-portfwd tunnel on 127.0.0.1).
@@ -31,8 +36,20 @@ Start with seestar_status. The Seestar runs its own pipeline: goto_target slews,
 Only one operation runs at a time. Over ZWO Telescope Network only one remote session exists per telescope: connecting takes it from the official app.
 Coordinates are J2000 (RA in hours, Dec in degrees). Never point at the Sun without the user confirming a solar filter.`;
 
-export function seestarMcpSpec(scope: Seestar): McpSpec {
-  return { name: SERVER_NAME, instructions: INSTRUCTIONS, register: (server) => registerSeestarTools(makeTool(server), scope) };
+export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop): McpSpec {
+  return {
+    name: SERVER_NAME,
+    instructions: INSTRUCTIONS,
+    register: (server) => {
+      const tool = makeTool(server);
+      registerSeestarTools(tool, scope);
+      // the app's shared tools, the same for every driver (find_target and plan_targets are the Seestar's own above)
+      registerPlanningTools(tool, { site: () => scope.requireLocation(), teleFov: () => scope.state.fov ?? NOMINAL_FOV, skip: ['find_target', 'plan_targets'] });
+      registerLibraryTools(tool, { device: false });
+      if (duty) registerDutyTools(tool, { duty });
+      registerStellariumTools(tool);
+    },
+  };
 }
 
 const json = (v: unknown) => text(v);

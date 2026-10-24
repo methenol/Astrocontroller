@@ -122,6 +122,11 @@ export interface TelescopeState {
   calibration: { state: string; plateSolvingTimes?: number; result?: { azimuth: number; altitude: number }; at?: number };
   goto: { state: string; target?: string; at?: number };
   tracking: { state: string; target?: string; at?: number };
+  /**
+   * Where the last GoTo was sent (the scope reports no RA/Dec of its own): a J2000 position, or a
+   * solar-system body, which moves. The Stellarium tab draws the telescope's frame from it.
+   */
+  pointing?: { target: string; raHours?: number; decDeg?: number; body?: string; at: number };
   oneClickGoto?: Record<string, unknown>;
   stacking: { tele: StackingInfo; wide: StackingInfo };
   darkCapture?: DarkCaptureState;

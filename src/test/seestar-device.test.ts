@@ -189,4 +189,28 @@ describe('Seestar MCP tools', () => {
     assert.equal(new Set(names).size, names.length);
     assert.equal(seestarMcpSpec(scope).name, 'seestar');
   });
+
+  test("the app's shared tools come with them (duty, Stellarium, sky, catalog, library), each name once", async () => {
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const { seestarMcpSpec } = await import('../drivers/seestar/mcp.js');
+    const { DutyLoop } = await import('../agent/duty.js');
+    const { seestarDuty } = await import('../drivers/seestar/duty.js');
+    const { EventEmitter } = await import('node:events');
+    const scope = new Seestar({ host: '127.0.0.1', connection: 'local', tunnel: null, dataDir: os.tmpdir() });
+    const agent = Object.assign(new EventEmitter(), { ready: false, busy: false, note() {}, async prompt() {} });
+    const duty = new DutyLoop(seestarDuty(scope), agent as never, { tickMs: 0, file: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'duty-')), 'duty.json') });
+    try {
+      const server = new McpServer({ name: 'test', version: '0' });
+      const names: string[] = [];
+      const reg = server.registerTool.bind(server);
+      server.registerTool = ((name: string, ...rest: never[]) => (names.push(name), reg(name, ...(rest as [never, never])))) as typeof server.registerTool;
+      // a name registered twice throws here
+      seestarMcpSpec(scope, duty).register(server);
+      for (const n of ['duty', 'show_in_stellarium', 'sky_conditions', 'weather_forecast', 'search_catalog', 'rest_target', 'list_library', 'processing_status', 'goto_target', 'plan_targets']) assert.ok(names.includes(n), n);
+      // the SD-card tools and the Dwarf's wide-camera sky check are the Dwarf's
+      for (const n of ['list_device_sessions', 'transfer_session', 'sky_check']) assert.ok(!names.includes(n), n);
+    } finally {
+      duty.dispose();
+    }
+  });
 });
