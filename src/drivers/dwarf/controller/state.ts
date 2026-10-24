@@ -49,6 +49,16 @@ export interface FocusTune {
   message?: string;
 }
 
+/** Progress and outcome of an EQ polar alignment measurement, for the web UI. */
+export interface PolarAlign {
+  running: boolean;
+  startedAt: number;
+  finishedAt?: number;
+  ok?: boolean;
+  /** the result in words: the error, its quality and the adjustment to make */
+  message?: string;
+}
+
 /** Progress of the obstruction survey (media/horizon/survey.ts), for the web UI. */
 export interface HorizonSurvey {
   running: boolean;
@@ -119,6 +129,8 @@ export interface TelescopeState {
   ndLock?: { since: number; note: string } | null;
   eqSolving: { state: string; result?: { azimuthErrorDeg: number; altitudeErrorDeg: number; at: number } };
   autofocus: { state: string; astro?: string };
+  /** the polar alignment in progress or last run (mcp/tools/astro.ts publishes it here) */
+  polarAlign?: PolarAlign;
   /** a star-sharpness measurement or focus sweep in progress (media/focus.ts publishes its progress here) */
   focusTune?: FocusTune;
   /** the obstruction survey in progress or last run */

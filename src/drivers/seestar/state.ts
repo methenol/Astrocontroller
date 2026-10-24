@@ -58,6 +58,8 @@ export interface SeestarState {
   recent: Array<{ at: number; name: string; state?: string; error?: string; code?: number }>;
   /** what the full device-state read returned last, as the scope sent it */
   deviceState?: Record<string, unknown>;
+  /** the polar alignment in progress or last run: its deviation (EqModePA x/y, degrees) and the correction */
+  polarAlign?: { running: boolean; startedAt: number; finishedAt?: number; ok?: boolean; xDeg?: number; yDeg?: number; message?: string };
 }
 
 export function initialState(connection: 'local' | 'zwo'): SeestarState {

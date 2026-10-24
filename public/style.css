@@ -620,3 +620,4 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
   .aim-body { justify-content: center; }
   .aim-side { flex-basis: 100%; }
 }
+#polar-note.err { color: var(--err); }

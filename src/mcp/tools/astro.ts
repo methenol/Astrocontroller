@@ -1,9 +1,10 @@
 /** Calibration, GoTo, live stacking, polar alignment, Sun/Moon and daytime tracking, sentry. */
 import { z } from 'zod';
 import { errMsg, logger } from '../../log.js';
-import { round, type CameraName, type Dwarf } from '../../drivers/dwarf/device.js';
+import { round, type CameraName, type Dwarf, type PolarError } from '../../drivers/dwarf/device.js';
 import { findObject, gotoLabel } from '../../astro/catalog.js';
 import * as sky from '../../astro/sky.js';
+import { correctionText, dwarfCorrection, polarSummary } from '../../astro/polar.js';
 import * as library from '../../library/transfer.js';
 import { cameraArg, sleep, text, type ToolContext, type ToolFn } from './common.js';
 
@@ -16,8 +17,6 @@ const MIN_GOTO_ALTITUDE_DEG = 5;
 const POLAR_EXCELLENT_DEG = 0.1;
 const POLAR_GOOD_DEG = 0.25;
 const POLAR_ACCEPTABLE_DEG = 0.5;
-/** A polar-axis error under this (°) on one axis needs no adjustment. */
-const POLAR_ON_DEG = 0.05;
 
 /** Refuse a GoTo to a position below the horizon: the scope would slew for minutes and then fail. */
 function assertAboveHorizon(what: string, altitude: number): void {
@@ -59,6 +58,48 @@ export async function withAstroBusyRecovery<T>(dwarf: Dwarf, what: string, fn: (
       await sleep(3000);
     }
   }
+}
+
+export interface PolarReport extends Record<string, unknown> {
+  /** the result in one line for the web UI: the error and the correction */
+  summary: string;
+}
+
+/**
+ * Measure the polar alignment and say what to adjust. Shared by the agent's tool and the web UI's
+ * button; progress and the outcome are published as state.polarAlign either way.
+ */
+export async function measurePolarReport(dwarf: Dwarf): Promise<PolarReport> {
+  const prev = dwarf.state.eqSolving.result;
+  const startedAt = Date.now();
+  dwarf.publishState({ polarAlign: { running: true, startedAt, message: 'plate-solving near the pole (1-3 min)…' } });
+  try {
+    const r = await dwarf.measurePolarAlignment();
+    const report = polarReport(dwarf, r, prev);
+    dwarf.publishState({ polarAlign: { running: false, startedAt, finishedAt: Date.now(), ok: true, message: report.summary } });
+    return report;
+  } catch (e) {
+    dwarf.publishState({ polarAlign: { running: false, startedAt, finishedAt: Date.now(), ok: false, message: `polar alignment failed: ${errMsg(e)}` } });
+    throw e;
+  }
+}
+
+function polarReport(dwarf: Dwarf, r: PolarError, prev: PolarError | undefined): PolarReport {
+  const total = Math.hypot(r.azimuthErrorDeg, r.altitudeErrorDeg);
+  const fmt = (d: number) => `${d >= 0 ? '+' : ''}${d.toFixed(3)}° (${(d * 60).toFixed(1)}′)`;
+  // the DWARFLAB app's own wording of the result (astro/polar.ts)
+  const fix = dwarfCorrection(r.azimuthErrorDeg, r.altitudeErrorDeg);
+  const out: PolarReport = {
+    summary: polarSummary(fix),
+    azimuthError: fmt(r.azimuthErrorDeg),
+    altitudeError: fmt(r.altitudeErrorDeg),
+    totalErrorArcmin: round(total * 60, 1),
+    quality: total < POLAR_EXCELLENT_DEG ? 'excellent' : total < POLAR_GOOD_DEG ? 'good' : total < POLAR_ACCEPTABLE_DEG ? 'acceptable for short exposures' : 'needs adjustment',
+    correction: correctionText(fix),
+    bodyMode: dwarf.state.bodyMode,
+  };
+  if (prev) out.previous = { azimuthErrorDeg: round(prev.azimuthErrorDeg, 3), altitudeErrorDeg: round(prev.altitudeErrorDeg, 3) };
+  return out;
 }
 
 export function registerAstroTools(tool: ToolFn, { dwarf, hub }: ToolContext): void {
@@ -183,44 +224,15 @@ export function registerAstroTools(tool: ToolFn, { dwarf, hub }: ToolContext): v
 
   tool(
     'polar_alignment',
-    'EQ-mode polar alignment helper (Dwarf 3 tilted on its side/wedge with the base aimed at the celestial pole). measure: the scope plate-solves two positions and returns the polar axis error in azimuth and altitude (degrees). Adjust the tripod/wedge and measure again until both are below ~0.5° (ideally < 0.2°). stop aborts.',
+    'EQ-mode polar alignment helper (Dwarf 3 tilted on its side/wedge with the base aimed at the celestial pole). measure: the scope plate-solves two positions and returns the polar axis error in azimuth and altitude (degrees) and the correction in the DWARFLAB app\'s terms (pitch up/down, rotate the tripod head clockwise/counter-clockwise). Adjust the tripod/wedge and measure again until both are below ~0.5° (ideally < 0.2°). stop aborts.',
     { action: z.enum(['measure', 'stop']) },
     async ({ action }) => {
       if (action === 'stop') {
         await dwarf.stopPolarAlignment();
         return text('polar alignment stopped');
       }
-      const prev = dwarf.state.eqSolving.result;
-      const r = await dwarf.measurePolarAlignment();
-      const total = Math.hypot(r.azimuthErrorDeg, r.altitudeErrorDeg);
-      const fmt = (d: number) => `${d >= 0 ? '+' : ''}${d.toFixed(3)}° (${(d * 60).toFixed(1)}′)`;
-      const out: Record<string, unknown> = {
-        azimuthError: fmt(r.azimuthErrorDeg),
-        altitudeError: fmt(r.altitudeErrorDeg),
-        totalErrorArcmin: round(total * 60, 1),
-        quality: total < POLAR_EXCELLENT_DEG ? 'excellent' : total < POLAR_GOOD_DEG ? 'good' : total < POLAR_ACCEPTABLE_DEG ? 'acceptable for short exposures' : 'needs adjustment',
-        bodyMode: dwarf.state.bodyMode,
-      };
-      // where the rotation axis points against where the pole is (the latitude): what the
-      // firmware's own measurement says needs to change, without assuming how the wedge is set
-      const lat = dwarf.location()?.lat;
-      if (lat !== undefined) {
-        // the visible pole: north at azimuth 0 in the northern hemisphere, south at 180 in the southern
-        const poleAlt = Math.abs(lat);
-        const poleAz = lat >= 0 ? 0 : 180;
-        const axisAlt = poleAlt - r.altitudeErrorDeg;
-        const axisAz = (((poleAz - r.azimuthErrorDeg) % 360) + 360) % 360;
-        out.rotationAxis = `points at altitude ${axisAlt.toFixed(1)}°, azimuth ${axisAz.toFixed(1)}°; the celestial pole is at altitude ${poleAlt.toFixed(1)}°, azimuth ${poleAz}°`;
-        const altFix = Math.abs(r.altitudeErrorDeg) >= POLAR_ON_DEG ? `${r.altitudeErrorDeg < 0 ? 'lower' : 'raise'} the rotation axis by ${Math.abs(r.altitudeErrorDeg).toFixed(1)}°` : 'altitude is on';
-        const aziFix = Math.abs(r.azimuthErrorDeg) >= POLAR_ON_DEG ? `turn it ${Math.abs(r.azimuthErrorDeg).toFixed(1)}° ${r.azimuthErrorDeg < 0 ? 'east' : 'west'} (to be confirmed by the next measurement)` : 'azimuth is on';
-        out.correction = `${altFix}; ${aziFix}. Measure again after each adjustment (about 15 s). EQ mode engages only once the error is small; until then GoTo cannot work on a tilted base.`;
-      }
-      if (prev) {
-        out.previous = { azimuthErrorDeg: round(prev.azimuthErrorDeg, 3), altitudeErrorDeg: round(prev.altitudeErrorDeg, 3) };
-        const trend = (now: number, before: number, axis: string) => (Math.abs(now) < Math.abs(before) ? 'improved — keep turning the same way' : `got worse — reverse the ${axis} adjustment`);
-        out.change = { azimuth: trend(r.azimuthErrorDeg, prev.azimuthErrorDeg, 'azimuth'), altitude: trend(r.altitudeErrorDeg, prev.altitudeErrorDeg, 'altitude') };
-      }
-      return text(out);
+      // the summary line is the UI's; the agent reads the fields
+      return text({ ...(await measurePolarReport(dwarf)), summary: undefined });
     },
   );
 

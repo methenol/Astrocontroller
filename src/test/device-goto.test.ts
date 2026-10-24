@@ -5,6 +5,7 @@ import { FakeHttpApi } from './fake-http.js';
 import { config } from '../config.js';
 import { Dwarf, AstroServiceHungError } from '../drivers/dwarf/device.js';
 import { daylightRefusal } from '../drivers/dwarf/controller/astro.js';
+import { measurePolarReport } from '../mcp/tools/astro.js';
 import { DwarfCommandError } from '../drivers/dwarf/link.js';
 import { Cmd } from '../drivers/dwarf/protocol.js';
 
@@ -231,6 +232,34 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
     });
     assert.deepEqual(await dwarf.measurePolarAlignment(), { azimuthErrorDeg: 1.25, altitudeErrorDeg: -0.5 });
     assert.equal(dwarf.state.eqSolving.result?.azimuthErrorDeg, 1.25);
+  });
+
+  test('polar alignment report: the adjustment in words, published for the web UI', async () => {
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async (_req, f) => {
+      await f.notify('eqSolvingState', { state: 1 });
+      await sleep(50);
+      return { code: 0, aziErr: -3, altErr: 1 };
+    });
+    const r = await measurePolarReport(dwarf);
+    // the DWARFLAB app: aziErr > 0 is clockwise, altErr > 0 is up
+    assert.equal(r.correction, 'pitch up 1.0°, rotate 3.0° counter-clockwise');
+    assert.equal(r.summary, 'Polar alignment error 3.2°: Pitch up 1.0°, rotate 3.0° counter-clockwise.');
+    assert.equal(dwarf.state.polarAlign?.running, false);
+    assert.equal(dwarf.state.polarAlign?.ok, true);
+    assert.equal(dwarf.state.polarAlign?.message, r.summary);
+  });
+
+  test('polar alignment report: a failure is published with its reason', async () => {
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, (_req, f) => {
+      setTimeout(async () => {
+        await f.notify('eqSolvingState', { state: 1 });
+        await f.notify('eqSolvingState', { state: 3 });
+      }, 20);
+      return { code: 0 };
+    });
+    await assert.rejects(measurePolarReport(dwarf), /without a result/);
+    assert.equal(dwarf.state.polarAlign?.ok, false);
+    assert.match(dwarf.state.polarAlign?.message ?? '', /^polar alignment failed: .*without a result/);
   });
 
   test('polar alignment: a bare acknowledgement of the start is not a perfect result', async () => {

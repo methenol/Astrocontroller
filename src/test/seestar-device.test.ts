@@ -97,6 +97,32 @@ describe('Seestar device', () => {
     await assert.rejects(first, (e: unknown) => e instanceof SeestarOperationError && /no star/.test(e.message) && /code 279/.test(e.message));
   });
 
+  test('polar alignment: the EqModePA deviation becomes pitch and rotate, as the Seestar app shows it', async () => {
+    await connected();
+    fake.on('start_polar_align', (_p, f) => {
+      setTimeout(() => {
+        f.event({ Event: 'EqModePA', state: 'working', route: [], x: -3.04, y: 1.02 });
+        f.event({ Event: 'EqModePA', state: 'complete', route: [] });
+      }, 30);
+      return { result: 0 };
+    });
+    const r = await scope.polarAlign();
+    assert.deepEqual(r.deviation, { xDeg: -3.04, yDeg: 1.02 });
+    assert.equal(r.correction, 'pitch up 1.0°, rotate 3.0° counter-clockwise');
+    assert.equal(scope.state.polarAlign?.ok, true);
+    assert.equal(scope.state.polarAlign?.message, r.summary);
+  });
+
+  test('polar alignment that completes without a deviation fails and says so', async () => {
+    await connected();
+    fake.on('start_polar_align', (_p, f) => {
+      setTimeout(() => f.event({ Event: 'EqModePA', state: 'complete', route: [] }), 30);
+      return { result: 0 };
+    });
+    await assert.rejects(scope.polarAlign(), /without reporting a deviation/);
+    assert.equal(scope.state.polarAlign?.ok, false);
+  });
+
   test('an operation is abandoned when the link drops', async () => {
     await connected();
     fake.on('start_solve', (_p, f) => {

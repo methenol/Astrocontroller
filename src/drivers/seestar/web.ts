@@ -37,6 +37,9 @@ export function mountSeestarWeb(app: Express, _server: http.Server, deps: { scop
   api.post('/seestar/stop', route(async () => scope.stopView()));
   api.post('/seestar/park', route(async () => scope.park()));
   api.post('/seestar/autofocus', route(async () => scope.autofocus()));
+  // blocks until the scope reports the end; the page reads progress and the correction from status.polarAlign
+  api.post('/seestar/polar-align', route(async () => scope.polarAlign()));
+  api.post('/seestar/polar-align/stop', route(async () => scope.stopPolarAlign()));
   api.post('/seestar/stack/start', route(async () => scope.startStack()));
   api.post('/seestar/stack/stop', route(async () => scope.stopStack()));
   api.get(
@@ -93,6 +96,8 @@ img{max-width:100%;border-radius:6px;display:block;margin-top:8px}.chat div{marg
 <section><h2>Control</h2>
 <button onclick="post('stop')">Stop</button><button onclick="post('stack/start')">Start stack</button><button onclick="post('stack/stop')">Stop stack</button>
 <button onclick="post('autofocus')">Autofocus</button><button onclick="post('park')">Park</button><button onclick="post('refresh')">Refresh</button>
+<div style="margin-top:8px"><button id="pa-btn" onclick="polar()" title="EQ mode on a wedge: measure the polar alignment deviation (several minutes)">Polar align</button><button onclick="post('polar-align/stop')">Stop polar align</button></div>
+<p id="pa" class="mut" style="margin:6px 0 0">Polar align measures the EQ deviation and says how far to pitch up/down and rotate clockwise/counter-clockwise.</p>
 <div style="margin-top:8px"><button onclick="img('stacked')">Stacked image</button><button onclick="img('preview')">Live sub</button><button onclick="img('stacked','wide')">Wide</button></div>
 <img id="img" alt="" hidden></section>
 <section><h2>Agent</h2><div id="chat" class="chat"></div><textarea id="prompt" rows="2" placeholder="Ask the agent (e.g. plan tonight and start on the best target)"></textarea><button onclick="ask()">Send</button></section>
@@ -106,6 +111,7 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 async function api(p,o){const r=await fetch('/api/'+p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 async function post(p){try{await api('seestar/'+p,{method:'POST'})}catch(e){alert(e.message)}tick()}
+async function polar(){if(!confirm('Measure the polar alignment? The Seestar must be tilted on its wedge in EQ mode, with a clear view of the sky.'))return;post('polar-align')}
 async function img(kind,camera='tele'){const i=$('img');i.hidden=false;i.src='/api/seestar/image.jpg?kind='+kind+'&camera='+camera+'&t='+Date.now()}
 async function rpc(){let params;const t=$('p').value.trim();try{if(t)params=JSON.parse(t)}catch(e){$('rpcout').textContent='params: '+e.message;return}
 try{$('rpcout').textContent=JSON.stringify(await api('seestar/rpc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method:$('m').value.trim(),params})}),null,1)}catch(e){$('rpcout').textContent=e.message}}
@@ -125,6 +131,7 @@ const rows=[['Model',d.model],['Name',d.name],['Serial',d.serial],['Firmware',d.
 $('dev').innerHTML=rows.filter(r=>r[1]!==undefined&&r[1]!==''&&r[1]!==null).map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join('');
 $('events').textContent=s.recent.slice().reverse().map(e=>t(e.at)+'  '+e.name+(e.state?' '+e.state:'')+(e.error?'  '+e.error:'')).join('\\n');
 $('raw').textContent=JSON.stringify(s.deviceState??{},null,1);
+const pa=s.polarAlign;$('pa-btn').disabled=!!pa?.running;if(pa?.message){$('pa').textContent=(pa.running?'Polar alignment: ':t(pa.finishedAt||pa.startedAt)+' · ')+pa.message;$('pa').style.color=pa.ok===false?'var(--acc)':''}
 const a=await api('agent/status');$('chat').innerHTML=a.enabled?(a.history||[]).slice(-8).map(h=>'<div><b>'+esc(h.kind==='tool'?h.name:h.kind)+'</b> '+esc((h.kind==='tool'?h.status:h.text||'').slice(0,600))+'</div>').join(''):'<span class="mut">agent disabled</span>';
 }catch(e){$('link').textContent='server unreachable';$('link').className='pill bad'}}
 tick();setInterval(tick,2000);

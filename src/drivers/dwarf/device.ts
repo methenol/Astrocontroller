@@ -45,7 +45,8 @@ import { SafeEmitter } from '../../util/events.js';
 import type { TelescopeDevice } from '../types.js';
 
 export type { CameraName, StackingInfo, StackHealth };
-export type { TelescopeState, FocusTune, DarkCaptureState, HorizonSurvey } from './controller/state.js';
+export type { TelescopeState, FocusTune, DarkCaptureState, HorizonSurvey, PolarAlign } from './controller/state.js';
+export type { PolarError } from './controller/astro.js';
 export { AstroServiceHungError } from './controller/follow.js';
 export { BURST_MAX } from './controller/camera.js';
 export { FOCUS_MAX, FILTERS, WB_SCENES, camId, round, timezoneOffsetHours } from './controller/util.js';

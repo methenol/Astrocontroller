@@ -151,7 +151,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
 
   tool('plate_solve', 'Plate-solve the current view: where the scope really points, and the field.', {}, async () => json(await scope.plateSolve()));
 
-  tool('polar_align', 'Run the Seestar polar alignment (EQ mode on a wedge): blocks until it reports done; the result carries the alignment error.', {}, async () => json(await scope.polarAlign()));
+  tool('polar_align', 'Run the Seestar polar alignment (EQ mode on a wedge): blocks until it reports done; the result carries the deviation (EqModePA x/y, degrees) and the correction (pitch up/down, rotate clockwise/counter-clockwise).', {}, async () => json(await scope.polarAlign()));
 
   // ---- imaging -------------------------------------------------------------
 

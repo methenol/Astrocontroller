@@ -21,6 +21,7 @@ import { errMsg, logger } from '../../log.js';
 import { SafeEmitter } from '../../util/events.js';
 import { writeFileAtomic } from '../../util/fs.js';
 import type { FloatImage } from '../../media/images.js';
+import { correctionText, polarSummary, seestarCorrection } from '../../astro/polar.js';
 import type { TelescopeDevice } from '../types.js';
 import { readKey } from './auth.js';
 import { frameImage, SeestarImageStream, type Frame, type GrabKind } from './image-stream.js';
@@ -50,6 +51,14 @@ export interface OperationResult {
   error?: string;
   code?: number;
   event: SeestarEvent;
+}
+
+export interface PolarAlignResult extends OperationResult {
+  /** EqModePA x (horizontal) and y (vertical), degrees */
+  deviation: { xDeg: number; yDeg: number };
+  /** "pitch up 1.0°, rotate 3.0° clockwise" */
+  correction: string;
+  summary: string;
 }
 
 export interface GotoRequest {
@@ -459,8 +468,35 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return Seestar.ok('plate solve', await this.follow('plate solve', ['PlateSolve'], () => this.call('start_solve'), SOLVE_TIMEOUT_MS, () => true));
   }
 
-  async polarAlign(): Promise<OperationResult> {
-    return this.follow('polar alignment', ['3PPA'], () => this.call('start_polar_align', { restart: true, dec_pos_index: 3 }), POLAR_TIMEOUT_MS);
+  /**
+   * EQ-mode polar alignment, as the Seestar app's EQ screen runs it: start_polar_align, then the
+   * deviation arrives as x/y (degrees) on EqModePA frames. The correction is worded in astro/polar.ts;
+   * progress and the outcome are published as state.polarAlign for the web page.
+   */
+  async polarAlign(): Promise<PolarAlignResult> {
+    const startedAt = Date.now();
+    const seen: { dev?: { x: number; y: number } } = {};
+    const onEvent = (e: SeestarEvent) => {
+      if (e.Event === 'EqModePA' && Number.isFinite(e.x) && Number.isFinite(e.y)) seen.dev = { x: e.x as number, y: e.y as number };
+    };
+    this.rpc.on('event', onEvent);
+    this.st.polarAlign = { running: true, startedAt, message: 'plate-solving near the pole…' };
+    this.changed();
+    try {
+      const r = Seestar.ok('polar alignment', await this.follow('polar alignment', ['EqModePA', '3PPA'], () => this.call('start_polar_align', { restart: true, dec_pos_index: 3 }), POLAR_TIMEOUT_MS));
+      const d = seen.dev;
+      if (!d) throw new Error('polar alignment completed without reporting a deviation (no EqModePA x/y)');
+      const fix = seestarCorrection(d.x, d.y);
+      const summary = polarSummary(fix);
+      this.st.polarAlign = { running: false, startedAt, finishedAt: Date.now(), ok: true, xDeg: d.x, yDeg: d.y, message: summary };
+      return { ...r, deviation: { xDeg: d.x, yDeg: d.y }, correction: correctionText(fix), summary };
+    } catch (e) {
+      this.st.polarAlign = { running: false, startedAt, finishedAt: Date.now(), ok: false, message: `polar alignment failed: ${errMsg(e)}` };
+      throw e;
+    } finally {
+      this.rpc.off('event', onEvent);
+      this.changed();
+    }
   }
 
   stopPolarAlign(): Promise<RpcResponse> {

@@ -15,12 +15,12 @@ EQ mode lets the Dwarf 3 track like an equatorial mount, so there's no field rot
 ## Measure → adjust → repeat
 1. Run **session-startup** first (homed, time/location synced). The sky must be clear around the pole.
 2. `polar_alignment action=measure` (takes 1–3 min). It returns azimuth and altitude error in degrees and arcminutes, plus a quality rating.
-3. Tell the user which knob to turn and roughly how much:
-   - **Azimuth error** → rotate the whole head left/right (azimuth knobs).
-   - **Altitude error** → tilt up/down (latitude knob).
-   - Start with small turns. The sign convention between "+" and left/right is learned by observation, so use the `change` field after the next measurement ("improved — keep turning the same way" / "got worse — reverse").
+3. Tell the user the `correction` exactly as returned: e.g. "pitch up 1.0°, rotate 3.0° clockwise".
+   - **Azimuth error** → rotate the tripod head clockwise/counter-clockwise.
+   - **Altitude error** → pitch (tilt) up/down.
 4. Repeat until the total error is < 15′ (good) or < 6′ (excellent). Usually 3–5 iterations.
 5. Afterwards: `calibrate` (or one-click GoTo) as usual. Subs of 30–60 s should now hold round stars: use the EQ-30 / EQ-60 profiles (acquisition-profiles).
 
-## Learned conventions (update this!)
-- Sign of azimuth error vs. turning direction: *unknown yet*. Record it here once observed, e.g. "+az error → rotate head east".
+## Sign conventions (from the DWARFLAB app's EQ screen)
+- aziErr > 0 → rotate the tripod head clockwise; otherwise counter-clockwise, by |aziErr|°.
+- altErr > 0 → tilt upward; otherwise downward, by |altErr|°.

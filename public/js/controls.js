@@ -121,6 +121,20 @@ $('#btn-star-tune').onclick = async () => {
   }
 };
 
+// Polar alignment (EQ mode): the measurement takes 1-3 minutes; the result and the adjustment to make
+// arrive over the state socket into the group's readout line.
+$('#btn-polar').onclick = async () => {
+  if (!confirm('Measure the polar alignment?\n\nThe telescope rotates and plate-solves near the celestial pole (1-3 min). It must be tilted on its wedge with the base aimed at the pole, homed, with time/location synced and a clear sky.')) return;
+  const b = $('#btn-polar');
+  b.classList.add('busy');
+  try {
+    await control({ action: 'polar_align' }, 'Polar alignment');
+  } finally {
+    b.classList.remove('busy');
+  }
+};
+$('#btn-polar-stop').onclick = () => control({ action: 'polar_stop' }, 'Stop polar alignment');
+
 const FOCUS_STEPS = 3;
 for (const b of $$('[data-focus]')) b.addEventListener('click', () => control({ action: 'focus', direction: b.dataset.focus, steps: FOCUS_STEPS }, 'Focus'));
 

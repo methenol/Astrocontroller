@@ -8,7 +8,7 @@ import { BURST_MAX, type CameraName } from '../../drivers/dwarf/device.js';
 import * as sky from '../../astro/sky.js';
 import { findObject, gotoLabel } from '../../astro/catalog.js';
 import { measureTele, starFocusSweep, sharpnessLine } from '../../media/focus.js';
-import { withAstroBusyRecovery } from '../../mcp/tools/astro.js';
+import { measurePolarReport, withAstroBusyRecovery } from '../../mcp/tools/astro.js';
 import { body, notFound, badRequest, route } from '../http.js';
 import { requireSite, type WebContext } from '../context.js';
 
@@ -23,7 +23,7 @@ const num = z.coerce.number().refine(Number.isFinite, 'must be a number');
 
 export const ControlBody = z.discriminatedUnion('action', [
   z.object({ action: z.literal('nudge'), angle: num.default(0), speed: num.min(0).max(1).default(0.5), ms: num.int().min(50).max(5000).default(600) }),
-  z.object({ action: z.enum(['stop', 'home', 'park', 'level', 'goto_stop', 'sync', 'liveview', 'reboot', 'shutdown']) }),
+  z.object({ action: z.enum(['stop', 'home', 'park', 'level', 'goto_stop', 'polar_align', 'polar_stop', 'sync', 'liveview', 'reboot', 'shutdown']) }),
   z.object({ action: z.literal('photo'), camera }),
   z.object({ action: z.literal('burst'), camera, count: num.int().default(10) }),
   z.object({ action: z.literal('record'), camera, on: z.boolean().optional() }),
@@ -98,6 +98,14 @@ export function controlRoutes({ dwarf, hub, duty }: WebContext): Router {
           return { result: await dwarf.setSetting(cam, b.setting, b.value) };
         case 'settings':
           return dwarf.cameraSettings(cam);
+        case 'polar_align': {
+          // takes 1-3 min; the outcome is also published as state.polarAlign for the Polar group's readout
+          duty.event('the user started an EQ polar alignment measurement from the web UI', true);
+          return { result: (await measurePolarReport(dwarf)).summary };
+        }
+        case 'polar_stop':
+          await dwarf.stopPolarAlignment();
+          return { result: 'Polar alignment stopped' };
         case 'goto_stop':
           await dwarf.stopGoto();
           return { ok: true };

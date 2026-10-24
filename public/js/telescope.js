@@ -92,6 +92,16 @@ function renderFocusTune(t) {
   $('#focus-note').textContent = ft.running ? `Star tune: ${ft.message}` : `${fmtClock(ft.finishedAt ?? ft.startedAt)} · ${ft.message}`;
 }
 
+/** The Polar group's readout line: measuring, or the last result with the adjustment to make. */
+function renderPolarAlign(t) {
+  const pa = t.polarAlign;
+  $('#btn-polar').disabled = !!pa?.running;
+  if (!pa?.message) return;
+  const note = $('#polar-note');
+  note.textContent = pa.running ? `Polar alignment: ${pa.message}` : `${fmtClock(pa.finishedAt ?? pa.startedAt)} · ${pa.message}`;
+  note.classList.toggle('err', pa.ok === false);
+}
+
 function renderRecord(t) {
   const recording = /running/.test(t.capture?.record ?? '');
   const rb = $('#btn-record');
@@ -129,6 +139,7 @@ export function renderTelescope(t) {
   renderChips(t);
   renderGrid(t);
   renderFocusTune(t);
+  renderPolarAlign(t);
   renderRecord(t);
   renderStackBar(t);
   emit('telescope', t);
