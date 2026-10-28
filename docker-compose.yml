@@ -17,14 +17,11 @@ services:
       LIBRARY_DIR: /library
       WEB_PORT: "8080"
       TZ: ${OBSERVER_TIMEZONE:-UTC}
-      # SEESTAR_CONNECTION=zwo: the tunnel container, reached on the seestar network.
+      # SEESTAR_CONNECTION=zwo: the tunnel container, reached on the default network.
       SEESTAR_TUNNEL_HOST: ${SEESTAR_TUNNEL_HOST:-seestar-portfwd}
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "${WEB_PORT:-8080}:8080"
-    networks:
-      - default
-      - seestar
     volumes:
       # Agent home, sessions, skills, notes, captures. Give each driver its own
       # (DATA_PATH=./data-seestar for the Seestar) so the two agents do not mix.
@@ -36,7 +33,7 @@ services:
   # with SEESTAR_CONNECTION=zwo. Started only with the seestar profile (COMPOSE_PROFILES=seestar
   # in .env, or --profile seestar), so the Dwarf setup is unchanged.
   #
-  # Its services are reached by Astrocontroller on the seestar network and are not published on
+  # Its services are reached by Astrocontroller on the project's default network and are not published on
   # the host. To reach them from the host as well, add docker-compose.seestar-ports.yml (see there).
   seestar-portfwd:
     profiles: [seestar]
@@ -45,6 +42,11 @@ services:
       context: ${SEESTAR_PORTFWD_DIR:-../seestar-portfwd}
       dockerfile: Containerfile
       network: host
+      # T: the ThroughTek SDK set the current Seestar app loads (libIOTCAPIsT.so, ...). The older set
+      # seestar-portfwd ships fails with Connect_Ex -42 on an S50 Pro (firmware 9.75). Needs the
+      # tutk-t-sdk patch of seestar-portfwd; empty builds the original set.
+      args:
+        TUTK_SUFFIX: ${SEESTAR_TUTK_SUFFIX:-T}
     image: seestar-portfwd:latest
     container_name: seestar-portfwd
     # the tunnel exits when the P2P session is lost or taken over: Docker starts it again
@@ -60,12 +62,5 @@ services:
     # qemu/bionic's linker calls personality(), which the default seccomp profile blocks.
     security_opt:
       - seccomp:unconfined
-    networks:
-      # default: the internet (ZWO's API and the P2P session); seestar: Astrocontroller
-      - default
-      - seestar
-
-networks:
-  # The telescope's services, between the two containers only (no internet through it).
-  seestar:
-    internal: true
+    # One network only (the project's default, shared with Astrocontroller): attached to a second,
+    # internal network as well, the ThroughTek P2P setup fails (Connect_Ex -42 / -60).

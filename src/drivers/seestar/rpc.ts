@@ -19,6 +19,9 @@ const log = logger('seestar');
 
 /** the official app's heartbeat (SocketManager) */
 const HEARTBEAT_MS = 4000;
+/** lines kept for the wire log, and the longest kept whole */
+const WIRE_LINES = 2000;
+const WIRE_LINE_MAX = 2000;
 /** nothing at all received for this long (heartbeat replies included): the link is dead */
 const SILENT_AFTER_MS = 15_000;
 const CONNECT_TIMEOUT_MS = 8000;
@@ -111,6 +114,8 @@ export class SeestarRpc extends SafeEmitter {
   private heartbeat: NodeJS.Timeout | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
   private backoff: number;
+  /** the recent traffic, for the web UI's wire log: [at, direction, line] */
+  private readonly wire: Array<[number, '→' | '←' | '⚡', string]> = [];
   private readonly st = { lastRxAt: null as number | null, connectedAt: null as number | null, reconnects: 0, lastError: null as string | null };
 
   constructor(private o: RpcLinkOptions) {
@@ -278,8 +283,23 @@ export class SeestarRpc extends SafeEmitter {
         reject(new Error(`${method}: no reply from the Seestar within ${Math.round(timeoutMs / 1000)} s`));
       }, timeoutMs);
       this.pending.set(id, { method, resolve, reject, timer, allowError: !!opts.allowError });
-      sock.write(`${JSON.stringify(msg)}\r\n`);
+      const line = JSON.stringify(msg);
+      if (method !== 'test_connection') this.record('→', line);
+      sock.write(`${line}\r\n`);
     });
+  }
+
+  private record(dir: '→' | '←' | '⚡', line: string): void {
+    this.wire.push([Date.now(), dir, line.length > WIRE_LINE_MAX ? `${line.slice(0, WIRE_LINE_MAX)}… (${line.length} B)` : line]);
+    if (this.wire.length > WIRE_LINES) this.wire.splice(0, this.wire.length - WIRE_LINES);
+  }
+
+  /** The last n lines of traffic (requests →, replies ←, events ⚡); heartbeats left out. */
+  wireLines(n: number, o: { notifications: boolean }): string[] {
+    return this.wire
+      .filter(([, dir, line]) => (o.notifications || dir !== '⚡') && !line.includes('"test_connection"'))
+      .slice(-n)
+      .map(([at, dir, line]) => `${new Date(at).toISOString()} ${dir} ${line}`);
   }
 
   private onData(chunk: string): void {
@@ -298,6 +318,7 @@ export class SeestarRpc extends SafeEmitter {
   }
 
   private onLine(line: string): void {
+    this.record(line.includes('"Event"') ? '⚡' : '←', line);
     let msg: unknown;
     try {
       msg = JSON.parse(line);

@@ -10,7 +10,9 @@ RUN npm run build && npm prune --omit=dev
 ############################ runtime ##########################
 FROM node:22-bookworm-slim
 
-ARG OMP_VERSION=latest
+# Pinned: "latest" broke the build when omp 18.13.3 raised its Bun floor to 1.4.4.
+# Bump the two together (npm view @oh-my-pi/pi-coding-agent@<version> engines).
+ARG OMP_VERSION=18.13.2
 ARG BUN_VERSION=1.3.14
 
 RUN apt-get update \

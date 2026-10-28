@@ -45,7 +45,7 @@ export interface SeestarState {
   /** the tele field of view in degrees, from the scope's optics (h × v as the image is read) */
   fov: { h: number; v: number } | null;
   mount: { raHours?: number; decDeg?: number; altDeg?: number; azDeg?: number; tracking?: boolean; eqMode?: boolean; parked?: boolean; moving?: string; at?: number };
-  view: { state?: string; mode?: string; stage?: string; target?: string; targetRaDec?: [number, number]; lpFilter?: boolean; gain?: number };
+  view: { state?: string; mode?: string; targetType?: string; stage?: string; target?: string; targetRaDec?: [number, number]; lpFilter?: boolean; gain?: number };
   stack: { state?: string; stacked?: number; dropped?: number; total?: number; lastError?: string; jpg?: string; at?: number };
   focus: { position?: number; maxStep?: number };
   power: { batteryPct?: number; charging?: boolean; chargerStatus?: string; tempC?: number; overTemp?: boolean };
@@ -60,6 +60,10 @@ export interface SeestarState {
   deviceState?: Record<string, unknown>;
   /** the polar alignment in progress or last run: its deviation (EqModePA x/y, degrees) and the correction */
   polarAlign?: { running: boolean; startedAt: number; finishedAt?: number; ok?: boolean; xDeg?: number; yDeg?: number; message?: string };
+  /** the obstruction survey in progress or last run (survey.ts) */
+  horizonSurvey?: { running: boolean; phase: string; startedAt: number; finishedAt?: number; index?: number; total?: number; message?: string; error?: string; maskId?: string };
+  /** the star focus sweep in progress or last run */
+  focusTune?: { running: boolean; startedAt: number; finishedAt?: number; message: string };
 }
 
 export function initialState(connection: 'local' | 'zwo'): SeestarState {
@@ -77,12 +81,13 @@ export const isOuter = (e: Record<string, unknown>): boolean => !('page' in e) &
 
 const RAD = 180 / Math.PI;
 
-/** Field of view in degrees from the optics: chip [rows, cols] in pixels, pixel pitch, focal length. */
+/** Field of view in degrees from the optics: chip [width, height] in pixels, pixel pitch, focal length. */
 export function fovFromOptics(chip: [number, number] | undefined, pixelUm: number | undefined, focalMm: number | undefined): { h: number; v: number } | null {
   if (!chip || !pixelUm || !focalMm) return null;
-  const [rows, cols] = chip;
+  // [width, height] as the frames are read: an S50 Pro reports [2160, 3840] and its FITS have NAXIS1 = 2160
+  const [width, height] = chip;
   const deg = (px: number) => 2 * Math.atan((px * pixelUm * 1e-3) / (2 * focalMm)) * RAD;
-  return { h: +deg(cols).toFixed(3), v: +deg(rows).toFixed(3) };
+  return { h: +deg(width).toFixed(3), v: +deg(height).toFixed(3) };
 }
 
 /** Fold a get_device_state result into the state. */
@@ -149,6 +154,8 @@ export function applyAppState(st: SeestarState, r: Record<string, unknown>): voi
 function applyView(st: SeestarState, v: Record<string, any>): void {
   st.view.state = str(v.state) ?? st.view.state;
   st.view.mode = str(v.mode) ?? st.view.mode;
+  // solar_sys views say which body: sun, moon or planet
+  st.view.targetType = str(v.mode) ? str(v.target_type) : st.view.targetType;
   st.view.stage = str(v.stage) ?? st.view.stage;
   st.view.target = str(v.target_name) ?? st.view.target;
   st.view.targetRaDec = pair(v.target_ra_dec) ?? st.view.targetRaDec;

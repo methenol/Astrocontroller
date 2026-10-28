@@ -8,3 +8,5 @@ library
 smoke-*.jpg
 .git
 data-*
+*.apk
+*.xapk

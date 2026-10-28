@@ -9,3 +9,8 @@ node_modules/
 smoke-*.jpg
 .DS_Store
 /catalog/.cache/
+*.apk
+*.xapk
+*.pem
+.env.*
+!.env.example

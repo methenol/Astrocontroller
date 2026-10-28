@@ -197,21 +197,31 @@ For debugging from a shell: `node dist/tools/smoke.js` lists the tools, and `nod
 
 ## ZWO Seestar (`TELESCOPE_DRIVER=seestar`)
 
-The telescope protocol is a driver (`src/drivers/`): `dwarf` (the default) and `seestar`. `TELESCOPE_DRIVER` picks one at startup. The Seestar driver keeps its own data folder (`./data-seestar` unless `DATA_DIR` is set), agent prompt (`agent/drivers/seestar/`) and MCP server (`seestar`, so its tools reach the agent as `mcp__seestar__<tool>`). The driver changes only how Astrocontroller talks to the telescope: the web UI at `/` is the same page with the same tabs (Agent, Tonight, Stellarium, Database, Library, Skills, Log), live views, stacking bar, Aim/Focus/Polar/Camera groups, duty loop and agent. Each driver declares what its device can do, and a control the Seestar has no equivalent of is greyed out with a note saying so (the API answers it with 501): level, photo, burst, record, timelapse, astro autofocus and the star-focus search, shooting modes, the RGB light, the Album and SD-card sessions, the obstruction survey (import a horizon file instead) and the wire log. The live views come from the Seestar's RTSP streams (`rtsp://<host>:SEESTAR_RTSP_PORT/stream` for tele, default 4554, and `SEESTAR_WIDE_RTSP_PORT`, default 4555, for wide) and the stacked image from the image socket. **Home** opens the arm. The Dwarf's own background services (travel guard, stack supervisor, charge watch) do not run.
+The telescope protocol is a driver (`src/drivers/`): `dwarf` (the default) and `seestar`. `TELESCOPE_DRIVER` picks one at startup. The Seestar driver keeps its own data folder (`./data-seestar` unless `DATA_DIR` is set), agent prompt (`agent/drivers/seestar/`) and MCP server (`seestar`, so its tools reach the agent as `mcp__seestar__<tool>`). The driver changes only how Astrocontroller talks to the telescope: the web UI at `/` is the same page with the same tabs (Agent, Tonight, Stellarium, Database, Library, Skills, Log), live views, stacking bar, Aim/Focus/Polar/Camera groups, duty loop and agent. Each driver declares what its device can do; a control a telescope has no equivalent of is greyed out with a note saying so (the API answers it with 501). On the Seestar that is only recording the wide camera. Everything else maps onto the Seestar:
+
+- **Live views**: its RTSP streams (`rtsp://<host>:SEESTAR_RTSP_PORT/stream` for tele, default 4554, and `SEESTAR_WIDE_RTSP_PORT`, default 4555, for wide) and the stacked image from the image socket. The streams carry video only while the scope runs a view, so watching one starts a view (scenery while the Sun is up, star mode at night) unless the arm is parked.
+- **Home** opens the arm; **Level** reads the tilt sensor (on an EQ wedge, 90° minus the latitude it is set for). **Modes**: Normal = scenery, DSO = star, Moon, Planet; Sun is refused remotely (nobody can check the solar filter). **RGB** is the indicator light.
+- **Photo / Burst / Timelapse**: the Seestar has no photo command, so a photo is the live frame in colour (JPEG) plus, for tele, the raw Bayer frame from the image socket (16-bit FITS), saved under `<library>/_photos/<date>/`; a timelapse is assembled into an MP4 there. **Record** records the tele camera onto the scope (`MyWorks/Scenery_video`).
+- **Star tune** sweeps the focuser on raw tele subs and stops on the sharpest; the astro autofocus is the Seestar's own (it is star-based).
+- **Obstruction survey**: the Seestar slews (no plate solve) to every 20° of azimuth at rising altitudes and judges the centre of the wide frame against a sky reference taken high up, stopping in each direction at the first clear sky; the map is saved for the site as the Dwarf's is. Night only, and the sky reference must show stars, so it refuses under a closed roof or cloud rather than map the roof. (The Dwarf stitches a panorama from its motor model; an EQ-mounted Seestar turns each frame by its field angle, which only the sky can calibrate, so it judges frame centres.)
+- **Album, sessions, transfers**: see *Seestar storage* below. **Wire** logs the JSON-RPC traffic. The stack supervisor (a stack that rejects every frame, or gets none, is reported and stopped after `STACK_AUTOSTOP_MIN`) runs as on the Dwarf; the travel guard and charge watch are the Dwarf's own (a hosted scope is neither carried nor charged).
 
 It speaks the Seestar's native protocol: JSON-RPC on TCP `:4700` (requests, replies and pushed events, with a `test_connection` heartbeat) and the image sockets `:4800` (tele) and `:4804` (wide) for stacked and preview frames. Firmware 7.18+ requires a signed handshake: set `SEESTAR_KEY_PATH` to the PEM private key extracted from your copy of the official app (seestarpy's `extract_pem`). The key is not shipped.
 
 **Local network**: `SEESTAR_CONNECTION=local`, `SEESTAR_HOST=<the scope's IP>`.
 
-**ZWO Telescope Network** (a remote scope, e.g. a hosted S30): `SEESTAR_CONNECTION=zwo`. [seestar-portfwd](https://github.com/Phaeilo/seestar-portfwd) logs in to the ZWO account, opens the ThroughTek Kalay P2P tunnel and forwards the scope's native services, so the same driver talks to it.
+**ZWO Telescope Network** (a remote scope, e.g. a hosted S50 Pro): `SEESTAR_CONNECTION=zwo`. [seestar-portfwd](https://github.com/Phaeilo/seestar-portfwd) logs in to the ZWO account, opens the ThroughTek Kalay P2P tunnel and forwards the scope's native services, so the same driver talks to it.
 
-*In Docker* (the usual setup), seestar-portfwd runs as a second container, `seestar-portfwd`, from `docker-compose.yml`. Astrocontroller reaches it by name on the internal `seestar` network, so none of the telescope's ports have to be published on the host.
+*In Docker* (the usual setup), seestar-portfwd runs as a second container, `seestar-portfwd`, from `docker-compose.yml`. Astrocontroller reaches it by name on the project's network, so none of the telescope's ports have to be published on the host. The tunnel container is on that one network only.
 
-1. Clone seestar-portfwd next to this repository (or set `SEESTAR_PORTFWD_DIR` to your checkout).
+**The ThroughTek SDK.** The Seestar app ships two sets of the P2P libraries; the current app (3.4.1) loads the `T` set (`libIOTCAPIsT.so`, …). `docker-compose.yml` builds seestar-portfwd with `TUTK_SUFFIX=${SEESTAR_TUTK_SUFFIX:-T}`, which needs a checkout carrying that build option and the `T` libraries in `tunnel_libs/` (from your copy of the app, `config.armeabi_v7a.apk`). The tunnel may still fail its first attempts (`-42`, `-60`), notably right after a session ended without being released; Docker restarts it until it connects. Stop it with `docker compose stop`, never `docker rm -f`, so it releases the ZWO session.
+
+1. Clone seestar-portfwd next to this repository (or set `SEESTAR_PORTFWD_DIR` to your checkout). Build it with the ThroughTek SDK set the current Seestar app loads (*The ThroughTek SDK* below, `SEESTAR_TUTK_SUFFIX`): the set seestar-portfwd ships fails to connect to an S50 Pro on firmware 9.75 (`Connect_Ex failed: -42`).
 2. In `.env`:
    - Set `TELESCOPE_DRIVER=seestar`, `SEESTAR_CONNECTION=zwo` and `COMPOSE_PROFILES=seestar`. The tunnel service only exists with that profile, so the Dwarf setup does not start it.
    - Set `SEESTAR_USER` and `SEESTAR_PASSWORD`, plus `SEESTAR_SN` when the account holds several scopes. Compose passes only these, and `SEESTAR_COUNTRY`, into the tunnel container.
-   - Set `DATA_PATH=./data-seestar` to keep the Seestar agent's data apart from the Dwarf's.
+   - Set `DATA_PATH=./data-seestar` to keep the Seestar agent's data apart from the Dwarf's, and `LIBRARY_PATH` to your library (it can be the Dwarf's).
+   - Set `SEESTAR_KEY_PATH=/data/seestar.pem` and put the handshake key there (`DATA_PATH/seestar.pem`).
 3. `docker compose up -d --build`.
 
 The tunnel container restarts by itself when the P2P session drops. `docker compose stop seestar-portfwd` ends it and releases the ZWO session. The app's Disconnect closes Astrocontroller's own links only, because it cannot stop another container. Astrocontroller counts the tunnel as up once the control port answers on the network.
@@ -230,7 +240,21 @@ Only one remote session exists per telescope: the official app connecting takes 
 
 Seestar tools: `seestar_status`, `seestar_connect`, `seestar_disconnect`, `zwo_devices`, `tunnel_status`, `tunnel_restart`, `sync_time_location`, `find_target`, `goto_target` (slew + plate solve + centre, optional `stack`), `stop`, `nudge`, `park`, `open_arm`, `plate_solve`, `polar_align`, `start_stacking`, `stop_stacking`, `start_live_view`, `autofocus`, `move_focuser`, `set_exposure`, `set_gain`, `set_dither`, `get_settings`, `set_settings`, `get_image`, `plan_targets`, `power`, `raw_rpc`. The shared tools come with them: duty, Stellarium, sky conditions and weather, the catalog and plan helpers, and the library (without the Dwarf's SD-card transfer tools and wide-camera `sky_check`).
 
-The Seestar driver is tested against a simulated scope only; it has not yet run against real hardware.
+Verified on a Seestar S50 Pro (firmware 9.75) over ZWO Telescope Network: connection and handshake, live views, the album, photos, recording, timelapse, modes, nudging, focusing, slews and GoTo (the plate solve under a closed roof failing cleanly), park, transfers into the library and processing. The obstruction survey's refusals are verified; its sweep needs a dark sky and an open roof.
+
+The agent has the Dwarf's tools under the same names (`telescope_status`, `take_photo`, `view_image`, `transfer_session`, `star_focus`, `move_motors`, `map_obstructions`, …), carried out with the Seestar, next to its own (`seestar_status`, `goto_target`, `raw_rpc`, …). `track_object` and `sentry_mode` say why they are not available: the Seestar's object tracking takes the id of an object its own detection found, which it does not report.
+
+### Seestar storage
+
+The scope keeps its images in `/boot/Image` and serves them over HTTP (port 80; `SEESTAR_HTTP_PORT`). Its file listing is a JSON-RPC call that is stateful on the scope (`get_img_file_page_number` selects the folder, `get_img_file_page_name` pages through it), so Astrocontroller lists one folder at a time.
+
+A target's subs pile up in one folder however many nights it is shot (`MyWorks/<target>_sub/Light_<target>_<exp>s_<filter>_<YYYYMMDD-HHMMSS>.fit`, the scope's local time), with its stacks beside it (`MyWorks/<target>/Stacked_<n>_…`). Astrocontroller splits them into sessions, one per target, camera, sub length, filter and night (noon to noon), named like the Dwarf's so the library, pooling and processing take them unchanged:
+
+    SEESTAR_RAW_TELE_M 31_EXP_60_GAIN_200_2026-10-27-21-51-23_IRCUT
+
+A transfer copies the night's subs and stacks into that folder of the library (resuming a partial file, checking each against the scope's exact size) and the scope's master dark for the sub length (`darklibrary/<exp>s/`) into `CALI_FRAME/dark/seestar_cam_0`; processing in AstroPhoto Studio then queues itself as for the Dwarf. Deleting a session deletes its subs and stacks on the scope (only once it is fully in the library, unless forced). The Seestar and the Dwarf can share one `LIBRARY_PATH`: their sessions are named apart, and the Seestar's masters are kept in `seestar_cam_0|1`, so neither telescope's darks are applied to the other's lights.
+
+The album lists the stacks (as colour images; a stack's FITS is rendered for the browser), the videos and any photos on the scope.
 
 ## How it talks to the telescope
 

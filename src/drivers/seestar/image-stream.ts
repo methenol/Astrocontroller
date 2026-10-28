@@ -10,7 +10,8 @@
  *
  * Payloads: a JPEG stack (fw 8.46+, already stretched, width/height 0 in the header), a raw stack of
  * 16-bit RGB (h×w×3×2 bytes, or ZIP-wrapped deflate on older firmware), or a preview of 16-bit Bayer
- * (h×w×2 bytes). Pixel words are little-endian, as seestarpy reads them from live scopes.
+ * (h×w×2 bytes; ZIP-wrapped too on an S50 Pro with firmware 9.75, entry "raw_data"). Pixel words are
+ * little-endian, as seestarpy reads them from live scopes.
  */
 import net from 'node:net';
 import zlib from 'node:zlib';
@@ -181,16 +182,20 @@ const ZIP_LOCAL = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 
 /** The pixel bytes of a raw stack: as sent, or out of the streaming ZIP older firmware wraps them in. */
 export function rawStackPixels(payload: Buffer, width: number, height: number): Buffer {
-  const expected = width * height * 3 * 2;
+  return framePixels(payload, width * height * 3 * 2, `raw stack of ${payload.length} B is neither ${width}×${height} RGB48 (${width * height * 6} B) nor ZIP`);
+}
+
+/** The pixel bytes of a frame: as sent when they are the expected size, else out of the ZIP that wraps them. */
+export function framePixels(payload: Buffer, expected: number, what: string): Buffer {
   // size first: the ZIP signature turns up by chance in about one uncompressed frame in a hundred
   if (expected > 0 && payload.length === expected) return payload;
   const at = payload.indexOf(ZIP_LOCAL);
-  if (at < 0) throw new Error(`raw stack of ${payload.length} B is neither ${width}×${height} RGB48 (${expected} B) nor ZIP`);
+  if (at < 0) throw new Error(what);
   const nameLen = payload.readUInt16LE(at + 26);
   const extraLen = payload.readUInt16LE(at + 28);
   const data = payload.subarray(at + 30 + nameLen + extraLen);
   const out = zlib.inflateRawSync(data, { finishFlush: zlib.constants.Z_SYNC_FLUSH });
-  if (expected > 0 && out.length < expected) throw new Error(`ZIP stack inflated to ${out.length} B, expected ${expected} B`);
+  if (expected > 0 && out.length < expected) throw new Error(`ZIP frame inflated to ${out.length} B, expected ${expected} B`);
   return expected > 0 ? out.subarray(0, expected) : out;
 }
 
@@ -218,7 +223,8 @@ export async function frameImage(f: Frame, camera: 'tele' | 'wide'): Promise<Flo
     // one Bayer sub: binned 2×2 to luminance, which needs no knowledge of the pattern and keeps star shapes
     const w = h.width >> 1;
     const ht = h.height >> 1;
-    if (payload.length < h.width * h.height * 2) throw new Error(`preview of ${payload.length} B is short of ${h.width}×${h.height}×2`);
+    // ZIP-wrapped on an S50 Pro with firmware 9.75 (entry "raw_data")
+    const payload = framePixels(f.payload, h.width * h.height * 2, `preview of ${f.payload.length} B is neither ${h.width}×${h.height}×2 nor ZIP`);
     const data = new Float32Array(w * ht);
     for (let y = 0; y < ht; y++) {
       const r0 = 2 * y * h.width;

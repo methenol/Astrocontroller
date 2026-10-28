@@ -54,6 +54,11 @@ class Superseded extends Error {
 
 const posix = (...p: string[]) => path.posix.join(...p.filter(Boolean));
 const isFitsName = (f: string) => /\.fits?$/i.test(f);
+/**
+ * The CALI_FRAME camera folder of a session's masters: the Dwarf's cam_0 / cam_1, the Seestar's
+ * seestar_cam_0 / seestar_cam_1, so one library can hold both telescopes without mixing their darks.
+ */
+export const calibrationCamera = (session: string): string => `${/^SEESTAR_RAW_/i.test(session) ? 'seestar_' : ''}${/^(DWARF|SEESTAR)_RAW_WIDE/i.test(session) ? 'cam_1' : 'cam_0'}`;
 const isSub = (f: string) => isFitsName(f) && !/^stacked/i.test(f);
 const sessionKey = (sessions: string[]) => [...sessions].sort().join('|');
 
@@ -337,7 +342,7 @@ export class ProcessingQueue {
     for (const s of it.sessions) {
       for (const f of localSubs(s)) add(s, f);
       add(s, 'shotsInfo.json');
-      cams.add(/^DWARF_RAW_WIDE/i.test(s) ? 'cam_1' : 'cam_0');
+      cams.add(calibrationCamera(s));
     }
     for (const kind of CALIBRATION_KINDS) {
       for (const cam of cams) {

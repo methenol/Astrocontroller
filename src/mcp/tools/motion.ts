@@ -27,7 +27,7 @@ const VISIBLE_GAIN = 80;
  * File a blocked verdict as the patch of sky it was seen in, now, and say when the target comes
  * clear of it as the sky turns. Without a resolvable target there is no position to file.
  */
-function blockedAt(site: Site, target: string | undefined, reason: string): { blockedAt: Record<string, unknown> | string; clearsAt: string | null } {
+export function blockedAt(site: Site, target: string | undefined, reason: string): { blockedAt: Record<string, unknown> | string; clearsAt: string | null } {
   const o = target ? findObject(target) : undefined;
   if (!o) return { blockedAt: `not recorded: ${target ? `"${target}" is not in the catalog` : 'no GoTo target known'}, so its position is unknown (pass target=)`, clearsAt: null };
   const tz = config.observer.timezone;

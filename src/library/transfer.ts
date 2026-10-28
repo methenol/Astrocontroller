@@ -1,36 +1,19 @@
-/** Background transfers from the telescope SD card into the imagery library (layout: sessions.ts). */
+/** Background transfers from the telescope's storage into the imagery library (layout: sessions.ts; the device side: device-library.ts). */
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { errMsg } from '../log.js';
-import { downloadFiles, downloadOne, type FtpEntry } from '../drivers/dwarf/ftp.js';
-import { deleteMedia } from '../drivers/dwarf/http.js';
 import { enqueueProcessing } from '../processing/queue.js';
+import { deviceLibrary } from './device-library.js';
 import { startJob, type FailedFile, type Job } from './jobs.js';
-import { isTransferred, listDeviceSessions, parseSessionFolder, sessionLocalDir, librarySessionsFor, SESSION_META, type DeviceSession } from './sessions.js';
+import { isTransferred, sessionLocalDir, librarySessionsFor, SESSION_META, type DeviceSession } from './sessions.js';
 import { writeFileAtomic } from '../util/fs.js';
 
 export { jobBus, listJobs, getJob, cancelJob, cancelActiveJobs, type Job } from './jobs.js';
 export { parseSessionFolder, listDeviceSessions, sessionLocalDir, librarySessionsFor, listLibrary, isTransferred, type DeviceSession } from './sessions.js';
 
-const CALIBRATION_KINDS = ['dark', 'flat', 'bias'] as const;
-
-const isFits = (name: string) => name.toLowerCase().endsWith('.fits');
-/** stacked-16_*.fits is the scope's own stack; failed_*.fits (kept) are subs its stacker rejected. */
-const isSub = (e: FtpEntry) => isFits(e.name) && !e.name.startsWith('stacked');
-
-/** A session named by folder (or a path ending in one), or the newest on the card for "latest". */
-async function resolveSession(folderOrLatest: string): Promise<DeviceSession> {
-  if (folderOrLatest === 'latest') {
-    const { sessions } = await listDeviceSessions(false);
-    if (!sessions[0]) throw new Error('no astronomy sessions on the telescope');
-    return sessions[0];
-  }
-  const folder = folderOrLatest.replace(/\/+$/, '').replace(/^.*\/(?=DWARF_RAW_)/, '');
-  const s = parseSessionFolder(folder);
-  if (!s) throw new Error(`not a DWARF session folder: ${folderOrLatest}`);
-  return s;
-}
+/** A session named by folder (or a path ending in one), or the newest on the telescope for "latest". */
+const resolveSession = (folderOrLatest: string): Promise<DeviceSession> => deviceLibrary().resolveSession(folderOrLatest);
 
 function readJson(file: string): unknown {
   try {
@@ -51,7 +34,8 @@ export interface TransferOptions {
 
 /** The session's light frames among the files that failed (not its stacked-16 FITS, nor calibration masters). */
 export function missingLights(s: DeviceSession, failed: FailedFile[]): FailedFile[] {
-  return failed.filter((f) => f.remote.startsWith(`${s.path}/`) && isSub({ name: path.posix.basename(f.remote), size: 0, isDir: false }));
+  const lib = deviceLibrary();
+  return failed.filter((f) => lib.isSessionLight(s, f.remote));
 }
 
 /**
@@ -82,17 +66,7 @@ export async function transferSession(folderOrLatest: string, opts: TransferOpti
     `transfer ${s.target} (${s.folder})`,
     async (job) => {
       fs.mkdirSync(dest, { recursive: true });
-      const plan: Array<{ remoteDir: string; localDir: string; filter?: (e: FtpEntry) => boolean; optional?: boolean }> = [
-        { remoteDir: s.path, localDir: dest, filter: (e) => opts.includeSubframes || !isSub(e) },
-      ];
-      if (opts.includeCalibration) {
-        const cam = s.camera === 'wide' ? 'cam_1' : 'cam_0';
-        for (const kind of CALIBRATION_KINDS) {
-          // a camera without masters of one kind is normal
-          plan.push({ remoteDir: `/Astronomy/CALI_FRAME/${kind}/${cam}`, localDir: path.join(config.paths.library, 'CALI_FRAME', kind, cam), optional: true });
-        }
-      }
-      const res = await downloadFiles(plan, (p) => job.progress(p), job.signal);
+      const { calibrationDir, ...res } = await deviceLibrary().copySession(s, opts, (p) => job.progress(p), job.signal);
       writeFileAtomic(
         path.join(dest, SESSION_META),
         JSON.stringify(
@@ -102,7 +76,7 @@ export async function transferSession(folderOrLatest: string, opts: TransferOpti
             transferredAt: new Date().toISOString(),
             // files that could not be copied: a session with any is not complete in the library
             failedFiles: res.failed.length,
-            calibrationDir: opts.includeCalibration ? path.join(config.paths.library, 'CALI_FRAME') : null,
+            calibrationDir,
           },
           null,
           2,
@@ -124,8 +98,8 @@ export interface SessionDeleteOutcome {
 }
 
 /**
- * Delete sessions from the telescope's SD card through the album API — the device's own way, which
- * wipes the whole session package (frames, stack, thumbnail) together with its album entry.
+ * Delete sessions from the telescope through the device's own delete, which wipes the whole
+ * session package (frames, stack, thumbnail) together with its album entry.
  * A session that is not complete in the library is refused unless `force`: deleting it would lose
  * data that was never copied. One bad session does not stop the others.
  */
@@ -144,8 +118,8 @@ export async function deleteDeviceSessions(folders: string[], opts: { force?: bo
       continue;
     }
     try {
-      const [r] = await deleteMedia([{ filePath: `/DWARF3${s.path}`, mediaType: 4 }]);
-      out.push({ folder: s.folder, deleted: r.deleted, ...(r.note ? { note: r.note } : {}) });
+      const r = await deviceLibrary().deleteSession(s);
+      out.push({ folder: s.folder, ...r });
     } catch (err) {
       out.push({ folder: s.folder, deleted: false, note: errMsg(err) });
     }
@@ -171,18 +145,11 @@ export function distinctPaths(locals: string[]): string[] {
 }
 
 /**
- * Where an album file lands: Astronomy/… mirrors the card, anything else goes to _photos/<today>.
+ * Where an album file lands: the driver mirrors its sessions and puts anything else under _photos/<today>.
  * Throws for a path that would leave the library.
  */
 export function albumLocalPath(devicePath: string, day = localDay()): string {
-  const rel = devicePath.replace(/\\/g, '/').replace(/^\/?DWARF3\//, '').replace(/^\/+/, '');
-  const parts = rel.split('/');
-  if (!rel || parts.some((p) => p === '..' || p === '.' || p === '')) throw new Error(`bad device path ${devicePath}`);
-  const root = path.resolve(config.paths.library);
-  const local = parts[0] === 'Astronomy' ? path.resolve(root, ...parts) : path.resolve(root, '_photos', day, parts[parts.length - 1]);
-  const inside = path.relative(root, local);
-  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new Error(`bad device path ${devicePath}`);
-  return local;
+  return deviceLibrary().albumLocalPath(devicePath, day);
 }
 
 /** Copy individual album files (photos/videos/stacked images) into the library; one bad file does not stop the rest. */
@@ -201,7 +168,7 @@ export function transferFiles(devicePaths: string[], origin?: Job['origin']): Jo
       for (const [i, f] of plan.entries()) {
         if (job.signal.aborted) break;
         try {
-          await downloadOne(f.remote, f.local, job.signal);
+          await deviceLibrary().downloadOne(f.remote, f.local, job.signal);
           files.push(f.local);
         } catch (err) {
           if (job.signal.aborted) break;

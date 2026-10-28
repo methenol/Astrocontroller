@@ -231,9 +231,10 @@ describe('Seestar image stream', () => {
 
 describe('Seestar state', () => {
   test('the field of view comes from the reported optics', () => {
+    // chip_size is [width, height] as the frames are read (an S50 Pro: [2160, 3840], FITS NAXIS1 = 2160)
     const f = fovFromOptics([1080, 1920], 2.9, 150)!;
-    assert.ok(Math.abs(f.h - 2.127) < 0.01, String(f.h));
-    assert.ok(Math.abs(f.v - 1.196) < 0.01, String(f.v));
+    assert.ok(Math.abs(f.h - 1.196) < 0.01, String(f.h));
+    assert.ok(Math.abs(f.v - 2.127) < 0.01, String(f.v));
     assert.equal(fovFromOptics(undefined, 2.9, 150), null);
   });
 

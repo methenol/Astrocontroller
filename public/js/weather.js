@@ -353,7 +353,7 @@ function safetyHour(h) {
   const title = `${h.local}: ${hz.map((x) => x.text).join('; ') || 'no hazard'}`;
   const time = String(h.local ?? '').split(', ').pop();
   return `<div class="wx-h safety-h ${esc(h.risk)}" title="${esc(title)}">
-    <div>${esc(time)}</div><div class="sc">${RISK_ICON[h.risk] ?? ''}</div><div>${esc(temp(h.temperatureC))}</div>
+    <div>${esc(time)}</div><div class="sc">${RISK_ICON[h.risk] ?? ''}</div><div>${esc(temp(h.temperatureC))}</div><div title="cloud cover (seeing the sky is the Tonight tab's score)">☁${esc(h.cloudTotal ?? '–')}%</div>
     <div class="rain ${h.precipProbability >= 50 ? 'high' : h.precipProbability >= 20 ? 'mid' : ''}">🌧${esc(h.precipProbability)}%</div><div>🌬${esc(speedN(h.gustKmh))}</div><div>💧${esc(delta(h.dewSpreadC))}</div></div>`;
 }
 
@@ -365,12 +365,16 @@ async function loadSafety() {
     if (mine !== safetySeq) return;
     const age = r.stale ? `<span class="wx-age"> · forecast from ${esc(r.ageMin)} min ago${r.staleError ? ` (refresh failed: ${esc(r.staleError)})` : ''}</span>` : '';
     const lines = (r.report ?? []).map((l) => `<div class="safety-line ${esc(l.risk)}"><b><i class="dot"></i>${esc(l.subject)}</b><span>${esc(l.text)}</span></div>`).join('');
+    // the safety verdict is about the equipment, not the sky: say how cloudy the night is beside it
+    const clouds = (r.hours ?? []).map((h) => h.cloudTotal).filter((c) => typeof c === 'number');
+    const meanCloud = clouds.length ? Math.round(clouds.reduce((a, b) => a + b, 0) / clouds.length) : null;
+    const sky = meanCloud === null ? '' : `<div class="safety-line ${meanCloud >= 70 ? 'caution' : 'safe'}"><b><i class="dot"></i>Sky</b><span>${meanCloud >= 70 ? 'Mostly cloudy' : meanCloud >= 30 ? 'Partly cloudy' : 'Mostly clear'}: ${meanCloud}% cloud on average overnight. Safety is not seeing — the Tonight tab scores the sky for imaging.</span></div>`;
     el.innerHTML = `<h3>Tonight at the telescope</h3>
       <div class="safety-verdict ${esc(r.risk)}">${esc(r.verdict)}</div>
       <div class="muted small">${esc(r.night?.from ?? '–')} → ${esc(r.night?.to ?? '–')} · alarm limits: gusts ${esc(speed(r.limits?.gustKmh))}, rain chance ${esc(r.limits?.probabilityPct)}%, cold ${esc(temp(r.limits?.minTempC))}${age}</div>
-      <div class="safety-report">${lines}</div>
+      <div class="safety-report">${lines}${sky}</div>
       <div class="wx-strip">${(r.hours ?? []).map(safetyHour).join('')}</div>
-      <div class="muted small">✓ safe · ! with care · ✕ bring it in — temperature · 🌧 precipitation chance · 🌬 gusts ${esc(speedUnit())} · 💧 dew-point spread · Open-Meteo</div>`;
+      <div class="muted small">✓ safe · ! with care · ✕ bring it in (equipment safety, not seeing) — temperature · ☁ cloud cover · 🌧 precipitation chance · 🌬 gusts ${esc(speedUnit())} · 💧 dew-point spread · Open-Meteo</div>`;
   } catch (e) {
     if (mine === safetySeq) el.innerHTML = `<h3>Tonight at the telescope</h3><span class="muted">${esc(e.message)}</span>`;
   }

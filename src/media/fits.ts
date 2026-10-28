@@ -1,6 +1,7 @@
 /**
- * Minimal FITS reader for DWARF subframes (16-bit Bayer mono, BZERO 32768) and calibration
- * masters. Supports BITPIX 8/16/32/-32/-64, first HDU, first plane.
+ * Minimal FITS reader for DWARF subframes (16-bit Bayer mono, BZERO 32768), calibration masters
+ * and Seestar stacks (a 3-plane RGB cube). Supports BITPIX 8/16/32/-32/-64, first HDU: the first
+ * plane, and all three of an RGB cube.
  */
 export interface FitsImage {
   header: Record<string, string | number | boolean>;
@@ -9,6 +10,8 @@ export interface FitsImage {
   /** Physical values (BZERO/BSCALE applied). */
   data: Float32Array;
   bayer?: string;
+  /** an RGB cube (NAXIS3 = 3): the three planes interleaved, BZERO/BSCALE applied */
+  rgb?: Float32Array;
 }
 
 const BLOCK = 2880;
@@ -53,7 +56,8 @@ export function readFits(buf: Buffer): FitsImage {
   if (naxis < 2 || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new Error('FITS has no 2D image in the primary HDU');
   const n = width * height;
   if (n > MAX_PIXELS) throw new Error(`FITS claims ${width}×${height} pixels: more than ${MAX_PIXELS}, the header is corrupt`);
-  const need = n * bytes;
+  const cube = naxis >= 3 && Number(header.NAXIS3) === 3 && buf.length >= dataOffset + 3 * n * bytes;
+  const need = (cube ? 3 : 1) * n * bytes;
   if (buf.length < dataOffset + need) throw new Error(`FITS data is truncated: ${buf.length - dataOffset} of ${need} bytes for ${width}×${height}`);
   const bzero = Number(header.BZERO ?? 0);
   const bscale = Number(header.BSCALE ?? 1);
@@ -67,6 +71,12 @@ export function readFits(buf: Buffer): FitsImage {
     : (i) => dv.getFloat64(i * 8, false);
   const data = new Float32Array(n);
   for (let i = 0; i < n; i++) data[i] = read(i) * bscale + bzero;
+  if (cube) {
+    const rgb = new Float32Array(n * 3);
+    for (let c = 0; c < 3; c++) for (let i = 0; i < n; i++) rgb[i * 3 + c] = read(c * n + i) * bscale + bzero;
+    // a stack is debayered already: its Bayer card describes the subs it came from
+    return { header, width, height, data, rgb };
+  }
   const bayer = typeof header.BAYERPAT === 'string' ? header.BAYERPAT.toUpperCase() : undefined;
   return { header, width, height, data, bayer };
 }

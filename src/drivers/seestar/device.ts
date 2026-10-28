@@ -22,6 +22,7 @@ import { SafeEmitter } from '../../util/events.js';
 import { writeFileAtomic } from '../../util/fs.js';
 import type { FloatImage } from '../../media/images.js';
 import { correctionText, polarSummary, seestarCorrection } from '../../astro/polar.js';
+import { altAz, bodyAlt, bodyRaDec, raDecFromAltAz, separationDeg } from '../../astro/sky.js';
 import type { TelescopeDevice } from '../types.js';
 import { readKey } from './auth.js';
 import { frameImage, SeestarImageStream, type Frame, type GrabKind } from './image-stream.js';
@@ -39,6 +40,12 @@ const PARK_TIMEOUT_MS = 3 * 60_000;
 const SOLVE_TIMEOUT_MS = 2 * 60_000;
 const POLAR_TIMEOUT_MS = 10 * 60_000;
 const FOCUS_MOVE_TIMEOUT_MS = 60_000;
+/** a live view the scope did not keep is not started again sooner than this */
+const LIVE_VIEW_RETRY_MS = 20_000;
+/** the Sun above this (degrees) is daytime: the view runs in scenery mode, not star mode */
+const SCENERY_SUN_ALT_DEG = -6;
+/** a plain slew comes no closer to the Sun than this (the GoTo route's limit) */
+const SUN_SLEW_MIN_DEG = 15;
 /** the joystick command's own limit */
 export const NUDGE_MAX_S = 10;
 export const NUDGE_MAX_SPEED = 1500;
@@ -106,6 +113,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   private pollTimer: NodeJS.Timeout | null = null;
   private emitTimer: NodeJS.Timeout | null = null;
   private started = false;
+  private liveViewAt = 0;
 
   constructor(o: SeestarOptions = {}) {
     super();
@@ -349,6 +357,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       if (onDrop) this.rpc.off('disconnected', onDrop);
       this.operation = null;
       this.changed();
+      // the events do not carry everything an operation changed (the arm leaving park, the view stopping)
+      if (this.rpc.usable) void this.refreshState().catch(() => {});
     }
   }
 
@@ -391,9 +401,58 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return { goto: r, stacking: 'started' };
   }
 
-  /** Live view without a target (ContinuousExposure). */
-  startView(lpFilter = false): Promise<RpcResponse> {
-    return this.call('iscope_start_view', { mode: 'star', lp_filter: lpFilter });
+  /**
+   * Slew to a sky position without plate solving or centring (scope_goto), followed to the scope's
+   * ScopeGoto end. Refused within SUN_SLEW_MIN_DEG of the Sun and below the horizon.
+   */
+  async slewTo(raHours: number, decDeg: number): Promise<OperationResult> {
+    const site = this.requireLocation();
+    const where = altAz(site, raHours, decDeg);
+    if (where.altitude < 0) throw new Error(`refusing to slew below the horizon (altitude ${where.altitude.toFixed(1)}°)`);
+    const sun = bodyRaDec(site, 'Sun');
+    const sep = separationDeg(raHours, decDeg, sun.raHours, sun.decDeg);
+    if (bodyAlt(site, 'Sun') > -1 && sep < SUN_SLEW_MIN_DEG) throw new Error(`refusing to slew ${sep.toFixed(0)}° from the Sun (the limit is ${SUN_SLEW_MIN_DEG}°)`);
+    if (this.st.mount.parked) await this.openArm();
+    return Seestar.ok('slew', await this.follow('slew', ['ScopeGoto'], () => this.call('scope_goto', [raHours, decDeg]), GOTO_TIMEOUT_MS, () => true));
+  }
+
+  /** Slew to an azimuth and altitude (true, degrees) now. */
+  slewAltAz(azDeg: number, altDeg: number): Promise<OperationResult> {
+    const p = raDecFromAltAz(this.requireLocation(), azDeg, altDeg);
+    return this.slewTo(p.raHours, p.decDeg);
+  }
+
+  /** Live view without a target: star mode at night, scenery while the Sun is up. */
+  startView(lpFilter = false, mode: 'star' | 'scenery' = this.viewMode()): Promise<RpcResponse> {
+    return this.call('iscope_start_view', mode === 'star' ? { mode, lp_filter: lpFilter } : { mode });
+  }
+
+  private viewMode(): 'star' | 'scenery' {
+    const site = this.location();
+    return site && bodyAlt(site, 'Sun') > SCENERY_SUN_ALT_DEG ? 'scenery' : 'star';
+  }
+
+  private viewing(): boolean {
+    const v = this.st.view;
+    return !!v.state && !TERMINAL_STATES.has(v.state) && v.state !== 'idle' && v.mode !== 'none';
+  }
+
+  /**
+   * The RTSP streams carry video only while the scope runs a view. A viewer of the live video gets
+   * one started (the Dwarf's streams are always on), unless the arm is parked or the scope is busy.
+   * Returns why there is no video when it does not start one, or null.
+   */
+  async ensureLiveView(): Promise<string | null> {
+    if (!this.rpc.usable || this.st.released) return 'the telescope is not connected';
+    if (this.st.mount.parked) return 'the arm is parked: open it (Home) and live video starts';
+    if (this.viewing() || this.operation) return null;
+    if (Date.now() - this.liveViewAt < LIVE_VIEW_RETRY_MS) return null;
+    this.liveViewAt = Date.now();
+    const mode = this.viewMode();
+    log.info(`starting a ${mode} view for the live video`);
+    await this.startView(false, mode);
+    await this.refreshState().catch(() => {});
+    return null;
   }
 
   startStack(restart = false): Promise<RpcResponse> {
@@ -525,6 +584,40 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
 
   async settings(): Promise<unknown> {
     return (await this.call('get_setting')).result;
+  }
+
+  /**
+   * The view mode: scenery (daytime), star (deep sky), moon, planet. The Sun is refused: a remote
+   * scope cannot tell whether its solar filter is fitted. "moon" and "planet" are sent by name,
+   * never as a bare solar_sys, which the scope takes as the Sun.
+   */
+  async setViewMode(mode: 'scenery' | 'star' | 'moon' | 'planet'): Promise<RpcResponse> {
+    if (this.operation) throw new Error(`cannot change the view mode: ${this.operation} is running`);
+    if (this.viewing()) await this.stopView();
+    const r = await this.call('iscope_start_view', mode === 'star' ? { mode, lp_filter: false } : { mode });
+    this.liveViewAt = Date.now();
+    await this.refreshState().catch(() => {});
+    return r;
+  }
+
+  /** Record the tele camera's video to the scope's storage (MyWorks/Scenery_video, …). */
+  async record(on: boolean): Promise<RpcResponse> {
+    if (on && this.st.mount.parked) throw new Error('the arm is parked: open it (Home) to record');
+    if (on && !this.viewing()) await this.startView();
+    return this.call(on ? 'start_record_avi' : 'stop_record_avi', on ? { raw: false } : undefined);
+  }
+
+  /** The tilt sensor: angle from level (on an EQ wedge, about 90° minus the latitude it is set for). */
+  async level(): Promise<{ tiltDeg: number; x: number; y: number; z: number }> {
+    const r = await this.call('get_device_state', { keys: ['balance_sensor'] });
+    const d = (r.result as { balance_sensor?: { data?: Record<string, number> } })?.balance_sensor?.data;
+    if (!d || typeof d.angle !== 'number') throw new Error('the Seestar reported no tilt reading');
+    return { tiltDeg: d.angle, x: d.x, y: d.y, z: d.z };
+  }
+
+  /** The scope's indicator light, 0 (off: kind to a shared observatory) to 100. */
+  setLightBrightness(pct: number): Promise<RpcResponse> {
+    return this.call('set_setting', { light_brightness: Math.max(0, Math.min(100, Math.round(pct))) });
   }
 
   power(action: 'shutdown' | 'reboot'): Promise<RpcResponse> {

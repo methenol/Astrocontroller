@@ -3,30 +3,64 @@
  * tunnel when SEESTAR_CONNECTION=zwo), its MCP tools, the shared web UI through its adapter, its
  * live views and the duty loop.
  *
- * The Dwarf's own services (travel guard, stack supervisor, charge watch) speak the Dwarf's
- * protocol and are not part of this driver.
+ * Its storage (sessions, album, transfers into the library) is registered for the library at
+ * creation (library.ts).
  */
 import type http from 'node:http';
 import type { Express } from 'express';
 import { config } from '../../config.js';
 import { DutyLoop } from '../../agent/duty.js';
+import { setDeviceLibrary } from '../../library/device-library.js';
+import { cancelActiveJobs, listDeviceSessions, transferSession } from '../../library/transfer.js';
+import { StarfrontNights } from '../../agent/starfront.js';
+import { TERMINAL_STATES } from './state.js';
 import { mountWeb } from '../../web/server.js';
 import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
 import { Seestar } from './device.js';
 import { seestarDuty } from './duty.js';
 import { seestarMcpSpec } from './mcp.js';
-import { seestarWeb } from './web.js';
+import { seestarMedia, seestarWeb } from './web.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const scope = new Seestar();
   const duty = new DutyLoop(seestarDuty(scope), agent);
-  const web = seestarWeb(scope);
+  const media = seestarMedia(scope);
+  setDeviceLibrary(media.storage);
+  // Starfront's autonomous nights: only with STARFRONT_REMOTE_ZWO on a scope over ZWO Telescope Network
+  const nights = config.starfront.available
+    ? new StarfrontNights({
+        duty,
+        site: () => scope.requireLocation(),
+        stacking: {
+          on: (e, f) => scope.on(e, f),
+          off: (e, f) => scope.off(e, f),
+          current: () => {
+            const s = scope.state.stack.state;
+            return { stacking: !!s && !TERMINAL_STATES.has(s) && s !== 'idle', target: scope.state.view.target };
+          },
+        },
+        transferTarget: async (target) => {
+          const { sessions } = await listDeviceSessions(false);
+          const todo = sessions.filter((s) => s.target === target && !s.transferred);
+          for (const s of todo) await transferSession(s.folder, { includeSubframes: true, includeCalibration: true, origin: 'agent' });
+          return todo.length ? `${todo.length} session(s) queued (${todo.map((s) => s.folder).join(', ')})` : 'nothing left to transfer';
+        },
+      })
+    : null;
+  const web = seestarWeb(scope, media, nights);
   return {
     device: scope,
-    mcp: seestarMcpSpec(scope, duty),
+    mcp: seestarMcpSpec(scope, duty, media, nights),
     mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: web, agent, duty }),
-    start: () => scope.start(),
+    start: () => {
+      scope.start();
+      nights?.start();
+    },
     shutdownSteps: () => [
+      ['transfers', () => void cancelActiveJobs()],
+      ['starfront', () => nights?.stop()],
+      ['timelapse', () => media.capture.stop()],
+      ['survey', () => void media.survey.stop()],
       ['streams', () => web.hub.shutdown()],
       ['duty', () => duty.dispose()],
       ['telescope link', () => scope.stop()],

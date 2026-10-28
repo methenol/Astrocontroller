@@ -2,6 +2,7 @@
 import { $, toast, fmtClock } from './dom.js';
 import { api } from './api.js';
 import { state } from './state.js';
+import { on } from './bus.js';
 
 const DEFAULT_INTERVAL_MIN = 5;
 
@@ -65,4 +66,57 @@ $('#duty-form').onsubmit = async (e) => {
   if (!(await dutyApi({ action: 'start', objective, until, intervalS }))) return;
   $('#duty-form').hidden = true;
   $('#duty-objective').value = '';
+};
+
+// ---- autonomous Starfront nights: offered only when the server says so (STARFRONT_REMOTE_ZWO over ZWO Telescope Network)
+const NIGHTS_POLL_MS = 60_000;
+let nightsTimer = null;
+
+function renderNights(n) {
+  const btn = $('#btn-auto-nights');
+  const line = $('#auto-nights-text');
+  state.starfront = n;
+  btn.textContent = `Autonomous nights: ${n.enabled ? 'on' : 'off'}`;
+  btn.classList.toggle('on', !!n.enabled);
+  const roof = `roof${n.building ? ` (building ${n.building})` : n.candidates ? ` (building unknown: ${n.candidates.length} candidates)` : ''} ${n.roof}`;
+  const win = n.window?.astroDusk ? `dark ${n.window.astroDusk} → ${n.window.astroDawn}` : '';
+  line.textContent = n.enabled ? [n.phase, roof, win, n.roofError ? `roof status unavailable: ${n.roofError}` : ''].filter(Boolean).join(' · ') : '';
+  line.hidden = !n.enabled;
+}
+
+async function loadNights() {
+  try {
+    renderNights(await api('starfront'));
+  } catch {
+    /* shown again on the next poll */
+  }
+}
+
+on('config', (c) => {
+  const offered = !!c?.starfront;
+  $('#btn-auto-nights').hidden = !offered;
+  if (!offered) {
+    $('#auto-nights-text').hidden = true;
+    if (nightsTimer) clearInterval(nightsTimer);
+    nightsTimer = null;
+    return;
+  }
+  if (!nightsTimer) {
+    nightsTimer = setInterval(loadNights, NIGHTS_POLL_MS);
+    loadNights();
+  }
+});
+
+$('#btn-auto-nights').onclick = async () => {
+  const on = !state.starfront?.enabled;
+  const what = on
+    ? 'Turn on autonomous Starfront nights?\n\nEvery night the roof over the scope opens, the agent is put on duty until astronomical dawn: it images targets from the planner from astronomical dark, transfers each target when it moves to the next, and at dawn transfers the last one and stows the arm. ' +
+      'A roof still reported closed at the roof-check time (19:00 unless set otherwise) is checked with the telescope. It stays on across nights until you turn it off.'
+    : 'Turn off autonomous Starfront nights?\n\nA night already on duty continues until you stop the duty.';
+  if (!confirm(what)) return;
+  try {
+    renderNights(await api('starfront', { enabled: on }));
+  } catch (e) {
+    toast(e.message, true);
+  }
 };

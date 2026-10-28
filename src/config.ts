@@ -64,6 +64,19 @@ export const config = {
       readyTimeoutS: env.num('SEESTAR_TUNNEL_READY_TIMEOUT_S', 180, { min: 10, max: 1800 }),
     },
   },
+  /**
+   * Starfront Observatories' autonomous nights (agent/starfront.ts): offered only with
+   * STARFRONT_REMOTE_ZWO=true on a Seestar over ZWO Telescope Network.
+   */
+  starfront: {
+    available: env.bool('STARFRONT_REMOTE_ZWO', false) && driver === 'seestar' && seestarConnection === 'zwo',
+    /** the building the scope is in (its roof is followed); 0 = unknown: any roof, confirmed by the telescope */
+    building: env.num('STARFRONT_BUILDING', 0, { min: 0, max: 100, int: true }),
+    roofUrl: env.str('STARFRONT_ROOF_URL', 'https://alpaca-api.tx.starfront.space/api/v1/roof/state'),
+    /** local time at which a roof still reported closed is checked with the telescope */
+    roofCheckTime: env.str('STARFRONT_ROOF_CHECK_TIME', '19:00'),
+    pollS: env.num('STARFRONT_POLL_S', 60, { min: 15, max: 900 }),
+  },
   dwarf: {
     host: env.host('DWARF_HOST', '192.168.88.1'),
     wsPort: env.port('DWARF_WS_PORT', 9900),

@@ -234,7 +234,9 @@
         <button type="button" class="ghost" id="btn-duty-wake" hidden title="Send the next sample now">Wake now</button>
         <button type="button" class="ghost" id="btn-duty-pause" hidden>Pause</button>
         <button type="button" class="ghost" id="btn-duty" title="Put the agent on duty: it is woken with fresh measurements every few minutes and on events until the end time">Start duty…</button>
+        <button type="button" class="ghost" id="btn-auto-nights" hidden title="Autonomous Starfront nights: every night the roof opens, the agent images targets from the planner from astronomical dark to dawn, transfers them and stows the arm; it can be left on for days or weeks">Autonomous nights: off</button>
       </div>
+      <div class="duty-text auto-nights-text" id="auto-nights-text" hidden></div>
       <form class="duty-form" id="duty-form" hidden>
         <textarea id="duty-objective" rows="2" placeholder="Objective, in your words: e.g. Image M 42 until dawn, then transfer and process it"></textarea>
         <div class="duty-form-row">

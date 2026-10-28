@@ -12,7 +12,13 @@ import { sharpnessLine, starSharpness } from '../../media/focus.js';
 import { body, route } from '../../web/http.js';
 import { unsupported, type Capabilities, type GotoTarget, type WebTelescope } from '../../web/telescope.js';
 import type { ControlAction } from '../../web/routes/control.js';
+import { SeestarCapture } from './capture.js';
 import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
+import { SeestarFiles } from './files.js';
+import { seestarFocusSweep } from './focus.js';
+import { seestarLibrary, type SeestarStorage } from './library.js';
+import { SeestarSurvey } from './survey.js';
+import type { StarfrontNights } from '../../agent/starfront.js';
 import { NOMINAL_FOV } from './mcp.js';
 import { TERMINAL_STATES, type OperationState, type SeestarState } from './state.js';
 import type { SeestarEvent } from './rpc.js';
@@ -24,33 +30,33 @@ const LABEL = 'ZWO Seestar';
 const CAPABILITIES: Capabilities = {
   nudge: true,
   home: true,
-  level: false,
+  level: true,
   park: true,
   goto: true,
-  photo: false,
-  burst: false,
-  record: false,
-  timelapse: false,
+  photo: true,
+  burst: true,
+  record: true,
+  timelapse: true,
   stack: true,
   autofocus: true,
-  autofocusAstro: false,
+  autofocusAstro: true,
   focusSteps: true,
   starFocus: true,
-  starTune: false,
+  starTune: true,
   polarAlign: true,
-  modes: false,
+  modes: true,
   exposure: true,
   gain: true,
   sync: true,
   liveView: true,
-  rgb: false,
+  rgb: true,
   reboot: true,
   shutdown: true,
-  album: false,
-  sessions: false,
-  transfer: false,
-  horizonSurvey: false,
-  wire: false,
+  album: true,
+  sessions: true,
+  transfer: true,
+  horizonSurvey: true,
+  wire: true,
   video: ['tele', 'wide', 'stack'],
 };
 
@@ -76,6 +82,21 @@ function linkView(st: SeestarState): { state: string; detail: string; health: Se
   return { state: 'connecting', detail: `connecting to the Seestar at ${where}${l?.lastError ? `: ${l.lastError}` : ''}`, health: l };
 }
 
+/** The UI's shooting modes (the Dwarf's names) and the Seestar view modes they are. */
+const MODES: Record<string, 'scenery' | 'star' | 'moon' | 'planet' | 'sun'> = { normal: 'scenery', dso: 'star', moon: 'moon', planet: 'planet', sun: 'sun' };
+
+/** The view the scope runs, as the UI's mode name. */
+function modeName(v: SeestarState['view']): string | undefined {
+  if (!v.mode || v.mode === 'none' || (v.state && TERMINAL_STATES.has(v.state))) return undefined;
+  if (v.mode === 'scenery') return 'Normal';
+  if (v.mode === 'star') return 'DSO';
+  if (v.mode === 'solar_sys' || v.mode === 'moon' || v.mode === 'planet' || v.mode === 'sun') {
+    const t = v.targetType ?? (v.mode === 'solar_sys' ? undefined : v.mode);
+    return t === 'moon' ? 'Moon' : t === 'planet' ? 'Planet' : t === 'sun' ? 'Sun' : undefined;
+  }
+  return undefined;
+}
+
 const gb = (mb: number | undefined) => (mb === undefined ? undefined : +(mb / 1024).toFixed(1));
 
 /** The Seestar's state in the UI's field names; the fields it has no equivalent of are left out. */
@@ -97,6 +118,7 @@ export function projectState(st: SeestarState, busy: string | null): WebTelescop
     temperatureC: st.power.tempC,
     operation,
     bodyMode: st.mount.eqMode === undefined ? undefined : st.mount.eqMode ? 'eq' : 'altaz',
+    shootingMode: modeName(st.view) ? { name: modeName(st.view) } : undefined,
     storage: st.storage.totalMB !== undefined ? { availableGB: gb(st.storage.freeMB) ?? 0, totalGB: gb(st.storage.totalMB) ?? 0 } : undefined,
     goto: { state: opWord(st.ops.AutoGoto), target },
     tracking: { state: st.mount.tracking === undefined ? 'idle' : st.mount.tracking ? 'running' : 'idle', target: st.mount.tracking ? target : undefined },
@@ -109,6 +131,8 @@ export function projectState(st: SeestarState, busy: string | null): WebTelescop
       wide: { state: 'idle' },
     },
     polarAlign: st.polarAlign,
+    focusTune: st.focusTune,
+    horizonSurvey: st.horizonSurvey,
     pointing: target && raDec ? { target, raHours: raDec[0], decDeg: raDec[1], at: st.ops.AutoGoto?.at ?? Date.now() } : undefined,
     mount: st.mount,
     alert: st.alert,
@@ -126,8 +150,23 @@ function exposureMs(v: string | number | boolean): number {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export function seestarWeb(scope: Seestar): WebTelescope {
+/** The live views and photo capture, shared by the web UI and the agent's tools. */
+export interface SeestarMedia {
+  hub: SeestarVideoHub;
+  capture: SeestarCapture;
+  /** its storage (sessions, album, transfers), registered for the library by the runtime */
+  storage: SeestarStorage;
+  survey: SeestarSurvey;
+}
+
+export function seestarMedia(scope: Seestar): SeestarMedia {
   const hub = new SeestarVideoHub(scope, () => config.seestar.host);
+  const media: SeestarMedia = { hub, capture: new SeestarCapture(scope, (camera) => hub.get(camera)), storage: seestarLibrary(new SeestarFiles(scope)), survey: null as unknown as SeestarSurvey };
+  media.survey = new SeestarSurvey(scope, media);
+  return media;
+}
+
+export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedia = seestarMedia(scope), nights: StarfrontNights | null = null): WebTelescope {
 
   const control = async (b: ControlAction): Promise<unknown> => {
     switch (b.action) {
@@ -147,6 +186,54 @@ export function seestarWeb(scope: Seestar): WebTelescope {
         return { result: (await scope.openArm()).state };
       case 'park':
         return { result: (await scope.park()).state };
+      case 'level': {
+        const l = await scope.level();
+        return { result: `Tilt ${l.tiltDeg.toFixed(1)}° from level${scope.state.mount.eqMode ? ` (EQ mode: a wedge set for latitude ${(90 - l.tiltDeg).toFixed(1)}°; the site is at ${scope.location()?.lat.toFixed(1) ?? '?'}°)` : ''}`, ...l };
+      }
+      case 'photo':
+        return { item: await capture.photo(b.camera === 'wide' ? 'wide' : 'tele') };
+      case 'burst':
+        return { result: await capture.burst(b.camera === 'wide' ? 'wide' : 'tele', b.count) };
+      case 'record':
+        if (b.camera === 'wide') throw unsupported({ label: LABEL }, 'Recording the wide camera');
+        await scope.record(b.on !== false);
+        return { result: b.on !== false ? 'Recording the tele camera to the Seestar (MyWorks/Scenery_video)' : 'Recording stopped: the video is in the Album' };
+      case 'timelapse':
+        return { result: await capture.timelapse(b.camera === 'wide' ? 'wide' : 'tele', b.on !== false, b.intervalS, b.totalS) };
+      case 'mode': {
+        const mode = MODES[b.mode.trim().toLowerCase()];
+        if (!mode) throw unsupported({ label: LABEL }, `The ${b.mode} mode`);
+        if (mode === 'sun') throw new Error('Sun mode is refused remotely: it is only safe with the solar filter fitted, which nobody can check from here');
+        await scope.setViewMode(mode);
+        return { result: `Mode ${b.mode}` };
+      }
+      case 'rgb':
+        await scope.setLightBrightness(b.on ? 100 : 0);
+        return { result: `Indicator light ${b.on ? 'on' : 'off'}` };
+      case 'star_sweep': {
+        const startedAt = Date.now();
+        scope.state.focusTune = { running: true, startedAt, message: 'starting…' };
+        scope.changed();
+        try {
+          const r = await seestarFocusSweep(scope, {
+            center: b.center,
+            range: b.range,
+            step: b.step,
+            apply: b.apply !== false,
+            onProgress: (smp, i, n) => {
+              scope.state.focusTune = { running: true, startedAt, message: `${i + 1}/${n} at ${smp.position}: ${smp.error ?? `HFR ${smp.hfrPx.toFixed(2)} px`}` };
+              scope.changed();
+            },
+          });
+          scope.state.focusTune = { running: false, startedAt, finishedAt: Date.now(), message: r.verdict };
+          return { result: [r.verdict, ...r.notes].join(' — '), ...r };
+        } catch (e) {
+          scope.state.focusTune = { running: false, startedAt, finishedAt: Date.now(), message: `failed: ${(e as Error).message}` };
+          throw e;
+        } finally {
+          scope.changed();
+        }
+      }
       case 'stack_start':
         await scope.startStack();
         return { result: 'Live stacking started' };
@@ -154,6 +241,7 @@ export function seestarWeb(scope: Seestar): WebTelescope {
         await scope.stopStack();
         return { ok: true };
       case 'autofocus':
+        // the Seestar's autofocus is a star autofocus: the astro one is the same
         return { result: `autofocus ${(await scope.autofocus()).state}` };
       case 'focus': {
         const at = await scope.focusBy(b.direction === 'near' ? -b.steps : b.steps);
@@ -199,7 +287,7 @@ export function seestarWeb(scope: Seestar): WebTelescope {
         return { result: 'Shutdown sent' };
       default:
         // the route checks the capabilities first; this is a control the table above marks unsupported
-        throw unsupported({ label: LABEL }, `"${b.action}"`);
+        throw unsupported({ label: LABEL }, `"${(b as { action: string }).action}"`);
     }
   };
 
@@ -218,6 +306,15 @@ export function seestarWeb(scope: Seestar): WebTelescope {
     api.get('/seestar/tunnel', route(async () => scope.tunnel?.status() ?? null));
     api.post('/seestar/tunnel/restart', route(async () => scope.tunnel?.restart()));
     api.get('/seestar/zwo-devices', route(async () => listDevices()));
+    // Starfront's autonomous nights (agent tab), when STARFRONT_REMOTE_ZWO offers them
+    api.get('/starfront', route(async () => nights?.status() ?? { available: false }));
+    api.post(
+      '/starfront',
+      route(async (req) => {
+        if (!nights) throw unsupported({ label: LABEL }, 'Autonomous Starfront nights (STARFRONT_REMOTE_ZWO=true, over ZWO Telescope Network)');
+        return nights.setEnabled(body(req, z.object({ enabled: z.boolean() })).enabled);
+      }),
+    );
     api.post(
       '/seestar/rpc',
       route(async (req) => {
@@ -264,6 +361,12 @@ export function seestarWeb(scope: Seestar): WebTelescope {
     control,
     goto,
     routes,
+    wireLines: (n, o) => scope.rpc.wireLines(n, o),
+    horizonSurvey: {
+      start: async () => ({ summary: (await survey.run()).summary }),
+      stop: async () => survey.stop(),
+      assertAllowed: () => survey.assertAllowed(),
+    },
     on: (event, fn) => scope.on(event === 'state' ? 'state' : 'event', wrap(event, fn)),
     off: (event, fn) => {
       const w = listeners.get(fn);

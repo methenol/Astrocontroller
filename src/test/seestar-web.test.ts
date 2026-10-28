@@ -137,13 +137,15 @@ describe('Seestar behind the shared web UI', () => {
   test('a control the Seestar has no equivalent of is refused with 501 and the reason, and nothing is sent', async () => {
     const { stub, web } = make();
     await withControl(web, async (post) => {
-      for (const action of ['photo', 'record', 'level', 'rgb']) {
-        const r = await post({ action });
-        assert.equal(r.status, 501, action);
+      for (const body of [{ action: 'record', camera: 'wide', on: true }, { action: 'mode', mode: 'Panorama' }, { action: 'mode', mode: 'Star Trail' }]) {
+        const r = await post(body);
+        assert.equal(r.status, 501, JSON.stringify(body));
         assert.match(String(r.body.error), /not available on the ZWO Seestar/);
       }
-      const af = await post({ action: 'autofocus', mode: 'astro' });
-      assert.equal(af.status, 501);
+      // the Sun is refused outright, remotely
+      const sun = await post({ action: 'mode', mode: 'Sun' });
+      assert.notEqual(sun.status, 200);
+      assert.match(String(sun.body.error), /solar filter/);
       assert.deepEqual(stub.calls, []);
     });
   });
@@ -173,6 +175,8 @@ describe('Seestar behind the shared web UI', () => {
     for (const [k, v] of Object.entries(dwarf.capabilities)) if (k !== 'video') assert.equal(v, true, k);
     assert.deepEqual(Object.keys(web.capabilities).sort(), Object.keys(dwarf.capabilities).sort());
     assert.deepEqual(web.capabilities.video, ['tele', 'wide', 'stack']);
+    // parity: the Seestar does everything the Dwarf does
+    for (const [k, v] of Object.entries(web.capabilities)) if (k !== 'video') assert.equal(v, true, k);
     web.hub.shutdown();
   });
 });

@@ -1,0 +1,343 @@
+/**
+ * Autonomous nights at Starfront Observatories: left on for days or weeks, it puts the agent on a
+ * night's duty whenever the roof over the scope opens, and lets it rest otherwise.
+ *
+ * - The roof: Starfront's own roof API (the one status.starfront.space reads), polled every
+ *   STARFRONT_POLL_S. STARFRONT_BUILDING names the building the scope is in; without it any open
+ *   roof counts, and the telescope confirms its own (below).
+ * - Roof opens after sunset (and before the darkness ends): a duty starts until astronomical dawn,
+ *   with the night's objective: image targets from the planner from astronomical dark, maximising
+ *   integration. The duty's own END wake at dawn stops, transfers and parks (the driver's close-out).
+ * - The roof closes during the night: the agent is told at once (stop stacking, park); it reopens:
+ *   told again (carry on).
+ * - At STARFRONT_ROOF_CHECK_TIME (19:00) a roof still reported closed is checked with the telescope:
+ *   the agent is woken to look (open the arm, point up, look with the wide camera) and reports with
+ *   starfront_roof; open starts the night's duty.
+ * - When the next target starts stacking, the previous target's untransferred sessions are
+ *   transferred (processing queues itself after each).
+ *
+ * A night is started once; a user's own duty is never replaced.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { config, type ObserverLocation } from '../config.js';
+import { errMsg, logger } from '../log.js';
+import * as sky from '../astro/sky.js';
+import { writeFileAtomic } from '../util/fs.js';
+import { SafeEmitter } from '../util/events.js';
+import type { DutyLoop } from './duty.js';
+
+const log = logger('starfront');
+
+export interface Roof {
+  device_number: number;
+  name: string;
+  is_open: boolean;
+  state_update?: string;
+}
+
+export const NIGHT_OBJECTIVE = [
+  'Autonomous Starfront night: the roof is open. Image targets from the planner until astronomical dawn, maximising integration time.',
+  '1. seestar_status; open_arm if parked. If you were woken because a roof opened and the building is not known, first confirm the sky with view_camera camera=wide pointed up and report it with starfront_roof.',
+  '2. Before astronomical dark: plan_targets and choose the first target for its best hours; nothing is stacked before astronomical dark.',
+  '3. From astronomical dark: goto_target, autofocus, star_focus, start_stacking. Move to the next target from plan_targets when the current one leaves its best hours or is blocked (tele_visibility), so the night is spent on the targets in their optimal time, favouring those that need more integration. The previous target is transferred automatically when the next starts stacking.',
+  '4. If you are told the roof closed: stop_stacking and park at once, then wait (duty next_check 900). When it reopens, carry on from step 3.',
+  '5. At astronomical dawn the duty ends: stop stacking, transfer the night\'s sessions not yet transferred, park.',
+].join('\n');
+
+export const ROOF_CHECK_PROMPT = (time: string) =>
+  `Starfront roof check (${time}): the roof status still says closed. Check the roof over the scope with the telescope: open_arm, move_motors altitude_deg=70, then view_camera camera=wide (and sky_check). Open sky (twilight or stars) = open; a dark ceiling, rafters or the inside of the building = closed. Report it with starfront_roof action=report open=true|false; if closed, park again. Open starts tonight's imaging duty.`;
+
+interface NightRecord {
+  /** the duty was started, and why */
+  engagedAt?: number;
+  engagedBy?: string;
+  /** the telescope roof check was asked for */
+  checkedAt?: number;
+  checkResult?: 'open' | 'closed';
+}
+
+interface Persisted {
+  enabled: boolean;
+  /** buildings the scope may be in, learned from the telescope's roof checks (when STARFRONT_BUILDING is unset) */
+  candidates?: number[];
+  nights: Record<string, NightRecord>;
+}
+
+export interface StarfrontStatus {
+  available: boolean;
+  enabled: boolean;
+  building: number | null;
+  candidates: number[] | null;
+  roof: 'open' | 'closed' | 'unknown';
+  roofAt: number | null;
+  roofError: string | null;
+  night: string;
+  window: { sunset: string | null; astroDusk: string | null; astroDawn: string | null };
+  phase: string;
+  tonight: NightRecord;
+}
+
+export interface StarfrontDeps {
+  duty: Pick<DutyLoop, 'start' | 'event' | 'status'>;
+  site: () => ObserverLocation;
+  /** the scope's stacking, for the transfer of the previous target */
+  stacking?: { on(e: 'state', f: () => void): unknown; off(e: 'state', f: () => void): unknown; current(): { stacking: boolean; target?: string } };
+  /** transfer a target's sessions not yet in the library; returns what was queued */
+  transferTarget?: (target: string) => Promise<string>;
+  fetchRoofs?: () => Promise<Roof[]>;
+  now?: () => number;
+  file?: string;
+  building?: number;
+  checkTime?: string;
+  pollS?: number;
+}
+
+async function fetchRoofs(): Promise<Roof[]> {
+  const res = await fetch(config.starfront.roofUrl, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) throw new Error(`roof status HTTP ${res.status}`);
+  const body = (await res.json()) as unknown;
+  if (!Array.isArray(body)) throw new Error('roof status is not a list');
+  return body.filter((r): r is Roof => !!r && typeof r === 'object' && typeof (r as Roof).device_number === 'number' && typeof (r as Roof).is_open === 'boolean');
+}
+
+/** "HH:MM" in the observer's zone, now. */
+function localHm(at: number): string {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: config.observer.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(at));
+}
+
+export class StarfrontNights extends SafeEmitter {
+  private st: Persisted;
+  private timer: NodeJS.Timeout | null = null;
+  private roofs: Roof[] | null = null;
+  private roofAt: number | null = null;
+  private roofError: string | null = null;
+  private wasOpen: boolean | null = null;
+  private lastStackTarget: string | undefined;
+  private wasStacking = false;
+  private readonly now: () => number;
+  private readonly file: string;
+  private readonly onScope = () => this.followStacking();
+
+  constructor(private readonly d: StarfrontDeps) {
+    super();
+    this.now = d.now ?? Date.now;
+    this.file = d.file ?? path.join(config.paths.data, 'starfront.json');
+    this.st = this.load();
+  }
+
+  private get building(): number {
+    return this.d.building ?? config.starfront.building;
+  }
+
+  private load(): Persisted {
+    try {
+      const v = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Persisted;
+      return { enabled: !!v.enabled, candidates: v.candidates, nights: v.nights ?? {} };
+    } catch {
+      return { enabled: false, nights: {} };
+    }
+  }
+
+  private save(): void {
+    // a fortnight of nights is plenty for the record
+    const keys = Object.keys(this.st.nights).sort();
+    for (const k of keys.slice(0, Math.max(0, keys.length - 14))) delete this.st.nights[k];
+    try {
+      writeFileAtomic(this.file, JSON.stringify(this.st, null, 2));
+    } catch (e) {
+      log.warn(`could not save ${this.file}: ${errMsg(e)}`);
+    }
+    this.emit('status', this.status());
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.tick(), (this.d.pollS ?? config.starfront.pollS) * 1000);
+    this.timer.unref?.();
+    this.d.stacking?.on('state', this.onScope);
+    void this.tick();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.d.stacking?.off('state', this.onScope);
+  }
+
+  setEnabled(on: boolean): StarfrontStatus {
+    this.st.enabled = on;
+    log.info(`autonomous Starfront nights ${on ? 'enabled' : 'disabled'}`);
+    this.save();
+    if (on) void this.tick();
+    return this.status();
+  }
+
+  /** The night a moment belongs to: the local date of its sunset. */
+  private nightOf(at: number): { key: string; w: ReturnType<typeof sky.nightWindow> } {
+    const w = sky.nightWindow(this.d.site(), new Date(at));
+    const ref = w.sunset ?? w.darkStart ?? new Date(at);
+    return { key: sky.localDate(ref, config.observer.timezone), w };
+  }
+
+  /** Our roof as the API reports it: the building's, or (unknown building) any of the candidates'. */
+  roofOpen(): boolean | null {
+    if (!this.roofs) return null;
+    if (this.building) {
+      const r = this.roofs.find((x) => x.device_number === this.building);
+      return r ? r.is_open : null;
+    }
+    const cands = this.st.candidates ?? this.roofs.map((r) => r.device_number);
+    const mine = this.roofs.filter((r) => cands.includes(r.device_number));
+    return mine.length ? mine.some((r) => r.is_open) : null;
+  }
+
+  async tick(): Promise<void> {
+    try {
+      this.roofs = await (this.d.fetchRoofs ?? fetchRoofs)();
+      this.roofAt = this.now();
+      this.roofError = null;
+    } catch (e) {
+      this.roofError = errMsg(e);
+      log.debug(`roof status: ${this.roofError}`);
+    }
+    if (!this.st.enabled) return;
+    const now = this.now();
+    const { key, w } = this.nightOf(now);
+    const night = (this.st.nights[key] ??= {});
+    const open = this.roofOpen();
+    const after = (d: Date | null) => !!d && now >= d.getTime();
+    const before = (d: Date | null) => !!d && now < d.getTime();
+    // the imaging night: from sunset (the roof may open in twilight) until the darkness ends
+    const inNight = after(w.sunset) && before(w.darkEnd);
+    const duty = this.d.duty.status();
+
+    // the roof changed during a night already started: tell the agent at once
+    if (night.engagedAt && this.wasOpen !== null && open !== null && open !== this.wasOpen && duty.status !== 'off') {
+      this.d.duty.event(
+        open ? 'the Starfront roof has REOPENED: carry on imaging from plan_targets (open_arm if parked)' : 'the Starfront roof is CLOSING: stop_stacking and park NOW, then wait for it to reopen',
+        false,
+      );
+    }
+    if (open !== null) this.wasOpen = open;
+
+    if (!inNight || night.engagedAt) {
+      this.publish();
+      return;
+    }
+    if (open === true) {
+      this.engage(key, night, this.building ? `the roof of building ${this.building} opened` : 'a Starfront roof opened (building not set: the telescope confirms it)');
+      return;
+    }
+    // the roof still says closed (or is unknown) at the check time of this night's evening: look with the telescope, once a night
+    const checkAt = this.d.checkTime ?? config.starfront.roofCheckTime;
+    if (!night.checkedAt && now >= sky.parseLocal(`${key}T${checkAt}`, config.observer.timezone).getTime()) {
+      night.checkedAt = now;
+      log.info(`roof reported ${open === null ? 'unknown' : 'closed'} at ${checkAt}: asking the agent to check it with the telescope`);
+      this.d.duty.event(ROOF_CHECK_PROMPT(localHm(now)), false);
+      this.save();
+      return;
+    }
+    this.publish();
+  }
+
+  private engage(key: string, night: NightRecord, why: string): void {
+    const duty = this.d.duty.status();
+    if (duty.status !== 'off') {
+      // never replace a duty someone else started; this night is counted as taken
+      night.engagedAt = this.now();
+      night.engagedBy = `not started: a duty was already ${duty.status} (${duty.objective?.slice(0, 80) ?? ''})`;
+      this.save();
+      return;
+    }
+    try {
+      this.d.duty.start({ objective: NIGHT_OBJECTIVE, until: 'dawn', by: 'user' });
+      night.engagedAt = this.now();
+      night.engagedBy = why;
+      log.info(`night ${key} started: ${why}`);
+    } catch (e) {
+      log.warn(`could not start the night's duty: ${errMsg(e)}`);
+    }
+    this.save();
+  }
+
+  /**
+   * The agent's roof check with the telescope. Open starts tonight's duty; either way, with the
+   * building unknown, the result narrows down which roof is the scope's.
+   */
+  report(open: boolean): StarfrontStatus {
+    const now = this.now();
+    const { key, w } = this.nightOf(now);
+    const night = (this.st.nights[key] ??= {});
+    night.checkResult = open ? 'open' : 'closed';
+    if (!this.building && this.roofs?.length) {
+      const all = this.roofs.map((r) => r.device_number);
+      const agree = this.roofs.filter((r) => r.is_open === open).map((r) => r.device_number);
+      const next = (this.st.candidates ?? all).filter((n) => agree.includes(n));
+      // a contradiction (no roof agrees): start over rather than lock onto nothing
+      this.st.candidates = next.length ? next : all;
+      if (next.length === 1) log.info(`the scope's roof is building ${next[0]} (learned from the telescope's roof checks)`);
+    }
+    if (open && !night.engagedAt && now < (w.darkEnd?.getTime() ?? 0)) this.engage(key, night, 'the telescope saw the roof open');
+    else this.save();
+    return this.status();
+  }
+
+  /** When the next target starts stacking, the previous target's sessions are transferred. */
+  private followStacking(): void {
+    if (!this.st.enabled || !this.d.stacking || !this.d.transferTarget) return;
+    const { stacking, target } = this.d.stacking.current();
+    if (stacking && !this.wasStacking && target) {
+      const prev = this.lastStackTarget;
+      if (prev && prev !== target) {
+        void this.d.transferTarget(prev).then(
+          (r) => this.d.duty.event(`${target} started stacking, so ${prev} is being transferred: ${r}`, true),
+          (e) => this.d.duty.event(`the transfer of ${prev} could not be started: ${errMsg(e)}`, true),
+        );
+      }
+      this.lastStackTarget = target;
+    }
+    this.wasStacking = stacking;
+  }
+
+  private publish(): void {
+    this.emit('status', this.status());
+  }
+
+  status(): StarfrontStatus {
+    const now = this.now();
+    let key = '';
+    let w: ReturnType<typeof sky.nightWindow> | null = null;
+    try {
+      ({ key, w } = this.nightOf(now));
+    } catch {
+      /* no location */
+    }
+    const tz = config.observer.timezone;
+    const open = this.roofOpen();
+    const night = (key && this.st.nights[key]) || {};
+    const duty = this.d.duty.status();
+    const phase = !this.st.enabled
+      ? 'off'
+      : night.engagedAt && duty.status !== 'off'
+        ? 'imaging night on duty'
+        : w?.sunset && now < w.sunset.getTime()
+          ? `waiting for the night (sunset ${sky.fmtTime(w.sunset, tz)})`
+          : open
+            ? 'roof open'
+            : `waiting for the roof to open${night.checkedAt ? '' : ` (telescope check at ${config.starfront.roofCheckTime})`}`;
+    return {
+      available: config.starfront.available,
+      enabled: this.st.enabled,
+      building: this.building || (this.st.candidates?.length === 1 ? this.st.candidates[0] : null),
+      candidates: this.building ? null : (this.st.candidates ?? null),
+      roof: open === null ? 'unknown' : open ? 'open' : 'closed',
+      roofAt: this.roofAt,
+      roofError: this.roofError,
+      night: key,
+      window: { sunset: w ? sky.fmtTime(w.sunset, tz) : null, astroDusk: w ? sky.fmtTime(w.astroDusk, tz) : null, astroDawn: w ? sky.fmtTime(w.astroDawn, tz) : null },
+      phase,
+      tonight: night,
+    };
+  }
+}

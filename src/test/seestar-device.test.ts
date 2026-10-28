@@ -55,7 +55,8 @@ describe('Seestar device', () => {
     assert.equal(scope.state.device.model, 'Seestar S30');
     assert.equal(scope.state.mount.parked, true);
     assert.deepEqual([scope.state.mount.raHours, scope.state.mount.decDeg, scope.state.mount.altDeg, scope.state.mount.azDeg], [1.5, 30, 45, 120]);
-    assert.ok(scope.state.fov && Math.abs(scope.state.fov.h - 2.13) < 0.01);
+    // portrait, as the frames are read: chip_size [1080, 1920] is width × height
+    assert.ok(scope.state.fov && Math.abs(scope.state.fov.h - 1.196) < 0.01 && Math.abs(scope.state.fov.v - 2.127) < 0.01);
     assert.deepEqual((scope.state.deviceState as { ap: unknown }).ap, { passwd: 'secret' });
     assert.equal(scope.driver, 'seestar');
   });
@@ -205,10 +206,15 @@ describe('Seestar MCP tools', () => {
       const reg = server.registerTool.bind(server);
       server.registerTool = ((name: string, ...rest: never[]) => (names.push(name), reg(name, ...(rest as [never, never])))) as typeof server.registerTool;
       // a name registered twice throws here
-      seestarMcpSpec(scope, duty).register(server);
+      const { seestarMedia } = await import('../drivers/seestar/web.js');
+      const media = seestarMedia(scope);
+      seestarMcpSpec(scope, duty, media).register(server);
+      media.hub.shutdown();
       for (const n of ['duty', 'show_in_stellarium', 'sky_conditions', 'weather_forecast', 'search_catalog', 'rest_target', 'list_library', 'processing_status', 'goto_target', 'plan_targets']) assert.ok(names.includes(n), n);
-      // the SD-card tools and the Dwarf's wide-camera sky check are the Dwarf's
-      for (const n of ['list_device_sessions', 'transfer_session', 'sky_check']) assert.ok(!names.includes(n), n);
+      // the Seestar's storage, album, camera and focus tools under the Dwarf's names
+      for (const n of ['list_device_sessions', 'transfer_session', 'transfer_files', 'list_album', 'view_image', 'analyze_image', 'analyze_subs', 'delete_album_items', 'take_photo', 'video_recording', 'timelapse', 'view_camera', 'stacking_status', 'star_sharpness', 'star_focus', 'dark_frames']) assert.ok(names.includes(n), n);
+      // and every other tool the Dwarf's agent has
+      for (const n of ['telescope_status', 'telescope_device_info', 'telescope_reconnect', 'sync_time_and_location', 'raw_command', 'device_switches', 'motor_position', 'move_motors', 'motors_home', 'stop_motion', 'stop_goto', 'focus_step', 'focus_position', 'tele_visibility', 'mark_blocked', 'calibrate', 'astro_recover', 'live_stacking', 'polar_alignment', 'track_sun_moon', 'track_object', 'sentry_mode', 'set_shooting_mode', 'get_camera_settings', 'set_camera_setting', 'sky_check', 'map_obstructions']) assert.ok(names.includes(n), n);
     } finally {
       duty.dispose();
     }

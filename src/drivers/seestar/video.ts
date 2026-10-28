@@ -87,7 +87,13 @@ export class SeestarCameraSource extends Source {
     }
     if (this.proc && this.procUrl !== this.url) this.stopReader();
     if (!this.proc) {
-      if (Date.now() >= this.nextAttemptAt) this.connect();
+      if (Date.now() >= this.nextAttemptAt) {
+        void this.scope.ensureLiveView().then(
+          (why) => why && (this.note = why),
+          (e) => log.warn(`${this.name}: could not start a view for live video: ${errMsg(e)}`),
+        );
+        this.connect();
+      }
       return;
     }
     const fresh = this.lastFrameAt > this.connectedAt;
@@ -162,7 +168,7 @@ export class SeestarCameraSource extends Source {
   }
 
   override stallHint(): string {
-    return [this.note, this.lastError && `RTSP: ${this.lastError}`, 'The Seestar serves live video while it is viewing (GoTo, live view or stacking).'].filter(Boolean).join(' ');
+    return [this.note, this.lastError && `RTSP: ${this.lastError}`, 'The Seestar serves live video while a view runs; one is started for you when the arm is open.'].filter(Boolean).join(' ');
   }
 }
 

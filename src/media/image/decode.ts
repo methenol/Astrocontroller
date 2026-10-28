@@ -38,6 +38,7 @@ export async function decode(buf: Buffer, source: string): Promise<FloatImage> {
   if (isFits(buf)) {
     const f = readFits(buf);
     const scale = fitsScale(f.data);
+    if (f.rgb) return { width: f.width, height: f.height, channels: 3, data: normalized(f.rgb, scale), linear: true, source, camera, header: f.header };
     // a frame under 2×2 has no complete Bayer cell: read it as mono rather than as an empty image
     if (f.bayer && f.width >= 2 && f.height >= 2) {
       const sp = superpixel(f);

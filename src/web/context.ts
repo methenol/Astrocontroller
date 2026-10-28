@@ -22,6 +22,8 @@ export function publicConfig(scope: WebTelescope) {
     driver: scope.driver,
     driverLabel: scope.label,
     capabilities: scope.capabilities,
+    // Starfront's autonomous nights: offered on the agent tab only when this is on
+    starfront: config.starfront.available,
     telescope: host.host,
     telescopeHost: host,
     observer: loc ? { ...loc, timezone: config.observer.timezone } : null,

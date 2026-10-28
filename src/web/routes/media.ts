@@ -5,6 +5,9 @@ import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { errMsg } from '../../log.js';
+import { deviceLibrary } from '../../library/device-library.js';
+import { decode } from '../../media/images.js';
+import { displayJpeg } from '../../mcp/tools/common.js';
 import * as library from '../../library/transfer.js';
 import * as processing from '../../processing/queue.js';
 import * as studio from '../../processing/studio.js';
@@ -20,6 +23,8 @@ const THUMB_MAX_ENTRIES = 300;
 const THUMB_BUDGET_BYTES = 64 * 1024 * 1024;
 /** The album viewer shows photos and stacked images, not whole videos (those are transferred). */
 const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
+/** the longer side of a FITS rendered for the album's full view */
+const FITS_VIEW_SIZE = 2048;
 /** A snapshot reuses a frame up to this old, and waits this long for a new one. */
 const SNAPSHOT_MAX_AGE_MS = 5000;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
@@ -85,14 +90,14 @@ const ProcessBody = z.object({
 });
 
 const AlbumDeleteBody = z.object({
-  /** album paths as the album lists them (/DWARF3/…) */
+  /** album paths as the album lists them (/DWARF3/…, /SEESTAR/…) */
   paths: z.array(z.string().min(1)).min(1).max(ALBUM_DELETE_MAX),
   /** only when the album has no entry for the path (1 photo … 5 panorama) */
   mediaType: z.number().int().min(1).max(5).optional(),
 });
 
 const SessionDeleteBody = z.object({
-  /** DWARF_RAW_… folders on the card */
+  /** session folders as the telescope lists them (DWARF_RAW_…, SEESTAR_RAW_…) */
   folders: z.array(z.string().min(1)).min(1).max(ALBUM_DELETE_MAX),
   /** delete even a session that is not complete in the library */
   force: z.boolean().optional(),
@@ -113,8 +118,8 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
   const need = (cap: keyof Capabilities, what: string) => {
     if (!scope.capabilities[cap]) throw unsupported(scope, what);
   };
-  // the SD-card album and its files are the Dwarf's HTTP API: loaded only when the driver has them
-  const album = () => import('../../drivers/dwarf/http.js');
+  // the album and its files are the running driver's storage (library/device-library.ts)
+  const album = () => deviceLibrary().album;
 
   api.get(
     '/snapshot/:name',
@@ -134,10 +139,10 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
     '/album',
     route(async (req) => {
       need('album', 'The SD-card album');
-      const dhttp = await album();
+      const a = album();
       const type = queryNumber(req, 'type') ?? 0;
       const page = Math.max(0, Math.floor(queryNumber(req, 'page') ?? 0));
-      const [counts, items] = await Promise.all([dhttp.getMediaCounts(), dhttp.listMedia(type, page, ALBUM_PAGE_SIZE)]);
+      const [counts, items] = await Promise.all([a.counts(), a.list(type, page, ALBUM_PAGE_SIZE)]);
       // the page size lets the UI tell the last page from a full one
       return { counts, items, pageSize: ALBUM_PAGE_SIZE };
     }),
@@ -147,14 +152,15 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
     '/device-file',
     route(async (req, res) => {
       need('album', 'The SD-card album');
-      const dhttp = await album();
+      const a = album();
       const p = queryString(req, 'path') ?? '';
-      // fileUrl encodes each segment and refuses what leaves the card; this only keeps the route to the album
-      if (!p.startsWith('/DWARF3/') || p.split('/').some((s) => s === '..' || s === '.')) throw badRequest('bad path');
+      // the driver encodes each segment and refuses what leaves its storage; this only keeps the route to the album
+      if (!a.isDevicePath(p)) throw badRequest('bad path');
       let entry = thumbs.get(p);
       if (!entry) {
-        const buf = await dhttp.fetchFile(p, dhttp.FILE_TIMEOUT_MS, DEVICE_FILE_MAX_BYTES);
-        entry = { buf, type: contentType(p) };
+        const buf = await a.fetch(p, DEVICE_FILE_MAX_BYTES);
+        // a browser shows no FITS (a Seestar stack): it gets the image rendered
+        entry = /\.fits?$/i.test(p) ? { buf: await displayJpeg(await decode(buf, p), FITS_VIEW_SIZE), type: 'image/jpeg' } : { buf, type: contentType(p) };
         thumbs.put(p, buf, entry.type);
       }
       res.setHeader('Content-Type', entry.type);
@@ -168,9 +174,8 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
     '/album/delete',
     route(async (req) => {
       need('album', 'The SD-card album');
-      const dhttp = await album();
       const b = body(req, AlbumDeleteBody);
-      const outcomes = await dhttp.deleteMedia(b.paths.map((p) => ({ filePath: p, mediaType: b.mediaType })));
+      const outcomes = await album().delete(b.paths.map((p) => ({ filePath: p, mediaType: b.mediaType })));
       thumbs.clear(); // a deleted file must not live on in the thumbnail cache
       return { outcomes };
     }),

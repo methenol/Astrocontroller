@@ -24,11 +24,16 @@ import type { DutyLoop } from '../../agent/duty.js';
 import type { McpSpec } from '../types.js';
 import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
 import { listDevices } from './zwo-cloud.js';
+import { registerSeestarMediaTools } from './mcp-media.js';
+import { registerSeestarParityTools } from './mcp-parity.js';
+import { registerMapObstructions } from '../../mcp/tools/horizon.js';
+import type { SeestarMedia } from './web.js';
+import type { StarfrontNights } from '../../agent/starfront.js';
 
 export const SERVER_NAME = 'seestar';
 
-/** Nominal S30 tele field (150 mm, 1920×1080 at 2.9 µm) until the scope reports its optics. */
-export const NOMINAL_FOV = { h: 2.13, v: 1.2 };
+/** Nominal S30 tele field (150 mm, 1080×1920 at 2.9 µm, portrait as the frames are read) until the scope reports its optics. */
+export const NOMINAL_FOV = { h: 1.2, v: 2.13 };
 const SUN_WARN_DEG = 15;
 
 const INSTRUCTIONS = `Tools for a ZWO Seestar smart telescope, over its native JSON-RPC link (on the local network, or through ZWO Telescope Network via a seestar-portfwd tunnel on 127.0.0.1).
@@ -36,7 +41,7 @@ Start with seestar_status. The Seestar runs its own pipeline: goto_target slews,
 Only one operation runs at a time. Over ZWO Telescope Network only one remote session exists per telescope: connecting takes it from the official app.
 Coordinates are J2000 (RA in hours, Dec in degrees). Never point at the Sun without the user confirming a solar filter.`;
 
-export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop): McpSpec {
+export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarMedia, nights?: StarfrontNights | null): McpSpec {
   return {
     name: SERVER_NAME,
     instructions: INSTRUCTIONS,
@@ -45,8 +50,36 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop): McpSpec {
       registerSeestarTools(tool, scope);
       // the app's shared tools, the same for every driver (find_target and plan_targets are the Seestar's own above)
       registerPlanningTools(tool, { site: () => scope.requireLocation(), teleFov: () => scope.state.fov ?? NOMINAL_FOV, skip: ['find_target', 'plan_targets'] });
-      registerLibraryTools(tool, { device: false });
+      if (media) {
+        registerSeestarMediaTools(tool, scope, media);
+        // the Dwarf agent's other tools, under their names
+        registerSeestarParityTools(tool, scope, media);
+        registerMapObstructions(tool, {
+          site: () => scope.requireLocation(),
+          run: async () => media.survey.run(),
+          stop: async () => media.survey.stop(),
+          running: () => media.survey.isRunning,
+          progress: () => scope.state.horizonSurvey,
+          how: "the Seestar slews (no plate solve) to every 20° of azimuth at rising altitudes (8°, 16°, 25°, 35°, 50°) and judges the centre of the wide frame against a sky reference taken at 70°, stopping in each direction at the first clear sky; night only (the Sun below −12°), the sky reference must show stars (it refuses under a closed roof or cloud), ~20–40 min, moves the scope",
+        });
+      }
+      // sessions on the Seestar, transfers, the library and processing
+      registerLibraryTools(tool, { device: true });
       if (duty) registerDutyTools(tool, { duty });
+      if (nights) {
+        tool(
+          'starfront_roof',
+          "Autonomous Starfront nights: status (the roof over the scope as Starfront reports it, tonight's window and what the mode is doing), or report the roof as you saw it with the telescope (action=report open=true|false) after a roof check; open starts tonight's imaging duty.",
+          { action: z.enum(['status', 'report']), open: z.boolean().optional() },
+          async ({ action, open }) => {
+            if (action === 'report') {
+              if (open === undefined) throw new Error('report needs open=true or open=false');
+              return text(nights.report(open));
+            }
+            return text(nights.status());
+          },
+        );
+      }
       registerStellariumTools(tool);
     },
   };

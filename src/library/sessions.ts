@@ -1,20 +1,26 @@
 /**
- * Astronomy sessions: the telescope's DWARF_RAW_… folders, on the SD card and in the library.
+ * Astronomy sessions: the telescope's capture sessions, on the device and in the library.
  *
- * Library layout: a mirror of the telescope's own Astronomy folder, which is what AstroPhoto
- * Studio reads (it finds CALI_FRAME beside the session folders by itself):
- *   <library>/DWARF_RAW_<TELE|WIDE>_<target>_EXP_…/
- *       *.fits                        raw subframes (failed_*.fits = subs the scope's stacker rejected)
- *       stacked.jpg, stacked-16_*.png/.fits, img_reference.png, shotsInfo.json, Thumbnail/ …
+ * Library layout: a mirror of the Dwarf's own Astronomy folder, which is what AstroPhoto Studio
+ * reads (it finds CALI_FRAME beside the session folders by itself). A Seestar night is laid out the
+ * same way, under a SEESTAR_RAW_… name of the same shape (drivers/seestar/library.ts):
+ *   <library>/<DWARF|SEESTAR>_RAW_<TELE|WIDE>_<target>_EXP_…/
+ *       *.fits / *.fit                raw subframes (failed_*.fits = subs the Dwarf's stacker rejected)
+ *       stacked.jpg, stacked-16_*.png/.fits, Stacked_*.fit, img_reference.png, shotsInfo.json, Thumbnail/ …
  *       session.json                  metadata written by us (target, exposure, gain, transfer time)
- *   <library>/CALI_FRAME/<dark|flat|bias>/<cam_0|cam_1>/*.fits     device calibration masters
+ *   <library>/CALI_FRAME/<dark|flat|bias>/<cam_0|cam_1>/*.fits     device calibration masters (the Seestar's: seestar_cam_0|1)
  *   <library>/_photos/<YYYY-MM-DD>/…                               daytime photos/videos
+ *
+ * Which sessions the telescope holds is the running driver's (device-library.ts).
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
-import { withLister, type FtpEntry } from '../drivers/dwarf/ftp.js';
+import { deviceLibrary, setDefaultDeviceLibrary } from './device-library.js';
+import { dwarfLibrary } from '../drivers/dwarf/library.js';
+
+setDefaultDeviceLibrary(() => dwarfLibrary);
 
 const log = logger('library');
 
@@ -30,32 +36,32 @@ export interface DeviceSession {
 
 export type DeviceSessionEntry = DeviceSession & { fitsCount?: number; sizeMB?: number; transferred?: boolean };
 
-const SESSION_FOLDER = /^DWARF_RAW_(TELE|WIDE)_(.+?)_EXP_([\d.]+)_GAIN_(\d+)_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})/;
+const SESSION_FOLDER = /^(DWARF|SEESTAR)_RAW_(TELE|WIDE)_(.+?)_EXP_([\d.]+)_GAIN_(\d+)_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})/;
 
 /** A single folder name: no separators, no "." or "..", nothing that could leave the library. */
 export function isPlainName(name: string): boolean {
   return name.length > 0 && name !== '.' && name !== '..' && !/[/\\\0]/.test(name);
 }
 
-/** DWARF_RAW_TELE_NGC 281_EXP_15_GAIN_60_2026-10-01-22-20-58-268 */
+/** DWARF_RAW_TELE_NGC 281_EXP_15_GAIN_60_2026-10-01-22-20-58-268, SEESTAR_RAW_TELE_M 31_EXP_60_GAIN_200_2026-10-27-21-53-45_IRCUT */
 export function parseSessionFolder(folder: string): DeviceSession | null {
   if (!isPlainName(folder)) return null;
   const m = folder.match(SESSION_FOLDER);
   if (!m) return null;
   return {
     folder,
-    path: `/Astronomy/${folder}`,
-    camera: m[1] === 'WIDE' ? 'wide' : 'tele',
-    target: m[2],
-    exposureS: Number(m[3]),
-    gain: Number(m[4]),
-    startedAt: `${m[5]}T${m[6]}:${m[7]}:${m[8]}`,
+    // the Dwarf's folder on its card; a Seestar session is not a folder of its own (its library resolves it)
+    path: m[1] === 'DWARF' ? `/Astronomy/${folder}` : folder,
+    camera: m[2] === 'WIDE' ? 'wide' : 'tele',
+    target: m[3],
+    exposureS: Number(m[4]),
+    gain: Number(m[5]),
+    startedAt: `${m[6]}T${m[7]}:${m[8]}:${m[9]}`,
   };
 }
 
-const newestFirst = (a: DeviceSession, b: DeviceSession) => (b.startedAt ?? '').localeCompare(a.startedAt ?? '');
 const oldestFirst = (a: { startedAt?: string }, b: { startedAt?: string }) => (a.startedAt ?? '').localeCompare(b.startedAt ?? '');
-const isLight = (name: string) => name.toLowerCase().endsWith('.fits') && !name.startsWith('stacked');
+const isLight = (name: string) => /\.fits?$/i.test(name) && !/^stacked/i.test(name);
 
 export function sessionLocalDir(s: DeviceSession): string {
   return path.join(config.paths.library, s.folder);
@@ -69,9 +75,13 @@ export const SESSION_META = 'session.json';
  * transfer creates it before copying), and a partial transfer records its failures in the metadata.
  */
 export function isTransferred(s: DeviceSession): boolean {
+  return isTransferredFolder(s.folder);
+}
+
+export function isTransferredFolder(folder: string): boolean {
   let meta: unknown;
   try {
-    meta = JSON.parse(fs.readFileSync(path.join(sessionLocalDir(s), SESSION_META), 'utf8'));
+    meta = JSON.parse(fs.readFileSync(path.join(config.paths.library, folder, SESSION_META), 'utf8'));
   } catch {
     return false;
   }
@@ -80,31 +90,8 @@ export function isTransferred(s: DeviceSession): boolean {
 }
 
 /** The sessions on the SD card, newest first; `withCounts` also lists each one's files. */
-export async function listDeviceSessions(withCounts = true): Promise<{ sessions: DeviceSessionEntry[]; otherFolders: string[] }> {
-  return withLister(async (list) => {
-    const dirs = (await list('/Astronomy')).filter((e) => e.isDir);
-    const sessions: DeviceSessionEntry[] = [];
-    const otherFolders: string[] = [];
-    for (const d of dirs) {
-      const s = parseSessionFolder(d.name);
-      if (!s) {
-        otherFolders.push(d.name);
-        continue;
-      }
-      const entry: DeviceSessionEntry = { ...s, transferred: isTransferred(s) };
-      if (withCounts) {
-        const files = await list(s.path).catch((err) => {
-          log.debug(`could not list ${s.path}: ${errMsg(err)}`);
-          return [] as FtpEntry[];
-        });
-        entry.fitsCount = files.filter((f) => f.name.toLowerCase().endsWith('.fits')).length;
-        entry.sizeMB = Math.round(files.reduce((a, f) => a + f.size, 0) / 1e6);
-      }
-      sessions.push(entry);
-    }
-    sessions.sort(newestFirst);
-    return { sessions, otherFolders };
-  });
+export function listDeviceSessions(withCounts = true): Promise<{ sessions: DeviceSessionEntry[]; otherFolders: string[] }> {
+  return deviceLibrary().listSessions(withCounts);
 }
 
 /** The library's session folders, read without failing on one unreadable entry. */
@@ -152,7 +139,7 @@ export interface LibrarySession {
   startedAt?: string;
 }
 
-/** Summary of what's in the library: sessions (DWARF_RAW_… folders) grouped by target. */
+/** Summary of what's in the library: sessions (DWARF_RAW_… / SEESTAR_RAW_… folders) grouped by target. */
 export function listLibrary(): Array<{ target: string; sessions: LibrarySession[] }> {
   const byTarget = new Map<string, LibrarySession[]>();
   for (const s of librarySessions()) {
