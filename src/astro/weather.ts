@@ -6,6 +6,7 @@
 import { nightWindow, fmtTime, type Site } from './sky.js';
 import { WeatherService, type CurrentWeather, type Forecast } from './weather/service.js';
 import { rate, type HourForecast } from './weather/score.js';
+import { config } from '../config.js';
 
 export { type HourForecast, type Rating, scoreHour } from './weather/score.js';
 export { type Forecast, type CurrentWeather, WeatherService } from './weather/service.js';
@@ -15,7 +16,7 @@ const DEFAULT_NIGHT_MS = 10 * 3600e3;
 /** An hour at or above this score is clear enough to belong to the best window. */
 const CLEAR_SCORE = 60;
 
-const service = new WeatherService();
+const service = new WeatherService({ units: config.units });
 
 export function forecast(site: Site, tz: string): Promise<Forecast> {
   return service.forecast(site, tz);

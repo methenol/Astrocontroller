@@ -1,8 +1,9 @@
 /** Tonight: sky conditions, the observing plan and the weather forecast. */
-import { $, esc, fixed, toast } from './dom.js';
+import { $, esc, toast } from './dom.js';
 import { api, apiToast } from './api.js';
 import { on } from './bus.js';
 import { draft } from './chat.js';
+import { temp, delta, speedN, speedUnit, precip, precipUnit } from './units.js';
 import { loadHorizon, onHorizonChange } from './horizon.js';
 
 const DARK_SUN_ALT = -18;
@@ -172,7 +173,7 @@ function wxHour(h) {
   const title = `${h.local}: ${issues.join('; ') || 'clear'}${h.seeing ? ` · seeing ${h.seeing}, transparency ${h.transparency}` : ''}`;
   const rating = RATINGS.has(h.rating) ? h.rating : '';
   return `<div class="wx-h ${rating}" title="${esc(title)}">
-    <div>${esc(String(h.local ?? '').split(', ')[1] ?? h.local)}</div><div class="sc">${esc(h.score)}</div><div>☁${esc(h.cloudTotal)}</div><div class="rain ${rain >= RAIN_HIGH ? 'high' : rain >= RAIN_MID ? 'mid' : ''}" title="${esc(`rain chance ${rain}% · expected ${mm} mm`)}">🌧${esc(rain)}%${mm >= 0.1 ? `<br>${fixed(mm, 1)}mm` : ''}</div><div>💧${esc(h.dewSpreadC)}°</div><div>🌬${esc(Math.round(h.gustKmh ?? 0))}</div></div>`;
+    <div>${esc(String(h.local ?? '').split(', ')[1] ?? h.local)}</div><div class="sc">${esc(h.score)}</div><div>☁${esc(h.cloudTotal)}</div><div class="rain ${rain >= RAIN_HIGH ? 'high' : rain >= RAIN_MID ? 'mid' : ''}" title="${esc(`rain chance ${rain}% · expected ${precip(mm)}`)}">🌧${esc(rain)}%${mm >= 0.1 ? `<br>${esc(precip(mm, 1).replace(' ', ''))}` : ''}</div><div>💧${esc(delta(h.dewSpreadC))}</div><div>🌬${esc(speedN(h.gustKmh ?? 0))}</div></div>`;
 }
 
 function renderWeather(w, refreshError) {
@@ -185,9 +186,9 @@ function renderWeather(w, refreshError) {
   $('#chip-wx').title = w.verdict ?? '';
   $('#weather').innerHTML = `<h3>Weather & observability</h3>
     <div class="wx-verdict">${esc(w.verdict)}</div>
-    <div class="muted small">now: ${esc(c.cloudCover)}% cloud · ${esc(c.temperatureC)}°C · RH ${esc(c.humidity)}% · dew point ${esc(c.dewPointC)}°C · wind ${esc(c.windKmh)}/${esc(c.gustKmh)} km/h${issues.length ? ` · watch: ${esc(issues.slice(0, 4).join(', '))}` : ''}${age}${why}</div>
+    <div class="muted small">now: ${esc(c.cloudCover)}% cloud · ${esc(temp(c.temperatureC))} · RH ${esc(c.humidity)}% · dew point ${esc(temp(c.dewPointC))} · wind ${esc(speedN(c.windKmh))}/${esc(speedN(c.gustKmh))} ${esc(speedUnit())}${issues.length ? ` · watch: ${esc(issues.slice(0, 4).join(', '))}` : ''}${age}${why}</div>
     <div class="wx-strip">${(Array.isArray(w.hours) ? w.hours : []).map(wxHour).join('')}</div>
-    <div class="muted small">score 0–100 · ☁ cloud % · 🌧 rain chance (and mm expected) · 💧 dew-point spread · 🌬 gusts km/h · Open-Meteo + 7Timer</div>`;
+    <div class="muted small">score 0–100 · ☁ cloud % · 🌧 rain chance (and ${esc(precipUnit())} expected) · 💧 dew-point spread · 🌬 gusts ${esc(speedUnit())} · Open-Meteo + 7Timer</div>`;
 }
 
 let wxBusy = false;

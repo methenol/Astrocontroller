@@ -28,6 +28,7 @@ export function publicConfig(scope: WebTelescope) {
     llm: { baseUrl: withoutCredentials(config.llm.baseUrl), model: config.llm.model, reasoningEffort: config.llm.reasoningEffort, vision: config.llm.vision },
     library: config.paths.library,
     minAltitude: config.observer.minAltitudeDeg,
+    units: config.units,
     // The Stellarium tab's observer is the site in .env (OBSERVER_*), not a location the telescope reported.
     stellarium: { site: observerLocation(), timezone: config.observer.timezone, stream: config.stellarium.stream, dataUrl: config.stellarium.dataUrl },
   };

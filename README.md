@@ -29,6 +29,8 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `DWARF_PROTOCOL_HEADER` | `app` (default) sends the header the official DWARFLAB app sends (`majorVersion 2 / minorVersion 3`); `sdk` sends the third-party SDK's `1.20` instead. Only touch it if a firmware refuses the official header. |
 | `OBSERVER_LATITUDE` / `OBSERVER_LONGITUDE` / `OBSERVER_ELEVATION_M` | Site. Needed for planning, calibration, GoTo, polar alignment and weather. |
 | `OBSERVER_TIMEZONE` | IANA zone (e.g. `America/New_York`). All reported times use it. |
+| `UNITS` | `metric` (°C, km/h, mm, km; the default) or `imperial` (°F, mph, in, mi): how weather is shown in the UI, the Rain Guard alarms and the night report. Settings are stored in metric either way. |
+| `UNITS` | `metric` (°C, km/h, mm, km; the default) or `imperial` (°F, mph, in, mi): how weather is shown in the UI, the Rain Guard alarms and the night report. Settings are stored in metric either way. |
 | `PLAN_MIN_ALTITUDE_DEG` | Default minimum altitude for target planning. |
 | `PLAN_BORTLE` | Site sky class 1 (dark) … 9 (inner city), default `5`. The one number that moves every reachability threshold: what the sky and glass can bring up, and how long a sub the sky rewards. |
 | `PLAN_FILTERS` | The Dwarf 3's filters, default `Astro,Duo-Band`. Each target is planned through the best of them (continuum targets through Astro only) and `suggestedFilter` names it. Decides whether a faint hydrogen-alpha region is a target at all, and how much the Moon costs it. |
@@ -114,6 +116,20 @@ A planetarium ([Stellarium Web Engine](https://github.com/Stellarium/stellarium-
 
 The engine is AGPL-3.0, vendored unmodified in `public/vendor/stellarium/` (source commit and licence there); `scripts/stellarium/build-engine.sh` rebuilds it.
 
+## Weather tab: can the telescope stay out tonight?
+
+The Tonight tab asks whether the sky is good. The Weather tab asks whether it is **safe to leave the telescope outside**, unattended, until morning.
+
+- **Rain Guard** is a next-hour alarm for precipitation, storms and wind. **Arm** it before you go to bed. The server checks the Open-Meteo 15-minute forecast every 3 minutes, so the guard keeps watching with every page closed and stays armed after a restart. It looks at the telescope's site and at a ring of 8 points around it (20 km by default).
+  - **Alarm**: any precipitation at the site within the look-ahead (rain, showers and snow), precipitation falling now, an hourly chance of 60 % or more, a thunderstorm at the site or anywhere in the ring, or gusts over the limit (45 km/h).
+  - **Watch**: precipitation in the ring that has not reached the site yet, or gusts near the limit.
+  - **Fault**: if no check has succeeded for 12 minutes, the guard sounds a different alarm. A guard that has stopped looking must not stay quiet.
+  - **Silence alarm** silences every device. If the danger lasts 20 minutes, or a new kind of danger appears, the alarm sounds again. An alarm nobody silenced keeps sounding even if the forecast clears.
+  - All thresholds are in **Alarm settings**.
+- **This device sounds the alarm**: the guard is on the server, but the sound comes from the devices that listen. Arming from a device makes that device listen. While armed, a listening device keeps its screen on (wake lock) and shows a notification if it is in the background. If it loses contact with the server for 90 s, it sounds the fault alarm on its own. Use **Test sound** where you sleep, and leave the page open on a powered device. Wake lock and notifications need HTTPS or `localhost`. Over plain `http://` to a LAN address, keep the screen on yourself.
+- **Tonight at the telescope** is an hour-by-hour report from sunset to sunrise. It covers precipitation, thunderstorms and unstable air (CAPE), gusts, cold below the limit (−20 °C by default, the Dwarf 3's operating minimum), frost, fog and condensation. The verdict is one line: safe all night, safe with care, or *bring it in by HH:MM*.
+- **Radar & satellite**: RainViewer radar for the last 2 hours, and NASA GIBS infrared cloud tops (GOES-East/West or Himawari, picked by longitude) for the last hour. Both are looped around the site. The base map is Esri's dark grey canvas. None of these sources needs an API key. No geostationary infrared layer covers Europe, Africa or western Asia on GIBS, so those sites get radar only.
+
 ## Imagery library
 
 `transfer_session` (and the Album/Library tabs) copy sessions from the SD card over FTP. On this network that measured about 20 MB/s. The library mirrors the telescope's own `Astronomy` folder, which is the layout AstroPhoto Studio reads:
@@ -157,6 +173,7 @@ The profile names, presets and job kinds come from the server, so new profiles i
 - `workspace/NOTES.md`: site, equipment and preference notes the agent maintains.
 - `sessions/`: conversation history (resumed on restart; **New** starts fresh).
 - `captures/agent/`: every image the agent looked at.
+- `rain-guard.json`: the Rain Guard's armed state and alarm settings.
 
 Seeded skills: `session-startup`, `deep-sky-imaging`, `acquisition-profiles`, `session-qc`, `dark-library`, `acquisition-experiments`, `target-planning`, `cloud-gap-imaging`, `polar-alignment`, `daytime-wildlife`, `solar-system`, `image-assessment`, `data-management`, `skill-writing`.
 

@@ -453,3 +453,27 @@ test('the state socket reconnects after it drops and says the UI is disconnected
   await until(() => stateSocket() !== first, 'a new socket');
   assert.equal(stateSocket().url, 'ws://localhost:8080/ws');
 });
+
+test('the Rain Guard: an alarm from the server shows on every screen and is silenced through the API', async () => {
+  const settings = { lookaheadMin: 60, thresholdMm: 0.01, probabilityPct: 60, gustKmh: 45, ringKm: 20, minTempC: -20 };
+  const armed = (over: object) => ({ armed: true, armedAt: new Date().toISOString(), state: 'clear', sounding: false, alarm: null, assessment: { level: 'clear', hazards: [], slots: [], siteMm: 0, maxProbability: 0, maxGustKmh: 10, grid: { lat: 39.99, lon: -105.0 } }, lastCheck: new Date().toISOString(), lastAttempt: null, lastError: null, nextCheck: null, site: { lat: 40.0, lon: -105.0 }, settings, pollSec: 180, faultAfterMin: 12, ...over });
+  stateSocket().push({ type: 'guard', guard: armed({}) });
+  assert.equal(ui.$('#chip-guard').hidden, false);
+  assert.equal(text('#chip-guard'), '☔ armed');
+
+  const alarm = { since: new Date().toISOString(), kinds: ['rain'], message: 'precipitation forecast at the telescope from 22:30', acknowledgedAt: null };
+  stateSocket().push({ type: 'guard', guard: armed({ state: 'alarm', sounding: true, alarm }) });
+  assert.equal(text('#chip-guard'), '☔ ALARM');
+  assert.match(text('#guard-text'), /from 22:30/);
+  assert.equal(ui.$('#btn-guard-ack').hidden, false);
+
+  route('POST guard/ack', () => armed({ state: 'alarm', sounding: false, alarm: { ...alarm, acknowledgedAt: new Date().toISOString() } }));
+  route('GET weather/safety', () => ({ verdict: 'Bring the telescope in by 23:00: rain likely (70%) from then.', risk: 'danger', report: [{ subject: 'Precipitation', risk: 'danger', text: 'Expected 23:00–01:00.' }], hours: [], night: { from: 'Oct 27, 18:45', to: 'Oct 28, 07:36' }, limits: { gustKmh: 45, probabilityPct: 60, minTempC: -20 } }));
+  calls.length = 0;
+  click('#chip-guard');
+  await until(() => /Bring the telescope in by 23:00/.test(text('#safety')), 'the night safety report');
+  click('#btn-guard-ack');
+  await until(() => calls.some((c) => c.method === 'POST' && c.path === 'guard/ack'), 'the acknowledgement');
+  await until(() => ui.$('#btn-guard-ack').hidden, 'the silence button to go');
+  assert.match(text('#guard-text'), /silenced at/);
+});

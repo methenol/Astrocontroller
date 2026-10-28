@@ -31,6 +31,7 @@
     <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8.5h13l-3.5-3.5M20 15.5H7l3.5 3.5"/></symbol>
+    <symbol id="i-rain" viewBox="0 0 24 24"><path d="M7 15.5a4.5 4.5 0 0 1-.6-8.96A5.5 5.5 0 0 1 17 7a4 4 0 0 1 .5 8.5z"/><path d="M8 18.5l-1 2M12 18.5l-1 2M16 18.5l-1 2"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 8.5h3l1.5-2.5h9L18 8.5h3v11H3z"/><circle cx="12" cy="14" r="3.5"/></symbol>
   </defs></svg>
 
@@ -44,6 +45,7 @@
       <span class="chip" id="chip-mount" title="Mount mode and motor angles">mount –</span>
       <span class="chip" id="chip-sd" title="SD card free">SD –</span>
       <span class="chip" id="chip-wx" title="Weather now / tonight">☁ –</span>
+      <button type="button" class="chip chip-guard" id="chip-guard" title="Rain Guard: open the Weather tab" hidden>☔ guard</button>
     </div>
     <div class="top-actions">
       <div class="menu" id="menu">
@@ -58,6 +60,7 @@
     <nav class="tabs tabs-top" id="tabs-top" role="tablist" aria-label="Sections">
       <button class="tab active" data-tab="chat" role="tab" aria-selected="true" aria-controls="panel-chat">Agent</button>
       <button class="tab" data-tab="tonight" role="tab" aria-selected="false" aria-controls="panel-tonight">Tonight</button>
+      <button class="tab" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather">Weather</button>
       <button class="tab" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium">Stellarium</button>
       <button class="tab" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database">Database</button>
       <button class="tab" data-tab="album" role="tab" aria-selected="false" aria-controls="panel-album">Album</button>
@@ -288,6 +291,57 @@
       <div id="plan">–</div>
     </section>
 
+    <!-- ========== Weather: is it safe to leave the telescope out? ========== -->
+    <section class="panel" id="panel-weather" role="tabpanel" aria-label="Weather">
+      <div class="card guard" id="guard-card">
+        <div class="guard-head">
+          <div class="guard-orb" id="guard-orb" aria-hidden="true">○</div>
+          <div class="guard-title">
+            <h3 id="guard-title">Rain Guard</h3>
+            <p class="small" id="guard-text">loading…</p>
+          </div>
+        </div>
+        <button type="button" class="primary guard-unlock" id="btn-guard-unlock" hidden>Tap to enable the alarm sound on this device</button>
+        <div class="ctl-row">
+          <button type="button" class="primary" id="btn-guard-arm" title="Watch the forecast at the telescope every few minutes and sound the alarm before rain, storms or strong gusts arrive">Arm Rain Guard</button>
+          <button type="button" class="warn" id="btn-guard-disarm" hidden>Disarm</button>
+          <button type="button" class="warn" id="btn-guard-ack" hidden title="Silence the alarm on every device; it sounds again if the danger lasts">Silence alarm</button>
+          <button type="button" id="btn-guard-check">Check now</button>
+          <button type="button" class="ghost" id="btn-guard-test">Test sound</button>
+        </div>
+        <label class="guard-device"><input type="checkbox" id="guard-device"> This device sounds the alarm <span class="muted small" id="guard-device-note"></span></label>
+        <div class="status-grid" id="guard-metrics"></div>
+        <div class="guard-timeline" id="guard-timeline" aria-label="The next hour in 15-minute steps"></div>
+        <ul class="guard-hazards" id="guard-hazards"></ul>
+        <details class="guard-settings">
+          <summary class="muted small">Alarm settings</summary>
+          <form class="duty-form-row" id="guard-settings">
+            <label title="How far ahead the forecast is read">look ahead <input type="number" name="lookaheadMin" min="15" max="180" step="15" inputmode="numeric"> min</label>
+            <label title="Precipitation in any 15 minutes at the telescope that sounds the alarm">wet from <input type="number" name="thresholdMm" min="0.01" max="5" step="0.01" inputmode="decimal"> <span data-unit="thresholdMm">mm</span></label>
+            <label title="Hourly precipitation chance that sounds the alarm even when no amount is forecast">chance ≥ <input type="number" name="probabilityPct" min="10" max="100" step="5" inputmode="numeric"> %</label>
+            <label title="Gusts that sound the alarm: what your tripod and mount can take">gusts ≥ <input type="number" name="gustKmh" min="10" max="150" step="5" inputmode="numeric"> <span data-unit="gustKmh">km/h</span></label>
+            <label title="Radius of the ring of points around the site checked for approaching rain and storms (0 = the site only)">ring <input type="number" name="ringKm" min="0" max="60" step="5" inputmode="numeric"> <span data-unit="ringKm">km</span></label>
+            <label title="Air temperature the night report calls too cold for the equipment">too cold ≤ <input type="number" name="minTempC" min="-60" max="10" step="1" inputmode="numeric"> <span data-unit="minTempC">°C</span></label>
+          </form>
+        </details>
+      </div>
+      <div class="card" id="safety">night safety report loading…</div>
+      <div class="card" id="wx-imagery">
+        <div class="row-head"><h3>Radar &amp; satellite</h3><span class="spacer"></span><button type="button" class="ghost" id="btn-wx-play" aria-pressed="true">Pause</button><button type="button" class="ghost" id="btn-wx-reload">Reload</button></div>
+        <div class="wx-maps">
+          <figure class="wx-map" id="map-radar">
+            <div class="wx-map-view"><span class="wx-pin" aria-hidden="true"></span></div>
+            <figcaption><b>Radar</b> <span class="muted small" data-time>–</span><span class="wx-zoom"><button type="button" class="mini" data-zoom="-1" aria-label="Zoom out">−</button><button type="button" class="mini" data-zoom="1" aria-label="Zoom in">+</button></span></figcaption>
+          </figure>
+          <figure class="wx-map" id="map-sat">
+            <div class="wx-map-view"><span class="wx-pin" aria-hidden="true"></span></div>
+            <figcaption><b>Infrared satellite</b> <span class="muted small" data-time>–</span><span class="wx-zoom"><button type="button" class="mini" data-zoom="-1" aria-label="Zoom out">−</button><button type="button" class="mini" data-zoom="1" aria-label="Zoom in">+</button></span></figcaption>
+          </figure>
+        </div>
+        <p class="muted small">Radar: the last 2 hours of precipitation, RainViewer. Satellite: cloud-top temperature (brighter and colder is higher, thicker cloud; bright colours are storm tops), NASA GIBS (GOES / Himawari), about 30 minutes behind. Base map © Esri, HERE, Garmin, © OpenStreetMap contributors. The dot is the telescope.</p>
+      </div>
+    </section>
+
     <!-- ========== Stellarium: the planetarium at the site ========== -->
     <section class="panel" id="panel-stellarium" role="tabpanel" aria-label="Stellarium">
       <div class="sky-bar">
@@ -434,6 +488,7 @@
   <div class="sheet" id="sheet-more" hidden>
     <div class="sheet-scrim" data-close></div>
     <div class="sheet-card" role="group" aria-label="More sections">
+      <button class="tab sheet-item" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather"><b>Weather</b><small>Rain Guard alarm, tonight's safety report, radar</small></button>
       <button class="tab sheet-item" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium"><b>Stellarium</b><small>the sky at the site: find, frame, GoTo</small></button>
       <button class="tab sheet-item" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><b>Database</b><small>search 45,000 objects, filter by what is up</small></button>
       <button class="tab sheet-item" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library"><b>Library</b><small>transfers, processing, sessions, captures</small></button>

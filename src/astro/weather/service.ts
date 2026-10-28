@@ -7,6 +7,7 @@ import { bodyAlt, fmtTime, type Site } from '../sky.js';
 import type { Fetch } from './http.js';
 import { DEFAULT_URLS, fetchOpenMeteo, fetchSevenTimer, type AstroMap, type OpenMeteo, type ProviderUrls } from './providers.js';
 import { rate, scoreHour, SEEING, TRANSPARENCY, type HourForecast } from './score.js';
+import { unitFormat, type UnitFormat, type Units } from '../../util/units.js';
 
 const log = logger('weather');
 
@@ -62,6 +63,8 @@ export interface WeatherOptions {
   fetch?: Fetch;
   urls?: ProviderUrls;
   now?: () => number;
+  /** how the hours' issues state amounts (metric by default) */
+  units?: Units;
 }
 
 export class WeatherService {
@@ -161,7 +164,7 @@ export class WeatherService {
     });
     const astro = await Promise.race([astroP, giveUp]);
     clearTimeout(timer);
-    return combine(site, tz, om, astro);
+    return combine(site, tz, om, astro, unitFormat(this.opts.units ?? 'metric'));
   }
 }
 
@@ -186,7 +189,7 @@ function utcTime(s: string, tz: string): string | null {
 }
 
 /** Both providers' answers as scored hours; an hour without cloud, temperature or dew point is left out. */
-export function combine(site: Site, tz: string, om: OpenMeteo, astro: AstroMap): Data {
+export function combine(site: Site, tz: string, om: OpenMeteo, astro: AstroMap, u: UnitFormat = unitFormat('metric')): Data {
   const H = om.hourly;
   const hours: HourForecast[] = [];
   for (let i = 0; i < H.time.length; i++) {
@@ -216,9 +219,13 @@ export function combine(site: Site, tz: string, om: OpenMeteo, astro: AstroMap):
       precipProbability: H.precipitation_probability?.[i] ?? 0,
       precipMm: H.precipitation?.[i] ?? 0,
       visibilityKm: vis != null ? vis / 1000 : null,
+      weatherCode: H.weather_code?.[i] ?? null,
+      showersMm: H.showers?.[i] ?? 0,
+      snowfallCm: H.snowfall?.[i] ?? 0,
+      capeJkg: H.cape?.[i] ?? null,
     };
     const a = astroAt(astro, t.getTime());
-    const { score, issues } = scoreHour(base, a?.transparency);
+    const { score, issues } = scoreHour(base, a?.transparency, u);
     hours.push({ ...base, seeing: a ? SEEING[a.seeing] : undefined, transparency: a ? TRANSPARENCY[a.transparency] : undefined, seeingIdx: a?.seeing, transparencyIdx: a?.transparency, score, rating: rate(score), issues });
   }
   const c = om.current ?? {};

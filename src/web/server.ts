@@ -16,6 +16,9 @@ import { mediaRoutes, streamRoute, ThumbCache } from './routes/media.js';
 import { controlRoutes } from './routes/control.js';
 import { agentRoutes } from './routes/agent.js';
 import { stellariumRoutes } from './routes/stellarium.js';
+import { weatherRoutes } from './routes/weather.js';
+import { RainGuard } from '../astro/weather/guard.js';
+import { observerSite } from './context.js';
 
 const log = logger('web');
 
@@ -28,9 +31,12 @@ export interface Web {
 }
 
 export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContext, 'broadcast'>): Web {
-  const sockets = mountSockets(server, deps);
+  // The Rain Guard lives with the server, not a browser tab: it keeps watching when no page is open.
+  const guard = new RainGuard({ site: () => observerSite(deps.scope), tz: () => config.observer.timezone, units: () => config.units, file: path.join(config.paths.data, 'rain-guard.json') });
+  const sockets = mountSockets(server, deps, guard);
   const ctx: WebContext = { ...deps, broadcast: sockets.broadcast };
   const thumbs = new ThumbCache();
+  guard.start();
 
   const api = express.Router();
   api.use(rejectCrossSite);
@@ -41,6 +47,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(controlRoutes(ctx));
   api.use(agentRoutes(ctx));
   api.use(stellariumRoutes());
+  api.use(weatherRoutes(ctx, guard));
   // the driver's own API (the Seestar's tunnel and raw RPC)
   if (deps.scope.routes) api.use(deps.scope.routes());
   api.use((req, res) => res.status(404).json({ error: `no such API route: ${req.method} ${req.path}` }));
@@ -61,5 +68,10 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   app.use(express.static(config.paths.public, { index: false }));
 
   log.debug('web routes mounted');
-  return { close: () => sockets.close() };
+  return {
+    close: () => {
+      guard.close();
+      sockets.close();
+    },
+  };
 }

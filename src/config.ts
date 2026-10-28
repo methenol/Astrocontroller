@@ -3,6 +3,7 @@ import { plateScaleArcsecPerPx } from './media/image/types.js';
 import path from 'node:path';
 import { Env } from './config/env.js';
 import { HostOverride } from './config/host.js';
+import type { Units } from './util/units.js';
 import { DRIVER_IDS, type DriverId } from './drivers/types.js';
 
 export { validHost } from './config/host.js';
@@ -88,6 +89,8 @@ export const config = {
     timezone: env.timezone('OBSERVER_TIMEZONE', Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'),
     minAltitudeDeg: env.num('PLAN_MIN_ALTITUDE_DEG', 25, { min: 0, max: 90 }),
  },
+ /** metric | imperial: how weather is shown (temperatures, wind, precipitation); it is computed in metric */
+ units: env.oneOf<Units>('UNITS', ['metric', 'imperial'] as const, 'metric'),
  /** What every planning surface judges a night against (see planDefaults). */
  plan: {
   /** site sky class: Bortle 1 (dark) … 9 (inner city); the whole ladder of thresholds moves with it */

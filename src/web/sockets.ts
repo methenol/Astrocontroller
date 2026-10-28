@@ -15,6 +15,7 @@ import { PromptBody, promptMode } from './routes/agent.js';
 import { publicConfig, type WebContext } from './context.js';
 import { requestHosts, sameOrigin } from './http.js';
 import { toJson } from '../util/json.js';
+import type { RainGuard } from '../astro/weather/guard.js';
 
 const log = logger('web');
 
@@ -38,7 +39,7 @@ export interface Sockets {
 }
 
 /** Create the socket servers on `server` and return the broadcaster; `ctx.broadcast` may call it later. */
-export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadcast'>): Sockets {
+export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadcast'>, guard?: RainGuard): Sockets {
   const { scope, agent, duty } = ctx;
   const hub = scope.hub;
   const wss = new WebSocketServer({ noServer: true, maxPayload: STATE_MAX_PAYLOAD });
@@ -141,6 +142,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
       processing: processing.listItems(30),
       logs: recentLogs(150),
       config: publicConfig(scope),
+      guard: guard?.status(),
     });
     const ping = setInterval(() => ws.readyState === ws.OPEN && ws.ping(), PING_MS);
     ws.on('close', () => {
@@ -184,6 +186,8 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
   on(processing.processingBus, 'item', (it: unknown) => broadcast({ type: 'processing', item: it }));
   on(toolEvents, 'image', (i: object) => broadcast({ type: 'capture', ...i }));
   on(toolEvents, 'stellarium', (t: object) => broadcast({ type: 'stellarium', ...t }));
+  // every check is sent, changed or not: a page that stops hearing from the guard knows to worry
+  if (guard) on(guard, 'state', (g: unknown) => broadcast({ type: 'guard', guard: g }));
   // Frame freshness per stream, so the UI can show a stalled view instead of a frozen-looking one.
   const streamTimer = setInterval(() => broadcast({ type: 'streams', streams: hub.status(), now: Date.now() }), STREAM_STATUS_MS);
   streamTimer.unref();

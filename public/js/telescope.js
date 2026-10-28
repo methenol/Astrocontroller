@@ -3,6 +3,7 @@ import { $, $$, esc, fmtDur, fixed, toast, fmtClock, unsupported } from './dom.j
 import { api } from './api.js';
 import { on, emit } from './bus.js';
 import { state } from './state.js';
+import { temp } from './units.js';
 
 /** totalCount at or above this means "until stopped" */
 const OPEN_ENDED_COUNT = 999;
@@ -41,7 +42,7 @@ function renderChips(t) {
   lb.classList.toggle('primary', !!t.released);
   lb.classList.toggle('ghost', !t.released);
   $('#chip-battery').textContent = t.battery == null ? '🔋 –' : `🔋 ${t.battery}%${t.charging ? ' ⚡' : ''}`;
-  $('#chip-temp').textContent = t.temperatureC == null ? '🌡 –' : `🌡 ${t.temperatureC}° body · ${t.cmosTempC?.tele ?? '–'}° sensor`;
+  $('#chip-temp').textContent = t.temperatureC == null ? '🌡 –' : `🌡 ${temp(t.temperatureC)} body · ${temp(t.cmosTempC?.tele)} sensor`;
   const nd = t.ndLock ? ' · ND lock' : '';
   $('#chip-mode').textContent = `${t.shootingMode?.name ?? 'mode –'}${t.operation ? ` · ${t.operation}…` : ''}${nd}`;
   $('#chip-mode').title = [

@@ -1,4 +1,5 @@
 /** Hourly observability: the forecast numbers of one hour turned into a 0–100 score and its reasons. */
+import { unitFormat, type UnitFormat } from '../../util/units.js';
 
 export interface HourForecast {
   time: string; // ISO UTC
@@ -19,6 +20,14 @@ export interface HourForecast {
   /** expected precipitation in that hour (rain + showers + snow water), mm */
   precipMm: number;
   visibilityKm: number | null;
+  /** WMO weather code (95–99 thunderstorm, 71–77 snow…) when the provider sent one */
+  weatherCode?: number | null;
+  /** convective showers within precipMm, mm */
+  showersMm?: number;
+  /** snowfall, cm */
+  snowfallCm?: number;
+  /** convective available potential energy, J/kg: the fuel for thunderstorms */
+  capeJkg?: number | null;
   seeing?: string;
   transparency?: string;
   /** the raw 7Timer indices (1 best … 8 worst) behind those labels, for per-target scoring */
@@ -59,7 +68,7 @@ const POOR_TRANSPARENCY_OFF = 10;
 const HAZE_KM = 5;
 const HAZE_OFF = 15;
 
-export function scoreHour(h: HourInputs, transparency?: number): { score: number; issues: string[] } {
+export function scoreHour(h: HourInputs, transparency?: number, u: UnitFormat = unitFormat('metric')): { score: number; issues: string[] } {
   const issues: string[] = [];
   const effCloud = Math.min(100, Math.max(h.cloudLow, h.cloudMid, h.cloudHigh * HIGH_CLOUD_WEIGHT, h.cloudTotal * TOTAL_CLOUD_WEIGHT));
   let score = 100 - effCloud;
@@ -74,16 +83,16 @@ export function scoreHour(h: HourInputs, transparency?: number): { score: number
   }
   if (h.gustKmh >= STRONG_GUSTS.kmh) {
     score -= STRONG_GUSTS.off;
-    issues.push(`strong gusts ${Math.round(h.gustKmh)} km/h — scope will shake`);
+    issues.push(`strong gusts ${u.speed(h.gustKmh)} — scope will shake`);
   } else if (h.gustKmh >= GUSTY.kmh) {
     score -= GUSTY.off;
-    issues.push(`gusty ${Math.round(h.gustKmh)} km/h`);
+    issues.push(`gusty ${u.speed(h.gustKmh)}`);
   }
   if (h.dewSpreadC < FOG_SPREAD_C) {
     score -= FOG_OFF;
-    issues.push(`dew/fog risk (dew-point spread ${h.dewSpreadC.toFixed(1)}°C)`);
+    issues.push(`dew/fog risk (dew-point spread ${u.tempDelta(h.dewSpreadC)})`);
   } else if (h.dewSpreadC < DEW_SPREAD_C) {
-    issues.push(`dew likely on optics (spread ${h.dewSpreadC.toFixed(1)}°C)`);
+    issues.push(`dew likely on optics (spread ${u.tempDelta(h.dewSpreadC)})`);
   }
   if (transparency !== undefined && transparency >= POOR_TRANSPARENCY) {
     score -= POOR_TRANSPARENCY_OFF;
@@ -91,7 +100,7 @@ export function scoreHour(h: HourInputs, transparency?: number): { score: number
   }
   if (h.visibilityKm !== null && h.visibilityKm < HAZE_KM) {
     score -= HAZE_OFF;
-    issues.push(`haze/fog (visibility ${h.visibilityKm.toFixed(1)} km)`);
+    issues.push(`haze/fog (visibility ${u.dist(h.visibilityKm)})`);
   }
   return { score: Math.max(0, Math.min(100, Math.round(score))), issues };
 }

@@ -10,6 +10,7 @@ import { renderJobs, renderProcessing, addCapture } from './library.js';
 import { resetLog, addLog } from './logs.js';
 import { renderStreamHealth } from './video.js';
 import { onStellariumMessage } from './stellarium.js';
+import { renderGuardState } from './weather.js';
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 10000;
@@ -30,6 +31,7 @@ function hello(m) {
   renderJobs();
   renderProcessing();
   resetLog(m.logs);
+  if (m.guard) renderGuardState(m.guard);
 }
 
 const HANDLERS = {
@@ -59,6 +61,7 @@ const HANDLERS = {
   error: (m) => toast(m.message, true),
   streams: (m) => renderStreamHealth(m.streams, m.now),
   stellarium: onStellariumMessage,
+  guard: (m) => renderGuardState(m.guard),
 };
 
 function handle(raw) {
@@ -84,12 +87,14 @@ export function connect() {
   const ws = new WebSocket(wsUrl('ws'));
   ws.onopen = () => {
     retry = 0;
+    emit('socket', true);
   };
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') handle(ev.data);
   };
   ws.onclose = () => {
     setConn(false, 'UI disconnected');
+    emit('socket', false);
     setTimeout(connect, Math.min(RETRY_BASE_MS * 2 ** retry++, RETRY_MAX_MS));
   };
 }

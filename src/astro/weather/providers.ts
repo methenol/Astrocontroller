@@ -1,7 +1,8 @@
 /**
  * The two providers, their answers validated before use:
  *  - Open-Meteo (https://open-meteo.com, free, no key): hourly cloud cover by layer, humidity, dew
- *    point, wind/gusts, precipitation probability, visibility.
+ *    point, wind/gusts, precipitation probability and amount, visibility, and what the night safety
+ *    report needs on top: the weather code, showers, snowfall and CAPE.
  *  - 7Timer! ASTRO (https://www.7timer.info, free, no key): astronomical seeing and transparency
  *    in 3-hour steps.
  */
@@ -9,7 +10,7 @@ import { z } from 'zod';
 import type { Site } from '../sky.js';
 import { getJson, type Fetch } from './http.js';
 
-const HOURLY = ['cloud_cover', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high', 'relative_humidity_2m', 'dew_point_2m', 'temperature_2m', 'wind_speed_10m', 'wind_gusts_10m', 'precipitation_probability', 'precipitation', 'visibility'] as const;
+const HOURLY = ['cloud_cover', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high', 'relative_humidity_2m', 'dew_point_2m', 'temperature_2m', 'wind_speed_10m', 'wind_gusts_10m', 'precipitation_probability', 'precipitation', 'visibility', 'weather_code', 'showers', 'snowfall', 'cape'] as const;
 const CURRENT = ['cloud_cover', 'temperature_2m', 'relative_humidity_2m', 'dew_point_2m', 'wind_speed_10m', 'wind_gusts_10m', 'precipitation'] as const;
 
 const series = z.array(z.number().nullable());
@@ -28,6 +29,10 @@ const OpenMeteoSchema = z.object({
     precipitation_probability: series.optional(),
     precipitation: series.optional(),
     visibility: series.optional(),
+    weather_code: series.optional(),
+    showers: series.optional(),
+    snowfall: series.optional(),
+    cape: series.optional(),
   }),
   current: z
     .object({
