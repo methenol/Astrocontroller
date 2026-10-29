@@ -1,5 +1,5 @@
 services:
-  astrocontroller:
+  astrocontroller-starfront:
     build:
       context: .
       # Build-time RUN steps fetch from apt/npm/bun registries. host keeps those
@@ -7,7 +7,7 @@ services:
       # proxy only the host is configured for.
       network: host
     image: astrocontroller:latest
-    container_name: astrocontroller
+    container_name: astrocontroller-starfront
     restart: unless-stopped
     stop_grace_period: 15s
     env_file: .env

@@ -27,7 +27,7 @@ const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
 const FITS_VIEW_SIZE = 2048;
 /** A snapshot reuses a frame up to this old, and waits this long for a new one. */
 const SNAPSHOT_MAX_AGE_MS = 5000;
-const SNAPSHOT_TIMEOUT_MS = 15_000;
+const SNAPSHOT_TIMEOUT_MS = 40_000;
 /** Items one delete request may name (a page of the album is 24; a night's card holds far fewer). */
 const ALBUM_DELETE_MAX = 100;
 

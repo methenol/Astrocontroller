@@ -237,6 +237,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   private async onConnected(): Promise<void> {
+    if (config.seestar.connection === 'zwo') await this.lowRtspQuality().catch((e) => log.warn(`could not lower the live video quality: ${errMsg(e)}`));
     try {
       await this.refreshState();
       if (this.isBusy()) {
@@ -247,6 +248,22 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     } catch (e) {
       log.warn(`post-connect refresh failed: ${errMsg(e)}`);
     }
+  }
+
+  /**
+   * Over ZWO Telescope Network the live video is a preview: HighQuality RTSP (1080×1920) through the
+   * tunnel's one session starves its control link within a minute, "Smooth" (360×640) does not.
+   * Stills and stacks are unaffected. wide_cam picks the camera a preview setting is for, as the
+   * Seestar app does (setPreviewForBothCameras): the wide one first, then the tele, leaving wide_cam
+   * false as it was.
+   */
+  private async lowRtspQuality(): Promise<void> {
+    type Preview = { preview?: { rtsp_quality?: string } };
+    const s = (await this.settings()) as (Preview & { second_camera?: Preview }) | undefined;
+    if (s?.preview?.rtsp_quality === 'Smooth' && s?.second_camera?.preview?.rtsp_quality === 'Smooth') return;
+    await this.call('set_setting', { wide_cam: true, preview: { rtsp_quality: 'Smooth' } });
+    await this.call('set_setting', { wide_cam: false, preview: { rtsp_quality: 'Smooth' } });
+    log.info('live video quality set to Smooth (360×640) on both cameras for ZWO Telescope Network');
   }
 
   // ---- state ---------------------------------------------------------------
@@ -448,11 +465,23 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     if (this.viewing() || this.operation) return null;
     if (Date.now() - this.liveViewAt < LIVE_VIEW_RETRY_MS) return null;
     this.liveViewAt = Date.now();
-    const mode = this.viewMode();
-    log.info(`starting a ${mode} view for the live video`);
-    await this.startView(false, mode);
+    // the RTSP streams are served in a scenery view only (firmware 9.75: a star view refuses them)
+    log.info('starting a scenery view for the live video');
+    await this.startView(false, 'scenery');
     await this.refreshState().catch(() => {});
     return null;
+  }
+
+  /**
+   * A frame was asked for from the RTSP video: a star view that is not stacking and runs no
+   * operation becomes a scenery view, the only mode the scope serves RTSP in.
+   */
+  async ensureVideoView(): Promise<void> {
+    await this.ensureLiveView();
+    const stacking = !!this.st.stack.state && !TERMINAL_STATES.has(this.st.stack.state) && this.st.stack.state !== 'idle';
+    if (this.operation || stacking || this.st.view.mode !== 'star' || !this.viewing()) return;
+    log.info('switching the star view to scenery: the scope serves RTSP video only there');
+    await this.setViewMode('scenery');
   }
 
   startStack(restart = false): Promise<RpcResponse> {
@@ -578,8 +607,21 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.call('set_setting', { stack_dither: o });
   }
 
-  setSetting(settings: Record<string, unknown>): Promise<RpcResponse> {
-    return this.call('set_setting', settings);
+  /**
+   * set_setting, except heater_enable: get_setting reports it but set_setting refuses it (code 109
+   * on firmware 9.75), so the dew heater goes through pi_output_set2.
+   */
+  async setSetting(settings: Record<string, unknown>): Promise<RpcResponse> {
+    const { heater_enable, ...rest } = settings;
+    let r: RpcResponse | undefined;
+    if (heater_enable !== undefined) r = await this.setHeater(Boolean(heater_enable));
+    if (Object.keys(rest).length || !r) r = await this.call('set_setting', rest);
+    return r;
+  }
+
+  /** The dew heater, at powerPct (the Seestar app's default 90) when on. */
+  setHeater(on: boolean, powerPct = 90): Promise<RpcResponse> {
+    return this.call('pi_output_set2', { heater: { state: on, value: Math.max(0, Math.min(100, Math.round(powerPct))) } });
   }
 
   async settings(): Promise<unknown> {

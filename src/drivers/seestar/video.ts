@@ -21,6 +21,8 @@ const log = logger('stream');
 const TICK_MS = 1000;
 /** A live session with no frame for this long is reopened. */
 const STALL_MS = 10_000;
+/** a new RTSP connection through the ZWO tunnel takes ~10-20 s to its first frame */
+const FIRST_FRAME_MS = config.seestar.connection === 'zwo' ? 30_000 : STALL_MS;
 const BACKOFF_BASE_MS = 1000;
 const MAX_BACKOFF_MS = 15_000;
 /** A reader told to stop is killed after this long. */
@@ -29,6 +31,25 @@ const STACK_POLL_MS = 5000;
 const STACK_GRAB_TIMEOUT_MS = 8000;
 const STACK_MAX_SIZE = 1600;
 const ERR_TAIL_CHARS = 400;
+
+/**
+ * Over ZWO Telescope Network one RTSP stream at a time: both through the one tunnel session starve
+ * its control link. The camera wanted most recently (a snapshot, a frame for a tool, a viewer
+ * opening it) reads; the other waits.
+ */
+export class RtspGate {
+  private readonly sources = new Set<SeestarCameraSource>();
+
+  add(s: SeestarCameraSource): void {
+    this.sources.add(s);
+  }
+
+  mayRead(s: SeestarCameraSource): boolean {
+    let winner: SeestarCameraSource | null = null;
+    for (const c of this.sources) if (c.inDemand && (!winner || c.wantedAt > winner.wantedAt)) winner = c;
+    return winner === s;
+  }
+}
 
 export class SeestarCameraSource extends Source {
   private proc: ChildProcess | null = null;
@@ -39,13 +60,26 @@ export class SeestarCameraSource extends Source {
   private attempts = 0;
   private nextAttemptAt = 0;
   private lastError = '';
+  /** when this camera was last asked for (RtspGate) */
+  wantedAt = 0;
 
   constructor(
     readonly camera: Camera,
     private readonly scope: Seestar,
     private readonly host: () => string,
+    private readonly gate: RtspGate | null = null,
   ) {
     super(camera);
+    gate?.add(this);
+  }
+
+  get inDemand(): boolean {
+    return this.running;
+  }
+
+  override hold(on: boolean): void {
+    if (on) this.wantedAt = Date.now();
+    super.hold(on);
   }
 
   get url(): string {
@@ -55,6 +89,7 @@ export class SeestarCameraSource extends Source {
 
   protected startSource(): void {
     this.nextAttemptAt = 0;
+    this.wantedAt = Date.now();
     if (!this.tickTimer) {
       this.tickTimer = setInterval(() => this.tick(), TICK_MS);
       this.tickTimer.unref();
@@ -97,7 +132,7 @@ export class SeestarCameraSource extends Source {
       return;
     }
     const fresh = this.lastFrameAt > this.connectedAt;
-    if (Date.now() - (fresh ? this.lastFrameAt : this.connectedAt) >= STALL_MS) this.restart(fresh ? 'live video stalled' : 'no video from the new connection');
+    if (Date.now() - (fresh ? this.lastFrameAt : this.connectedAt) >= (fresh ? STALL_MS : FIRST_FRAME_MS)) this.restart(fresh ? 'live video stalled' : 'no video from the new connection');
   }
 
   private restart(reason: string): void {
@@ -112,7 +147,9 @@ export class SeestarCameraSource extends Source {
     this.connectedAt = Date.now();
     const url = this.url;
     // the same reader as the Dwarf's: TCP RTSP, low latency, every real frame, rate-limited below
-    const args = ['-hide_banner', '-loglevel', 'error', '-rtsp_transport', 'tcp', '-timeout', '20000000', '-fflags', 'nobuffer', '-flags', 'low_delay', '-i', url, '-an', ...passthroughFrames(), '-q:v', '4', '-f', 'mjpeg', 'pipe:1'];
+    // over ZWO Telescope Network the live view is a 1 frame/s preview: the tunnel's one session carries the control link too
+    const rate = this.gate ? ['-vf', 'fps=1'] : passthroughFrames();
+    const args = ['-hide_banner', '-loglevel', 'error', '-rtsp_transport', 'tcp', '-timeout', '20000000', '-fflags', 'nobuffer', '-flags', 'low_delay', '-i', url, '-an', ...rate, '-q:v', '4', '-f', 'mjpeg', 'pipe:1'];
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = proc;
     this.procUrl = url;
@@ -226,8 +263,9 @@ export class SeestarVideoHub implements VideoHub {
     private readonly scope: Seestar,
     host: () => string,
   ) {
-    this.tele = new SeestarCameraSource('tele', scope, host);
-    this.wide = new SeestarCameraSource('wide', scope, host);
+    const gate = config.seestar.connection === 'zwo' ? new RtspGate() : null;
+    this.tele = new SeestarCameraSource('tele', scope, host, gate);
+    this.wide = new SeestarCameraSource('wide', scope, host, gate);
     this.stack = new SeestarStackSource(scope);
     this.wasConnected = scope.state.connected;
     scope.on('state', this.onState);

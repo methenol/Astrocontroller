@@ -23,7 +23,8 @@ import { NOMINAL_FOV } from './mcp.js';
 import type { SeestarMedia } from './web.js';
 
 const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
-const FRAME_TIMEOUT_MS = 20_000;
+/** a cold RTSP connection through the ZWO tunnel takes up to ~30 s to its first frame */
+const FRAME_TIMEOUT_MS = 40_000;
 const FITS_HEADER_KEYS = /EXPTIME|EXPOSURE|GAIN|DATE|OBJECT|^RA$|^DEC$|CCD-TEMP|FILTER|BAYER|TELESCOP|FOCALLEN|FOCUSPOS|WIDECAM/;
 const MEDIA_TYPES: Record<string, number> = { all: 0, photo: 1, video: 2, astro: 4 };
 const TYPE_NAMES: Record<number, string> = { 1: 'photo', 2: 'video', 4: 'astro' };
@@ -33,7 +34,7 @@ const cameraArg = z.enum(['tele', 'wide']).describe('tele = the telephoto, wide 
 /** An image from any of the sources above. `encoded` is the original JPEG when there is one. */
 export async function seestarImage(source: string, scope: Seestar, media: SeestarMedia): Promise<{ img: FloatImage; encoded?: Buffer }> {
   if (source === 'tele' || source === 'wide') {
-    await scope.ensureLiveView();
+    await scope.ensureVideoView();
     const f = await media.hub.get(source).snapshot(0, FRAME_TIMEOUT_MS);
     const img = await decode(f.jpeg, `seestar:${source}.jpg`);
     img.capturedAt = f.at;
