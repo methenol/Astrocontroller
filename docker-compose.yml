@@ -29,7 +29,8 @@ services:
       # Your imagery library (FITS lights, stacks, calibration frames).
       - ${LIBRARY_PATH:-./library}:/library
 
-  # ZWO Telescope Network tunnel (github.com/Phaeilo/seestar-portfwd), for TELESCOPE_DRIVER=seestar
+  # ZWO Telescope Network tunnel (seestar-portfwd/, vendored here from github.com/Phaeilo/seestar-portfwd),
+  # for TELESCOPE_DRIVER=seestar
   # with SEESTAR_CONNECTION=zwo. Started only with the seestar profile (COMPOSE_PROFILES=seestar
   # in .env, or --profile seestar), so the Dwarf setup is unchanged.
   #
@@ -38,8 +39,8 @@ services:
   seestar-portfwd:
     profiles: [seestar]
     build:
-      # your checkout of seestar-portfwd
-      context: ${SEESTAR_PORTFWD_DIR:-../seestar-portfwd}
+      # vendored in this project (upstream: github.com/Phaeilo/seestar-portfwd, see its README)
+      context: ${SEESTAR_PORTFWD_DIR:-./seestar-portfwd}
       dockerfile: Containerfile
       network: host
       # T: the ThroughTek SDK set the current Seestar app loads (libIOTCAPIsT.so, ...). The older set
@@ -49,18 +50,36 @@ services:
         TUTK_SUFFIX: ${SEESTAR_TUTK_SUFFIX:-T}
     image: seestar-portfwd:latest
     container_name: seestar-portfwd
-    # the tunnel exits when the P2P session is lost or taken over: Docker starts it again
+    # The supervisor inside keeps the P2P session up itself (it reconnects a lost one); Docker only
+    # has to bring the container back after a crash or a reboot.
     restart: unless-stopped
-    # docker stop → SIGINT to the tunnel, which then releases the ZWO session
+    # docker stop → SIGTERM: the supervisor stops the tunnel (SDK abort + disconnect) and releases
+    # the ZWO session with stop_p2p before exiting, which is also what the app's Disconnect asks for.
     stop_grace_period: 20s
+    # The supervisor keeps its session record here: the conId to give back and the controller's wish
+    # that this connection be restored. On a container-local path it dies with the container, so an
+    # image rebuild or a recreate would silently leave the scope released until somebody presses
+    # Connect again; a named volume carries the wish across.
+    volumes:
+      - seestar-portfwd-state:/var/lib/seestar-portfwd
     # only what the tunnel reads, not the whole .env
     environment:
       SEESTAR_USER: ${SEESTAR_USER:-}
       SEESTAR_PASSWORD: ${SEESTAR_PASSWORD:-}
       SEESTAR_SN: ${SEESTAR_SN:-}
       SEESTAR_COUNTRY: ${SEESTAR_COUNTRY:-US}
+      # Stay idle: Astrocontroller's Connect presses the tunnel's connect, its Disconnect releases
+      # the telescope (POST /connect and /disconnect on SEESTAR_TUNNEL_CONTROL_PORT). Set to 1 to
+      # have the tunnel take the scope as soon as the container starts, as it used to.
+      SEESTAR_TUNNEL_AUTOSTART: ${SEESTAR_TUNNEL_AUTOSTART:-0}
+      SEESTAR_TUNNEL_CONTROL_PORT: ${SEESTAR_TUNNEL_CONTROL_PORT:-4710}
+      # optional: both sides then require Authorization: Bearer <token>
+      SEESTAR_TUNNEL_CONTROL_TOKEN: ${SEESTAR_TUNNEL_CONTROL_TOKEN:-}
     # qemu/bionic's linker calls personality(), which the default seccomp profile blocks.
     security_opt:
       - seccomp:unconfined
     # One network only (the project's default, shared with Astrocontroller): attached to a second,
     # internal network as well, the ThroughTek P2P setup fails (Connect_Ex -42 / -60).
+
+volumes:
+  seestar-portfwd-state:

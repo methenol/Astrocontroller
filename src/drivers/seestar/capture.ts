@@ -76,7 +76,7 @@ export class SeestarCapture {
   }
 
   private async frame(camera: Camera): Promise<Buffer> {
-    await this.scope.ensureLiveView();
+    await this.scope.ensureVideoView();
     return (await this.stream(camera).snapshot(0, FRAME_TIMEOUT_MS)).jpeg;
   }
 

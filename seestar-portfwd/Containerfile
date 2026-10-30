@@ -1,0 +1,76 @@
+# Self-contained image for the Seestar cloud tunnel.
+#
+# Runs the ZWO app's own armeabi-v7a TUTK/Kalay libraries under qemu-arm to open
+# a P2P tunnel to the telescope and forward its ports. Multi-stage: the NDK and
+# Android system image stay in the builder; the final image keeps just the
+# compiled tunnel, a bionic runtime, and qemu-arm. Build: docker build -t seestar-portfwd publish/
+
+# builder: compile the tunnel and extract bionic
+FROM debian:trixie-slim AS builder
+
+ARG NDK_VERSION=r26d
+# Any armeabi-v7a system image works; it is only a source of a real bionic libc.
+ARG SYSIMG=armeabi-v7a-24_r07.zip
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        android-sdk-libsparse-utils e2fsprogs ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# The TUTK libs need bionic, not glibc. Pull libc/linker from a system image.
+RUN curl -fsSL -o /tmp/sys.zip \
+        "https://dl.google.com/android/repository/sys-img/android/${SYSIMG}" \
+    && unzip -q /tmp/sys.zip -d /tmp/sys \
+    && IMG="$(find /tmp/sys -name 'system.img' | head -1)" \
+    && (simg2img "$IMG" /tmp/system.raw 2>/dev/null || cp "$IMG" /tmp/system.raw) \
+    && mkdir -p /bionic/system/lib /bionic/system/bin \
+    && for f in libc.so libm.so libdl.so libstdc++.so liblog.so; do \
+         debugfs -R "dump /lib/$f /bionic/system/lib/$f" /tmp/system.raw 2>/dev/null || true; \
+       done \
+    && debugfs -R "dump /bin/linker /bionic/system/bin/linker" /tmp/system.raw \
+    && chmod +x /bionic/system/bin/linker
+
+# NDK: only to compile the tunnel + DNS shim against bionic headers.
+RUN curl -fsSL -o /tmp/ndk.zip \
+        "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" \
+    && unzip -q /tmp/ndk.zip -d /opt && mv /opt/android-ndk-* /opt/ndk
+# "" = the TUTK set bundled originally; T = the newer set the current app loads (needs liblog)
+ARG TUTK_SUFFIX=""
+ENV CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
+
+# tunnel dlopen's the TUTK libs (-ldl only); dnshook is the LD_PRELOAD resolver.
+COPY src/tunnel.c src/dnshook.c /work/src/
+RUN "$CC" -O2 -Wall -Wextra -DTUTK_SUFFIX="\"${TUTK_SUFFIX}\"" -o /work/tunnel /work/src/tunnel.c -ldl \
+    && "$CC" -O2 -Wall -Wextra -fPIC -shared -o /work/libdnshook.so /work/src/dnshook.c
+
+# final image
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        qemu-user python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && find /usr/bin -name 'qemu-*' ! -name 'qemu-arm' -delete   # keep only qemu-arm
+
+COPY --from=builder /bionic /bionic
+COPY --from=builder /work/tunnel /work/libdnshook.so /work/
+COPY tunnel_libs/*.so /tutk/
+COPY src/supervisor.py /work/src/supervisor.py
+COPY seestar_status.py /work/seestar_status.py
+# bionic and the TUTK libs must share one search path (LD_LIBRARY_PATH=/opt/lib).
+RUN mkdir -p /opt/lib \
+    && ln -s /bionic/system/lib/*.so /tutk/*.so /opt/lib/ \
+    && chmod +x /work/tunnel
+
+# Bake a stable machine id so the srcId (see seestar_status.source_id) is
+# constant across container recreations. Unique per local build.
+RUN echo 5933386a37cb40ebace763fc0e99b9d0 > /etc/machine-id
+
+WORKDIR /work
+
+# The entry point is the supervisor: it owns the one tunnel process and its one P2P session,
+# reconnects a lost session, releases the scope when asked, and answers Connect/Disconnect on
+# SEESTAR_TUNNEL_CONTROL_PORT (4710) for Astrocontroller. See README.md.
+EXPOSE 4710
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD ["python3", "/work/src/supervisor.py", "--health"]
+
+ENTRYPOINT ["python3", "/work/src/supervisor.py"]

@@ -280,8 +280,16 @@ export class SeestarImageStream extends SafeEmitter {
         clearTimeout(timer);
         this.off('frame', onFrame);
         sock.off('close', onClose);
-        if (err) reject(err);
-        else resolve(f!);
+        if (!err) {
+          resolve(f!);
+          return;
+        }
+        // A socket that answered nothing, or died partway through a 6 MB frame, leaves its reader
+        // still waiting for the rest of that frame: every later grab on the same socket would then
+        // time out as well, which is how one hiccup turned into permanent "no preview frame". Drop
+        // it, so the next request dials a clean socket.
+        if (this.sock === sock) this.close();
+        reject(err);
       };
       const onFrame = (f: Frame) => wanted(kind, f.header.imgType) && done(null, f);
       const onClose = () => done(new Error(`the image socket ${this.host}:${this.port} closed before a ${kind} frame came`));

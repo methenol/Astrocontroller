@@ -355,6 +355,83 @@ describe('ZWO tunnel supervisor', () => {
     await until(() => t.status().phase === 'up');
     t.stop();
   });
+
+  /** the JSON the supervisor inside the tunnel container answers on GET /status */
+  const supState = (over: Record<string, unknown> = {}) => ({
+    phase: 'idle', desired: 'disconnected', attempts: 0, reconnects: 0, lastError: null, lastExit: null,
+    device: null, session: null, portOpen: false, mode: null, upSince: null, leaseSeconds: null,
+    leaseExpiresAt: null, backoffSeconds: 1, stopping: false, output: [], ...over,
+  });
+
+  const supervisorTunnel = (
+    fetchFn: typeof fetch,
+    probeFn: () => Promise<boolean>,
+    supervisor: { host: string; port: number; token?: string; leaseS: number },
+  ) => new ZwoTunnel({ host: '127.0.0.1', port: 4700, command: '', readyTimeoutS: 60, env: {}, probeMs: 20, probeFn, fetchFn, supervisor });
+
+  test('Connect asks the container for the telescope and Disconnect releases it', async () => {
+    const sent: { url: string; body: Record<string, unknown>; auth: string }[] = [];
+    let state = supState();
+    const fetchFn = (async (url: string, init: RequestInit) => {
+      sent.push({ url: String(url), body: init.body ? JSON.parse(String(init.body)) : {}, auth: String((init.headers as Record<string, string>).authorization ?? '') });
+      if (String(url).endsWith('/connect')) state = supState({ phase: 'connected', desired: 'connected', attempts: 1, mode: 'P2P (direct)', device: { sn: 'S50-1', model: 'Seestar S50 Pro', status: 'ONLINE' }, session: { sn: 'S50-1', conId: 'CON123…' }, output: ['[*] mode P2P (direct), remote 1.2.3.4', '[*] tunnel ready - press Ctrl-C to disconnect'] });
+      if (String(url).endsWith('/disconnect')) state = supState({ phase: 'idle', lastExit: 'exit code 0' });
+      return new Response(JSON.stringify(state), { status: 200 });
+    }) as typeof fetch;
+    const t = supervisorTunnel(fetchFn, async () => true, { host: 'seestar-portfwd', port: 4710, token: 'sekret', leaseS: 180 });
+    assert.equal(t.status().managed, true, 'the container tunnel is ours to drive');
+    t.start();
+    const connect = sent.find((r) => r.url.endsWith('/connect'));
+    assert.ok(connect, 'Connect takes the scope from the container');
+    assert.equal(connect.body.leaseS, 180, 'and only while we keep refreshing it');
+    assert.equal(connect.auth, 'Bearer sekret');
+    await until(() => t.status().phase === 'up');
+    const st = t.status();
+    assert.equal(st.supervisor?.phase, 'connected');
+    assert.equal(st.supervisor?.device?.status, 'ONLINE', 'what the scope itself reports travels with it');
+    assert.deepEqual(st.output.slice(-1), ['[*] tunnel ready - press Ctrl-C to disconnect'], "the container's tunnel lines reach the agent");
+    assert.equal(st.detail, null);
+    t.stop();
+    assert.equal(t.status().phase, 'stopped');
+    t.restart();
+    assert.equal(sent.filter((r) => r.url.endsWith('/disconnect')).length, 2, 'a restart releases the session and takes it again');
+    await until(() => t.status().phase === 'up');
+    t.stop();
+    await t.flush(300);
+  });
+
+  test('the supervisor phase becomes the tunnel phase, its reason the reason in the UI', async () => {
+    let state = supState({ phase: 'connecting', desired: 'connected' });
+    const fetchFn = (async () => new Response(JSON.stringify(state), { status: 200 })) as typeof fetch;
+    const t = supervisorTunnel(fetchFn, async () => false, { host: 'seestar-portfwd', port: 4710, leaseS: 0 });
+    t.start();
+    await until(() => t.status().phase === 'starting');
+    state = supState({ phase: 'backoff', desired: 'connected', lastError: 'online-link failed: Connect_Ex failed: -42' });
+    await until(() => t.status().phase === 'starting' && (t.status().detail ?? '').includes('-42'));
+    state = supState({ phase: 'releasing', desired: 'disconnected' });
+    await until(() => t.status().phase === 'releasing');
+    state = supState({ phase: 'connected', desired: 'connected' });
+    await until(() => t.status().phase === 'up' && t.status().detail === null);
+    state = supState({ phase: 'failed', desired: 'disconnected', lastError: 'config: SEESTAR_USER is not set' });
+    await until(() => t.status().phase === 'failed');
+    t.stop();
+  });
+
+  test('a tunnel container with no supervisor is watched by port alone, and says so', async () => {
+    const fetchFn = (async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:4710');
+    }) as typeof fetch;
+    let open = false;
+    const t = supervisorTunnel(fetchFn, async () => open, { host: '127.0.0.1', port: 4710, leaseS: 0 });
+    t.start();
+    await until(() => (t.status().detail ?? '').includes('ECONNREFUSED'));
+    assert.notEqual(t.status().phase, 'up', 'a port nobody supervises is not proof of a session');
+    open = true;
+    await until(() => t.status().phase === 'up');
+    assert.match(t.status().detail ?? '', /ECONNREFUSED/, 'the degraded mode is said out loud');
+    t.stop();
+    await t.flush(300);
+  });
 });
 
 describe('ZWO account API', () => {

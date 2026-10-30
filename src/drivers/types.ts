@@ -21,7 +21,8 @@ export interface TelescopeDevice {
   readonly driver: DriverId;
   /** Open the link and keep it open (reconnecting) until stop(). */
   start(): void;
-  stop(): void;
+  /** Close every link; async when a link has to be released somewhere else (the ZWO tunnel container). */
+  stop(): void | Promise<void>;
   /** Disconnect button: free the telescope for another client until connectLink(). */
   release(): void;
   /** Connect button. */
@@ -50,8 +51,8 @@ export interface DriverRuntime {
   mountWeb(app: Express, server: http.Server): { close(): void };
   /** Start the link and the driver's background work. */
   start(): void;
-  /** Shutdown steps in order; one failing never keeps the others from running. */
-  shutdownSteps(): Array<[string, () => void]>;
+  /** Shutdown steps in order; one failing never keeps the others from running. Steps may be async. */
+  shutdownSteps(): Array<[string, () => void | Promise<unknown>]>;
   /** One line for the start-up log: where the telescope is. */
   describeTarget(): string;
 }

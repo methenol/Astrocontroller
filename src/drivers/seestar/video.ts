@@ -19,12 +19,23 @@ import { TERMINAL_STATES } from './state.js';
 const log = logger('stream');
 
 const TICK_MS = 1000;
-/** A live session with no frame for this long is reopened. */
-const STALL_MS = 10_000;
+/** No frame for this long while the scope is idle: the reader is reopened. A frame pause during an
+ *  operation (goto, plate-solve, capture, focus) is the scope pausing live video, not a dead
+ *  connection: the reader stays open and ffmpeg's own socket timeout ends it if the link goes. */
+const SILENCE_MS = 90_000;
+/** A frame pause this long is worth saying out loud before it could become a reopen. */
+const STALL_NOTE_MS = 10_000;
 /** a new RTSP connection through the ZWO tunnel takes ~10-20 s to its first frame */
-const FIRST_FRAME_MS = config.seestar.connection === 'zwo' ? 30_000 : STALL_MS;
-const BACKOFF_BASE_MS = 1000;
-const MAX_BACKOFF_MS = 15_000;
+const FIRST_FRAME_MS = config.seestar.connection === 'zwo' ? 30_000 : 15_000;
+/** reconnect fast: a dropped stream should be back in seconds, not minutes */
+const BACKOFF_BASE_MS = 500;
+/** A reader that has never produced a frame is not a dropped stream: the scope is not serving RTSP
+ *  at all, which it does from a scenery view only. Retrying those slowly keeps the tunnel's control
+ *  link and the other camera free instead of dialling a dead port every few seconds. */
+const NEVER_BACKOFF_MS = 20_000;
+const MAX_BACKOFF_MS = 5_000;
+/** Frames per second each reader decodes while both cameras share the tunnel's one session. */
+const GATE_FPS = 5;
 /** A reader told to stop is killed after this long. */
 const KILL_AFTER_MS = 3000;
 const STACK_POLL_MS = 5000;
@@ -78,7 +89,15 @@ export class SeestarCameraSource extends Source {
   }
 
   override hold(on: boolean): void {
-    if (on) this.wantedAt = Date.now();
+    if (on) {
+      this.wantedAt = Date.now();
+      // Someone asked for this camera by name (a snapshot, a tool, a viewer): dial now instead of
+      // sitting out the backoff a failing connection earned, or the caller's timeout expires first.
+      if (!this.proc) {
+        this.nextAttemptAt = 0;
+        if (this.running) this.tick();
+      }
+    }
     super.hold(on);
   }
 
@@ -123,22 +142,39 @@ export class SeestarCameraSource extends Source {
     if (this.proc && this.procUrl !== this.url) this.stopReader();
     if (!this.proc) {
       if (Date.now() >= this.nextAttemptAt) {
-        void this.scope.ensureLiveView().then(
-          (why) => why && (this.note = why),
-          (e) => log.warn(`${this.name}: could not start a view for live video: ${errMsg(e)}`),
-        );
+        // never ask the scope for a view in the middle of an operation: that is a control command
+        // competing with the one running, and the view comes back on its own as soon as it ends
+        if (this.scope.busy) this.note = 'the scope is working; live video resumes when it is done';
+        else
+          void this.scope.ensureVideoView().then(
+            (why) => why && (this.note = why),
+            (e) => log.warn(`${this.name}: could not get a view for live video: ${errMsg(e)}`),
+          );
         this.connect();
       }
       return;
     }
     const fresh = this.lastFrameAt > this.connectedAt;
-    if (Date.now() - (fresh ? this.lastFrameAt : this.connectedAt) >= (fresh ? STALL_MS : FIRST_FRAME_MS)) this.restart(fresh ? 'live video stalled' : 'no video from the new connection');
+    const since = Date.now() - (fresh ? this.lastFrameAt : this.connectedAt);
+    if (since >= (fresh ? SILENCE_MS : FIRST_FRAME_MS) && !this.scope.busy) {
+      this.restart(fresh ? 'live video went silent' : 'no video from the new connection');
+    } else if (fresh && since >= STALL_NOTE_MS && !this.note) {
+      this.note = `no frames for ${Math.round(since / 1000)} s: the scope pauses live video while it works`;
+    }
   }
 
   private restart(reason: string): void {
     this.attempts++;
-    this.nextAttemptAt = Date.now() + Math.min(BACKOFF_BASE_MS * 2 ** Math.max(0, this.attempts - 1), MAX_BACKOFF_MS);
-    if (this.attempts === 1) log.info(`${this.name}: ${reason}; reconnecting`);
+    // a stream that was carrying picture is worth dialling again within seconds; one that never
+    // produced a frame on this connection is the scope not serving RTSP, so those retries slow down
+    // and jitter rather than competing with commands and the other camera every few seconds
+    const carried = this.lastFrameAt > this.connectedAt;
+    const cap = carried ? MAX_BACKOFF_MS : NEVER_BACKOFF_MS;
+    this.nextAttemptAt =
+      Date.now() +
+      Math.min(BACKOFF_BASE_MS * 2 ** Math.max(0, this.attempts - 1), cap) +
+      Math.floor(Math.random() * 1000);
+    if (this.attempts === 1 || this.attempts % 10 === 0) log.info(`${this.name}: ${reason}; reconnecting (attempt ${this.attempts})`);
     this.note = `${reason}; reconnecting${this.attempts > 1 ? ` (attempt ${this.attempts})` : ''}`;
     this.stopReader();
   }
@@ -147,8 +183,10 @@ export class SeestarCameraSource extends Source {
     this.connectedAt = Date.now();
     const url = this.url;
     // the same reader as the Dwarf's: TCP RTSP, low latency, every real frame, rate-limited below
-    // over ZWO Telescope Network the live view is a 1 frame/s preview: the tunnel's one session carries the control link too
-    const rate = this.gate ? ['-vf', 'fps=1'] : passthroughFrames();
+    // Over ZWO Telescope Network both readers share the one tunnel session with the control link, so
+    // the preview is throttled — but a 1 fps crawl reads as a frozen picture, and the scope's RTSP
+    // encoder only puts out ~10 fps anyway. This is the compromise; `minGap` below caps it again.
+    const rate = this.gate ? ['-vf', `fps=${GATE_FPS}`] : passthroughFrames();
     const args = ['-hide_banner', '-loglevel', 'error', '-rtsp_transport', 'tcp', '-timeout', '20000000', '-fflags', 'nobuffer', '-flags', 'low_delay', '-i', url, '-an', ...rate, '-q:v', '4', '-f', 'mjpeg', 'pipe:1'];
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = proc;

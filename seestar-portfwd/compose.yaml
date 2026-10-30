@@ -1,0 +1,44 @@
+services:
+  seestar:
+    build: .
+    image: seestar-portfwd
+    env_file:
+      - path: .env
+        required: false       # .env is optional; creds can come from the shell
+    stdin_open: true          # so `compose run` can prompt
+    tty: true
+    environment:
+      # Run standalone (nobody drives the tunnel over its control API): connect at start, hold the
+      # session until Ctrl-C / stop, which releases it. Astrocontroller's compose.yml sets this to
+      # 0 instead, so its Connect and Disconnect buttons decide when the scope is taken.
+      SEESTAR_TUNNEL_AUTOSTART: "1"
+      # The supervisor's control API; the same defaults work without these two lines.
+      # SEESTAR_TUNNEL_CONTROL_TOKEN:            # require Authorization: Bearer <token>
+      # SEESTAR_TUNNEL_LEASE_S: 0                # 0 = keep the session until Disconnect
+    # qemu/bionic's linker calls personality(), which the default seccomp profile blocks.
+    security_opt:
+      - seccomp:unconfined
+    # Device ports, host loopback only. 80/22/445 remapped to avoid clashes.
+    ports:
+      - "127.0.0.1:4700:4700"    # JSON-RPC control
+      - "127.0.0.1:4350:4350"    # firmware control
+      - "127.0.0.1:8080:80"      # file/image server
+      - "127.0.0.1:4801:4801"    # file API
+      - "127.0.0.1:4800:4800"    # image stream
+      - "127.0.0.1:4804:4804"    # wide image stream
+      - "127.0.0.1:4554:4554"    # telephoto RTSP video
+      - "127.0.0.1:4555:4555"    # wide-lens RTSP video
+      - "127.0.0.1:4361:4361"    # firmware upload
+      - "127.0.0.1:4445:445"     # SMB
+      - "127.0.0.1:2222:22"      # SSH
+      - "127.0.0.1:32323:32323"  # ASCOM Alpaca
+      - "127.0.0.1:4710:4710"    # the supervisor's control API (connect / disconnect / status)
+    restart: "no"
+    # The session record (the conId to give back, and the wish that the connection be restored when
+    # the container comes back) has to outlive the container, or a restart drops a live session
+    # without a trace and leaves the scope holding it.
+    volumes:
+      - seestar-portfwd-state:/var/lib/seestar-portfwd
+
+volumes:
+  seestar-portfwd-state:

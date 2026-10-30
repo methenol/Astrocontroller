@@ -104,23 +104,23 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
     },
   );
 
-  tool('seestar_connect', 'Connect (or reconnect) to the Seestar after a Disconnect: opens the control link, and over ZWO Telescope Network the tunnel too.', {}, async () => {
+  tool('seestar_connect', 'Connect (or reconnect) to the Seestar after a Disconnect: opens the control link and, over ZWO Telescope Network, asks the tunnel for the one remote session of the scope (its supervisor takes it from whoever holds it, the official app included).', {}, async () => {
     scope.connectLink();
     return text('connecting; check seestar_status in a few seconds');
   });
 
-  tool('seestar_disconnect', 'Release the Seestar: close every link (and the ZWO tunnel) so the official app can take it. It stays released, across restarts, until seestar_connect.', {}, async () => {
+  tool('seestar_disconnect', 'Release the Seestar: close every link and, over ZWO Telescope Network, hand the session back (the tunnel releases it with stop_p2p, so the scope leaves OCCUPIED and the official app can take it). It stays released, across restarts, until seestar_connect.', {}, async () => {
     scope.release();
     return text('released');
   });
 
   tool('zwo_devices', "The telescopes on the ZWO account (owned and shared, as a rented remote scope appears) with their network state: online, offline, shooting (busy with someone's session), occupied.", {}, async () => json(await listDevices()));
 
-  tool('tunnel_status', 'The ZWO Telescope Network tunnel: phase (starting, up, down, failed, unmanaged), whether the forwarded control port answers, restarts and its last output lines.', {}, async () =>
+  tool('tunnel_status', 'The ZWO Telescope Network tunnel: phase (starting, up, releasing, down, stopped, failed, unmanaged), whether the forwarded control port answers, reconnects, its last output lines, and what the supervisor in the tunnel container reported (device state, session, last error).', {}, async () =>
     json(scope.tunnel?.status() ?? { phase: 'none', note: `connection is ${scope.state.connection}: no tunnel` }),
   );
 
-  tool('tunnel_restart', 'Restart the ZWO Telescope Network tunnel (after it failed, or the remote session was taken).', {}, async () => {
+  tool('tunnel_restart', 'Restart the ZWO Telescope Network tunnel (after it failed, or the remote session was taken): release the session and take it again.', {}, async () => {
     if (!scope.tunnel) throw new Error(`connection is ${scope.state.connection}: there is no tunnel`);
     scope.tunnel.restart();
     return json(scope.tunnel.status());

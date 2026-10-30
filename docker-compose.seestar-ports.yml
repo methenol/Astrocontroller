@@ -24,3 +24,4 @@ services:
       - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_FW_UPLOAD_PORT:-4361}:4361"    # firmware upload
       - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_SMB_PORT:-4445}:445"           # SMB (images share)
       - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_SSH_PORT:-2222}:22"            # SSH
+      - "${SEESTAR_PUBLISH_ADDR:-127.0.0.1}:${SEESTAR_PUBLISH_TUNNEL_CONTROL_PORT:-4710}:4710"  # the tunnel supervisor's connect/disconnect API

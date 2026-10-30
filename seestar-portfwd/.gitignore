@@ -1,0 +1,8 @@
+# never commit secrets or local build artifacts
+.env
+*.pem
+*.key
+src_id
+*.pcap
+__pycache__/
+.ruff_cache/

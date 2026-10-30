@@ -56,36 +56,37 @@ server.listen(config.web.port, () => {
 });
 
 let shuttingDown = false;
-function shutdown(signal: string): void {
+async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   log.info(`shutting down (${signal})`);
-  const steps: Array<[string, () => void]> = [
+  const steps: Array<[string, () => void | Promise<unknown>]> = [
     ['processing', () => stopProcessing()],
     ...runtime.shutdownSteps(),
     ['agent', () => agent.stop()],
     ['web', () => web.close()],
     ['server', () => server.close()],
   ];
-  // one failing step never keeps the others from running
-  for (const [name, step] of steps) {
-    try {
-      step();
-    } catch (e) {
-      log.warn(`shutdown: ${name}: ${errMsg(e)}`);
-    }
-  }
+  // armed first: a step that never answers must not keep the process alive
   setTimeout(() => {
     server.closeAllConnections();
     process.exit(process.exitCode ?? 0);
   }, SHUTDOWN_GRACE_MS).unref();
+  // one failing step never keeps the others from running; an async step (the ZWO tunnel releasing
+  // the telescope over HTTP) gets its answer inside the grace period
+  for (const [name, step] of steps) {
+    try {
+      await step();
+    } catch (e) {
+      log.warn(`shutdown: ${name}: ${errMsg(e)}`);
+    }
+  }
 }
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('unhandledRejection', (r) => log.error(`unhandled rejection: ${errMsg(r)}`));
 process.on('uncaughtException', (e) => {
   log.error(`uncaught exception: ${e.stack ?? errMsg(e)}`);
-  // the process state is unknown now: stop cleanly (the container restarts it)
-  shutdown('uncaught exception');
+  void shutdown('uncaught exception');
   process.exitCode = 1;
 });

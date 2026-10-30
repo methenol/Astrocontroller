@@ -135,6 +135,9 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
               command: s.tunnel.command,
               cwd: s.tunnel.cwd,
               readyTimeoutS: s.tunnel.readyTimeoutS,
+              supervisor: s.tunnel.control.enabled
+                ? { host: s.tunnel.control.host, port: s.tunnel.control.port, token: s.tunnel.control.token, leaseS: s.tunnel.control.leaseS }
+                : null,
               env: Object.fromEntries(
                 Object.entries({ SEESTAR_USER: s.account.user, SEESTAR_PASSWORD: s.account.password, SEESTAR_SN: s.account.serial }).filter(([, v]) => v),
               ),
@@ -175,12 +178,14 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     this.syncLink();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.started = false;
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.emitTimer) clearTimeout(this.emitTimer);
     this.pollTimer = this.emitTimer = null;
     this.closeTransport();
+    // The tunnel container holds the telescope's one session: let it hear the release before we exit.
+    await this.tunnel?.flush(1200);
   }
 
   /** Disconnect: close every link, and the ZWO session too, so the official app can have the scope. */
@@ -454,6 +459,12 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return !!v.state && !TERMINAL_STATES.has(v.state) && v.state !== 'idle' && v.mode !== 'none';
   }
 
+  /** An operation (goto, capture, focus, plate-solve) is running: the live readers keep their hands
+   *  off the control link until it finishes, so a command never competes with a stream. */
+  get busy(): boolean {
+    return this.operation !== null;
+  }
+
   /**
    * The RTSP streams carry video only while the scope runs a view. A viewer of the live video gets
    * one started (the Dwarf's streams are always on), unless the arm is parked or the scope is busy.
@@ -473,15 +484,23 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   /**
-   * A frame was asked for from the RTSP video: a star view that is not stacking and runs no
-   * operation becomes a scenery view, the only mode the scope serves RTSP in.
+   * A frame was asked for from the RTSP video. The scope serves RTSP from a scenery view only
+   * (firmware 9.75 refuses it in a star view), so this starts a view when none runs and promotes a
+   * star view that is neither stacking nor mid-operation. Returns why no video is possible, or null.
    */
-  async ensureVideoView(): Promise<void> {
-    await this.ensureLiveView();
+  async ensureVideoView(): Promise<string | null> {
+    const why = await this.ensureLiveView();
+    if (why) return why;
+    if (this.st.view.mode !== 'star' || !this.viewing()) return null; // already serving video, or none to promote
+    if (this.operation) return `${this.operation} is running: live video resumes when it finishes`;
     const stacking = !!this.st.stack.state && !TERMINAL_STATES.has(this.st.stack.state) && this.st.stack.state !== 'idle';
-    if (this.operation || stacking || this.st.view.mode !== 'star' || !this.viewing()) return;
+    if (stacking) return 'the scope is stacking: live video resumes when the stack finishes';
+    // the same throttle as starting a view: flipping the view mode every few seconds helps nothing
+    if (Date.now() - this.liveViewAt < LIVE_VIEW_RETRY_MS) return null;
+    this.liveViewAt = Date.now();
     log.info('switching the star view to scenery: the scope serves RTSP video only there');
     await this.setViewMode('scenery');
+    return null;
   }
 
   startStack(restart = false): Promise<RpcResponse> {

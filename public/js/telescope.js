@@ -17,10 +17,21 @@ export function setConn(ok, text) {
   $('span', c).textContent = text;
 }
 
+/** Over ZWO Telescope Network the tunnel container decides whether the scope is ours at all. */
+const TUNNEL_TEXT = {
+  starting: 'opening the ZWO tunnel…',
+  releasing: 'releasing the telescope…',
+  down: '⚠ ZWO tunnel down',
+  failed: '⚠ ZWO tunnel failed',
+  stopped: 'ZWO tunnel stopped',
+};
+
 function connText(t) {
   const ls = t.link?.state;
   if (t.connected) return t.device?.name ?? 'connected';
   if (t.released) return 'released';
+  const tunnel = t.tunnel?.phase && t.tunnel.phase !== 'up' ? TUNNEL_TEXT[t.tunnel.phase] : null;
+  if (tunnel) return tunnel;
   if (ls === 'unresponsive') return '⚠ telescope not responding';
   if (ls === 'contended') return '⚠ another app has the telescope';
   return 'telescope offline';
@@ -28,7 +39,7 @@ function connText(t) {
 
 function renderChips(t) {
   setConn(!!t.connected, connText(t));
-  $('#chip-conn').title = t.link?.detail ?? '';
+  $('#chip-conn').title = [t.link?.detail, t.tunnel?.detail, t.tunnel?.supervisor?.lastError].filter(Boolean).join(' · ');
   // the user has to act on these: say so once per episode
   const ls = t.link?.state;
   if (ALERT_STATES.has(ls) && linkAlert !== ls && t.link?.detail) toast(t.link.detail, true);

@@ -57,11 +57,26 @@ export const config = {
       country: env.str('SEESTAR_COUNTRY', 'US'),
     },
     tunnel: {
-      /** started and supervised for zwo when set, e.g. `docker compose -f /opt/seestar-portfwd/compose.yaml up`; empty = you run it */
+      /** started and supervised for zwo when set, e.g. `docker compose -f seestar-portfwd/compose.yaml up`; empty = the tunnel runs as a container (below) or you run it */
       command: env.str('SEESTAR_TUNNEL_COMMAND', ''),
       cwd: env.str('SEESTAR_TUNNEL_CWD', ''),
       /** how long the tunnel may take to come up before a start is called failed */
       readyTimeoutS: env.num('SEESTAR_TUNNEL_READY_TIMEOUT_S', 180, { min: 10, max: 1800 }),
+      /**
+       * The seestar-portfwd supervisor (seestar-portfwd/src/supervisor.py). The tunnel container
+       * stays idle until Connect asks it for the scope's one session, and Disconnect hands it
+       * back; used when SEESTAR_TUNNEL_COMMAND is empty, i.e. the tunnel is a container we talk to
+       * rather than a child we spawn.
+       */
+      control: {
+        enabled: env.bool('SEESTAR_TUNNEL_CONTROL', true),
+        host: env.host('SEESTAR_TUNNEL_CONTROL_HOST', seestarHost),
+        port: env.port('SEESTAR_TUNNEL_CONTROL_PORT', 4710),
+        /** required only when the container sets SEESTAR_TUNNEL_CONTROL_TOKEN */
+        token: env.str('SEESTAR_TUNNEL_CONTROL_TOKEN', ''),
+        /** the container gives the scope back if we stop refreshing this often (0 = keep it until Disconnect) */
+        leaseS: env.num('SEESTAR_TUNNEL_LEASE_S', 180, { min: 0, max: 3600 }),
+      },
     },
   },
   /**
