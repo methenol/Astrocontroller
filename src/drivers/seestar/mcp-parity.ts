@@ -42,11 +42,11 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'telescope_status',
-    'Current telescope state (the same as seestar_status): link and tunnel, device, mount (pointing, tracking, EQ mode, parked), view and stack, focuser, battery, temperature, storage, the last state of every operation, alerts, observer location and local time. Call this first, whenever unsure, and after any timeout.',
+    'Current telescope state (the same as seestar_status): link and tunnel, device, mount (pointing, tracking, EQ mode, parked), view and stack, the selected and exposing camera, focuser, battery, temperature, storage, the last state of every operation, alerts, observer location and local time. Call this first, whenever unsure, and after any timeout.',
     { refresh: z.boolean().optional().describe('re-query the device instead of using the cached state (default true)') },
     async ({ refresh }) => {
       if (refresh !== false && scope.state.connected) await scope.refreshState();
-      return text({ ...scope.state, deviceState: undefined, busy: scope.isBusy(), location: scope.location(), localTime: localTime() });
+      return text({ ...scope.state, deviceState: undefined, busy: scope.isBusy(), cameras: { selected: scope.selected, exposing: scope.exposing }, location: scope.location(), localTime: localTime() });
     },
   );
 
@@ -62,13 +62,13 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
     {},
     async () => {
       if (scope.isBusy()) throw new Error(`refused: ${scope.isBusy()} is running`);
-      if (scope.rpc.usable) {
+      if (scope.link.usable) {
         const r = await scope.raw('test_connection');
         return text({ link: 'healthy, left as it is', answer: r.result });
       }
       if (scope.tunnel && scope.tunnel.status().phase !== 'up' && scope.tunnel.status().managed) scope.tunnel.restart();
       scope.connectLink();
-      return text({ link: 'reconnecting', health: scope.rpc.health(), tunnel: scope.tunnel?.status() ?? null });
+      return text({ link: 'reconnecting', health: scope.link.health(), tunnel: scope.tunnel?.status() ?? null });
     },
   );
 
@@ -92,7 +92,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'device_switches',
-    'Device switches: lens_defog (the dew heater), auto_shutdown, power_sound. anti_tangle, auto_cooling and do_not_disturb are the Dwarf\'s and have no Seestar equivalent. With no arguments it reports them; with switch+on it sets one.',
+    "Device switches: lens_defog (the dew heater), auto_shutdown, power_sound. anti_tangle, auto_cooling and do_not_disturb are the Dwarf's and have no Seestar equivalent. With no arguments it reports them; with switch+on it sets one.",
     { switch: z.enum(['anti_tangle', 'lens_defog', 'auto_cooling', 'auto_shutdown', 'power_sound', 'do_not_disturb']).optional(), on: z.boolean().optional() },
     async (a) => {
       if (a.switch) {
@@ -112,7 +112,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'move_motors',
-    'Slew without plate solving: to azimuth/altitude (true degrees), or BY them with relative=true. Refused below the horizon and within 15° of the Sun. Returns when the Seestar reports the slew done. (The Seestar takes sky positions, not the Dwarf\'s rotation/pitch angles.)',
+    "Slew without plate solving: to azimuth/altitude (true degrees), or BY them with relative=true. Refused below the horizon and within 15° of the Sun. Returns when the Seestar reports the slew done. (The Seestar takes sky positions, not the Dwarf's rotation/pitch angles.)",
     { azimuth_deg: z.number().min(-360).max(360).optional(), altitude_deg: z.number().min(-90).max(90).optional(), relative: z.boolean().optional() },
     async ({ azimuth_deg, altitude_deg, relative }) => {
       const now = await scope.readPointing();
@@ -128,13 +128,13 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool('stop_motion', 'Stop any manual motion now.', {}, async () => text(await scope.stopMotion()));
 
-  tool('stop_goto', 'Stop a GoTo (and whatever the view is doing).', {}, async () => text(await scope.stopView()));
+  tool('stop_goto', 'Stop a GoTo; the live view keeps running.', {}, async () => text(await scope.stopGoto()));
 
   // ---- focus -----------------------------------------------------------------
 
   tool(
     'focus_step',
-    'Move the tele focuser manually: direction near or far, steps 1-200 (the Seestar\'s own fine step is 10). Check the effect with star_sharpness between moves; for a whole search use star_focus.',
+    "Move the tele focuser manually: direction near or far, steps 1-200 (the Seestar's own fine step is 10). Check the effect with star_sharpness between moves; for a whole search use star_focus.",
     { direction: z.enum(['near', 'far']), steps: z.number().int().min(1).max(200) },
     async ({ direction, steps }) => text({ focuserPosition: await scope.focusBy(direction === 'near' ? -steps : steps) }),
   );
@@ -160,7 +160,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'tele_visibility',
-    `Is the target really in view of the tele after a GoTo? Measures the stars on one raw tele sub: VISIBLE = at least ${VISIBLE_MIN_STARS} measurable stars with a median HFR at most ${VISIBLE_MAX_HFR_PX} px; anything else is BLOCKED (a wall, the roof, cloud or dew). A BLOCKED verdict is remembered as that patch of sky at that time: plan_targets then raises the site's horizon there for tonight and gives \`clearsAt\`.`,
+    `Is the target really in view of the tele after a GoTo? Measures the stars on one full-resolution tele frame: VISIBLE = at least ${VISIBLE_MIN_STARS} measurable stars with a median HFR at most ${VISIBLE_MAX_HFR_PX} px; anything else is BLOCKED (a wall, the roof, cloud or dew). A BLOCKED verdict is remembered as that patch of sky at that time: plan_targets then raises the site's horizon there for tonight and gives \`clearsAt\`.`,
     { target: z.string().optional().describe('the target the scope is pointing at; default the current view target') },
     async (a) => {
       const { img, sharp } = await measureSeestar(scope);
@@ -200,7 +200,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'astro_recover',
-    'Release a stuck Seestar without a power cycle: stops the view, stacking, autofocus and polar alignment and any manual motion, then reads the state again. For when commands are refused although nothing should be running.',
+    'Release a stuck Seestar without a power cycle: stops the view, stacking, autofocus and polar alignment and any manual motion, then reads the state again and restarts the live view on the selected camera. For when commands are refused although nothing should be running.',
     {},
     async () => {
       const done: Record<string, unknown> = {};
@@ -212,8 +212,9 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
       ] as const) {
         done[what] = await run().then((r) => r.code ?? 0, (e) => String(e));
       }
+      scope.operation = null;
       await scope.refreshState().catch(() => {});
-      return text({ stopped: done, busy: scope.isBusy(), view: scope.state.view, link: scope.rpc.health() });
+      return text({ stopped: done, busy: scope.isBusy(), view: scope.state.view, cameras: { selected: scope.selected, exposing: scope.exposing }, link: scope.link.health() });
     },
   );
 
@@ -241,7 +242,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'track_object',
-    "Follow a moving object by its box in the frame — not available on the Seestar: its object tracking (start_track_object) takes the id of an object its own detection found, which the Seestar does not report over its control link.",
+    'Follow a moving object by its box in the frame — not available on the Seestar: its object tracking (start_track_object) takes the id of an object its own detection found, which the Seestar does not report over its control link.',
     { action: z.enum(['start', 'stop']) },
     async () => {
       throw new Error('track_object is not available on the Seestar (its tracking takes an object id from its own detection, which it does not report)');
@@ -261,7 +262,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'set_shooting_mode',
-    'Switch the view mode: DSO (star mode: deep-sky stacking, where every live frame and still comes from), Moon, Planet. Normal (daytime scenery) is out of scope for this astrophotography setup and Sun is refused remotely; Milky Way, Star Trail, Auto Tracking and Panorama are the Dwarf\'s.',
+    "Switch the view mode: DSO (star mode: deep-sky stacking, where every live frame and still comes from), Moon, Planet. Normal (daytime scenery) is out of scope for this astrophotography setup and Sun is refused remotely; Milky Way, Star Trail, Auto Tracking and Panorama are the Dwarf's.",
     { mode: z.string() },
     async ({ mode }) => {
       const m = MODES[mode.trim().toLowerCase()];
@@ -293,16 +294,17 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'set_camera_setting',
-    'Change one setting. exposure: the stack sub length in seconds ("10", "20", "60"…); live_exposure: the live view\'s, in seconds; gain: a number; filter: IRCUT | LP | dark (the wheel); any other name is a Seestar setting (set_setting), e.g. auto_af, stack_dither as JSON.',
+    "Change one setting. exposure: the stack sub length in seconds (\"10\", \"20\", \"60\"…); live_exposure: the live view's, in seconds; gain: a number; filter: IRCUT | LP | dark (the wheel); any other name is a Seestar setting (set_setting), e.g. auto_af, stack_dither as JSON.",
     { camera: z.enum(['tele', 'wide']).optional(), setting: z.string(), value: z.union([z.string(), z.number(), z.boolean()]) },
-    async ({ setting, value }) => {
+    async ({ camera, setting, value }) => {
       const sec = (v: string | number | boolean) => {
         const n = Number(String(v).replace(/s$/i, ''));
         if (!Number.isFinite(n) || n <= 0) throw new Error(`"${v}" is not a duration in seconds`);
         return n;
       };
-      if (setting === 'exposure') return text(await scope.setExposure({ stackMs: sec(value) * 1000 }));
-      if (setting === 'live_exposure') return text(await scope.setExposure({ continuousMs: sec(value) * 1000 }));
+      const cam = camera ?? 'tele';
+      if (setting === 'exposure') return text(await scope.setExposure({ stackMs: sec(value) * 1000 }, cam));
+      if (setting === 'live_exposure') return text(await scope.setExposure({ continuousMs: sec(value) * 1000 }, cam));
       if (setting === 'gain') return text(await scope.setGain(Number(value)));
       if (setting === 'filter') {
         const w = await wheel();
@@ -321,7 +323,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'sky_check',
-    "One-call clear-sky check with the wide camera, where the scope points now: the star count, background level and a verdict (clear / partly clear / cloudy / bright, or unknown with the reason when the Sun is up or the scope points below the horizon), and the image. Point above ~60° altitude for the fairest reading.",
+    'One-call clear-sky check with the wide camera, where the scope points now: the star count, background level and a verdict (clear / partly clear / cloudy / bright, or unknown with the reason when the Sun is up or the scope points below the horizon), and the image. Point above ~60° altitude for the fairest reading.',
     {},
     async () => {
       const site = scope.requireLocation();

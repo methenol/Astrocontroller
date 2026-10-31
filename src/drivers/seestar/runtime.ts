@@ -4,7 +4,7 @@
  * live views and the duty loop.
  *
  * Its storage (sessions, album, transfers into the library) is registered for the library at
- * creation (library.ts).
+ * creation (storage.ts).
  */
 import type http from 'node:http';
 import type { Express } from 'express';
@@ -13,7 +13,6 @@ import { DutyLoop } from '../../agent/duty.js';
 import { setDeviceLibrary } from '../../library/device-library.js';
 import { cancelActiveJobs, listDeviceSessions, transferSession } from '../../library/transfer.js';
 import { StarfrontNights } from '../../agent/starfront.js';
-import { TERMINAL_STATES } from './state.js';
 import { mountWeb } from '../../web/server.js';
 import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
 import { Seestar } from './device.js';
@@ -34,10 +33,7 @@ function create({ agent }: DriverDeps): DriverRuntime {
         stacking: {
           on: (e, f) => scope.on(e, f),
           off: (e, f) => scope.off(e, f),
-          current: () => {
-            const s = scope.state.stack.state;
-            return { stacking: !!s && !TERMINAL_STATES.has(s) && s !== 'idle', target: scope.state.view.target };
-          },
+          current: () => ({ stacking: scope.isStacking(), target: scope.state.view.target }),
         },
         transferTarget: async (target) => {
           const { sessions } = await listDeviceSessions(false);
@@ -61,7 +57,7 @@ function create({ agent }: DriverDeps): DriverRuntime {
       ['starfront', () => nights?.stop()],
       ['timelapse', () => media.capture.stop()],
       ['survey', () => void media.survey.stop()],
-      ['streams', () => web.hub.shutdown()],
+      ['streams', () => media.hub.shutdown()],
       ['duty', () => duty.dispose()],
       ['telescope link', () => scope.stop()],
     ],

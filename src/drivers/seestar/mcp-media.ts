@@ -1,32 +1,28 @@
 /**
  * The Seestar agent's album, image, camera and focus tools: the Dwarf's tool names and arguments
  * (mcp/tools/media.ts, camera.ts, motion.ts, darks.ts), so skills and notes written for one
- * telescope read the same with the other, carried out with the Seestar's storage (library.ts),
- * live views (video.ts), image sockets and photo capture (capture.ts).
+ * telescope read the same with the other, carried out with the Seestar's storage (storage.ts),
+ * live views (hub.ts), image sockets and photo capture (capture.ts).
  *
- * Image sources: tele | wide (a live frame) | stack (the stacked image) | preview (one raw tele
- * sub) | device:/SEESTAR/<storage path> | a library, captures or workspace path.
+ * Image sources: tele | wide (the next full-resolution frame of that camera, borrowing it when the
+ * other one is selected) | stack (the stacked image) | preview (one live tele sub) |
+ * device:/SEESTAR/<storage path> | a library, captures or workspace path.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { deviceLibrary } from '../../library/device-library.js';
 import * as library from '../../library/transfer.js';
-import { analyze, autoStretch, crop as cropImage, decode, type FloatImage, toJpeg } from '../../media/images.js';
+import { analyze, crop as cropImage, decode, type FloatImage } from '../../media/images.js';
 import { resolveLocalPath } from '../../media/image/load.js';
 import { cropArg, capturedLine, imageResult, localTime, text, type ToolFn } from '../../mcp/tools/common.js';
 import { median } from '../../util/stats.js';
 import { BURST_MAX } from './capture.js';
 import type { Seestar } from './device.js';
-import { measureSeestar, seestarFocusSweep } from './focus.js';
-import { NOMINAL_FOV } from './mcp.js';
+import { measureSeestar, NOMINAL_FOV, seestarFocusSweep } from './focus.js';
 import type { SeestarMedia } from './web.js';
-import { JPEG_SOI } from './image-stream.js';
-import { SeestarCameraSource } from './video.js';
 
 const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
-/** the rest of the running exposure (up to 30 s) and a 16.6 MB raw sub through the ZWO tunnel */
-const RAW_TIMEOUT_MS = 45_000;
 const FITS_HEADER_KEYS = /EXPTIME|EXPOSURE|GAIN|DATE|OBJECT|^RA$|^DEC$|CCD-TEMP|FILTER|BAYER|TELESCOP|FOCALLEN|FOCUSPOS|WIDECAM/;
 const MEDIA_TYPES: Record<string, number> = { all: 0, photo: 1, video: 2, astro: 4 };
 const TYPE_NAMES: Record<number, string> = { 1: 'photo', 2: 'video', 4: 'astro' };
@@ -35,25 +31,11 @@ const cameraArg = z.enum(['tele', 'wide']).describe('tele = the telephoto, wide 
 
 /** An image from any of the sources above. `encoded` is the original JPEG when there is one. */
 export async function seestarImage(source: string, scope: Seestar, media: SeestarMedia): Promise<{ img: FloatImage; encoded?: Buffer }> {
-  if (source === 'tele' || source === 'wide') {
-    // the next exposure the camera completes in its star view, from its image socket (the wide
-    // camera's view is opened for the frame and closed again); never a stale cached frame
-    const camera = source === 'wide' ? 'wide' : 'tele';
-    return scope.withCameraView(camera, `a ${source} frame`, async () => {
-      if (camera === 'tele') {
-        const why = await scope.ensureLiveView(true);
-        if (why) throw new Error(`no ${source} frame: ${why}`);
-      }
-      const { image, frame } = await scope.grabImage(camera, 'preview', RAW_TIMEOUT_MS);
-      const encoded = frame.payload.subarray(0, 2).equals(JPEG_SOI) ? frame.payload : await toJpeg(autoStretch(image));
-      const img = frame.payload.subarray(0, 2).equals(JPEG_SOI) ? await decode(encoded, `seestar:${source}.jpg`) : image;
-      img.capturedAt = Date.now();
-      const live = media.hub.get(source);
-      if (live instanceof SeestarCameraSource) live.offer(encoded);
-      return { img, encoded };
-    });
+  if (source === 'tele' || source === 'wide') return media.liveFrame(source);
+  if (source === 'stack' || source === 'preview') {
+    if (source === 'preview' && scope.exposing !== 'tele') return scope.withCamera('tele', 'a tele preview', async () => ({ img: (await scope.grabImage('tele', 'preview')).image }));
+    return { img: (await scope.grabImage('tele', source === 'stack' ? 'stacked' : 'preview')).image };
   }
-  if (source === 'stack' || source === 'preview') return { img: (await scope.grabImage('tele', source === 'stack' ? 'stacked' : 'preview')).image };
   if (source.startsWith('device:')) {
     const p = source.slice('device:'.length);
     const devicePath = p.startsWith('/SEESTAR/') ? p : `/SEESTAR/${p.replace(/^\/+/, '')}`;
@@ -76,7 +58,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
     { type: z.enum(['all', 'photo', 'video', 'astro']).optional(), page: z.number().int().min(0).optional(), page_size: z.number().int().min(1).max(50).optional() },
     async ({ type, page, page_size }) => {
       const a = deviceLibrary().album;
-      const [counts, items] = await Promise.all([a.counts(), a.list(MEDIA_TYPES[type ?? 'all'], page ?? 0, page_size ?? 15)]);
+      const [counts, items] = await Promise.all([a.counts(), a.list(MEDIA_TYPES[type ?? 'all']!, page ?? 0, page_size ?? 15)]);
       return text({
         counts: Object.fromEntries(counts.map((c) => [c.mediaType === 0 ? 'all' : (TYPE_NAMES[c.mediaType] ?? c.mediaType), c.count])),
         items: items.map((m) => ({
@@ -102,7 +84,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
 
   tool(
     'view_image',
-    'Show an image to you. source: tele | wide (a live frame) | stack | preview (one raw tele sub) | "device:/SEESTAR/MyWorks/…" (a stack, sub, photo on the Seestar) | a library/captures path. FITS are debayered and auto-stretched; a Seestar stack is colour. Use crop to zoom (fractions 0..1).',
+    'Show an image to you. source: tele | wide (the next full-resolution frame of that camera) | stack | preview (one live tele sub) | "device:/SEESTAR/MyWorks/…" (a stack, sub, photo on the Seestar) | a library/captures path. FITS are debayered and auto-stretched; a Seestar stack is colour. Use crop to zoom (fractions 0..1).',
     { source: z.string(), crop: cropArg, max_size: z.number().int().min(256).max(2048).optional(), stretch: z.boolean().optional() },
     async ({ source, crop, max_size, stretch }) => {
       let { img } = await seestarImage(source, scope, media);
@@ -126,7 +108,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
 
   tool(
     'view_camera',
-    'Look through a camera now: one live frame from tele or wide (a view is started if none runs and the arm is open).',
+    'Look through a camera now: the next full-resolution frame from tele or wide (a view is started if none runs and the arm is open; the other camera is borrowed for the frame and given back).',
     { camera: cameraArg.optional(), crop: cropArg, max_size: z.number().int().min(256).max(2048).optional() },
     async ({ camera, crop, max_size }) => {
       let { img } = await seestarImage(camera ?? 'tele', scope, media);
@@ -175,12 +157,12 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
 
   tool(
     'take_photo',
-    'Take a photo: the live frame in colour (JPEG) and, for tele, the raw Bayer frame (16-bit FITS), saved in the library under _photos/<date>. The arm must be open. count > 1 takes a burst (colour frames).',
-    { camera: cameraArg.optional(), count: z.number().int().min(1).max(BURST_MAX).optional() },
-    async ({ camera, count }) => {
+    'Take a photo: the next full-resolution live frame in colour (JPEG), saved in the library under _photos/<date>; raw=true takes the 16-bit Bayer sub instead (FITS beside a stretched JPEG; a 16 MB transfer). The arm must be open. count > 1 takes a burst (colour frames). The other camera is borrowed for the shot and given back.',
+    { camera: cameraArg.optional(), count: z.number().int().min(1).max(BURST_MAX).optional(), raw: z.boolean().optional() },
+    async ({ camera, count, raw }) => {
       const cam = camera ?? 'tele';
       if (count && count > 1) return text({ result: await media.capture.burst(cam, count) });
-      return text(await media.capture.photo(cam));
+      return text(await media.capture.photo(cam, { raw }));
     },
   );
 
@@ -215,6 +197,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
         view: { state: st.view.state, mode: st.view.mode, stage: st.view.stage },
         stack: { ...st.stack, integrationS: expS && st.stack.stacked ? Math.round((st.stack.stacked * expS) / 1000) : undefined, subLengthS: expS ? expS / 1000 : undefined },
         busy: scope.isBusy(),
+        cameras: { selected: scope.selected, exposing: scope.exposing },
         newestSession: sessions?.sessions[0]?.folder,
       });
     },
@@ -224,7 +207,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
 
   tool(
     'star_sharpness',
-    'Measure focus on the stars in one raw tele sub now: median HFR (px and arcsec), FWHM, roundness, star count, with a verdict. Needs stars in view (a star-mode view, the arm open, at night).',
+    'Measure focus on the stars in one full-resolution tele frame now: median HFR (px and arcsec), FWHM, roundness, star count, with a verdict. Needs stars in view (a star-mode view, the arm open, at night).',
     {},
     async () => {
       const { sharp } = await measureSeestar(scope);
@@ -234,7 +217,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
 
   tool(
     'star_focus',
-    "Tune focus on the stars: step the focuser around a position (default where it is), measure every step on a raw tele sub, fit the curve, and stop on the sharpest. Blocks for a few minutes. Run the Seestar's autofocus first for the wide search; this is the fine one.",
+    "Tune focus on the stars: step the focuser around a position (default where it is), measure every step on a full-resolution tele frame, fit the curve, and stop on the sharpest. Blocks for a few minutes. Run the Seestar's autofocus first for the wide search; this is the fine one.",
     { center: z.number().int().min(0).optional(), range: z.number().int().min(5).max(300).optional().describe('focus steps either side (default 40)'), step: z.number().int().min(1).max(100).optional().describe('focus steps between samples (default 10)'), apply: z.boolean().optional() },
     async (o) => {
       const r = await seestarFocusSweep(scope, o);

@@ -53,7 +53,10 @@ function wantedSources() {
 }
 
 function subscribe() {
-  if (videoWs?.readyState === WebSocket.OPEN) videoWs.send(JSON.stringify({ type: 'subscribe', sources: wantedSources() }));
+  // `main` is the source in the main view: a telescope that streams one camera at a time (the
+  // Seestar) selects that one, not whichever thumbnail is also on screen
+  const sources = wantedSources();
+  if (videoWs?.readyState === WebSocket.OPEN) videoWs.send(JSON.stringify({ type: 'subscribe', sources, main: sources.includes(views.main) ? views.main : null }));
 }
 
 function connectVideo() {

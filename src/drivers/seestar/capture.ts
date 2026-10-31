@@ -1,13 +1,14 @@
 /**
- * Photos, bursts and timelapses with the Seestar. The scope has no photo command of its own (the
- * app's shutter keeps a frame on the phone), so a photo is taken here: the live view's frame as a
- * colour JPEG, and with it the camera's raw Bayer frame from the image socket as a 16-bit FITS.
- * They land in the library beside the transferred sessions:
+ * Photos, bursts and timelapses. The scope has no photo command (the app's shutter keeps a frame
+ * on the phone), so a photo is the next exposure the camera completes: the live colour JPEG at
+ * full resolution, or with raw the camera's 16-bit Bayer sub (the RAW transfer mode for that one
+ * frame) saved as FITS beside a stretched JPEG. They land in the library:
  *
  *   <library>/_photos/<YYYY-MM-DD>/Seestar_<tele|wide>_<YYYYMMDD-HHMMSS>.jpg (+ .fit)
  *   <library>/_photos/<YYYY-MM-DD>/Timelapse_<tele|wide>_<YYYYMMDD-HHMMSS>.mp4
  *
- * The date is the observer's (an evening's photos belong to that evening).
+ * The date is the observer's. A wide photo borrows the wide camera (withCamera) and the selection
+ * comes back afterwards; the frame is shown on that camera's live view too.
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,17 +16,14 @@ import path from 'node:path';
 import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
 import type { MediaItem } from '../../library/device-library.js';
-import type { Source } from '../../media/stream/source.js';
-import { writeFileAtomic } from '../../util/fs.js';
-import type { Camera, Seestar } from './device.js';
 import { autoStretch, toJpeg } from '../../media/images.js';
-import { type Frame, frameImage, framePixels, IMG_TYPE, JPEG_SOI } from './image-stream.js';
-import { SeestarCameraSource } from './video.js';
+import { writeFileAtomic } from '../../util/fs.js';
+import type { Seestar } from './device.js';
+import { frameImage, framePixels, IMG_TYPE, JPEG_SOI, type Camera, type Frame } from './frames.js';
 
-const log = logger('seestar');
+const log = logger('seestar.capture');
 
-/** a live sub is the next exposure the camera completes (up to 30 s) plus its transfer */
-const RAW_TIMEOUT_MS = 45_000;
+const FRAME_TIMEOUT_MS = 45_000;
 export const BURST_MAX = 50;
 const TIMELAPSE_MIN_INTERVAL_S = 1;
 const TIMELAPSE_DEFAULT_INTERVAL_S = 5;
@@ -49,7 +47,7 @@ function photoPath(kind: string, camera: Camera, ext: string, at = new Date()): 
   return file;
 }
 
-/** A 16-bit FITS of one Bayer frame (little-endian words in, the FITS big-endian signed form out). */
+/** A 16-bit FITS of one Bayer frame (little-endian words in, FITS big-endian signed words out). */
 export function bayerFits(px: Buffer, width: number, height: number, cards: Record<string, string | number | boolean>): Buffer {
   const all: Record<string, string | number | boolean> = { SIMPLE: true, BITPIX: 16, NAXIS: 2, NAXIS1: width, NAXIS2: height, BZERO: 32768, BSCALE: 1, ...cards };
   const lines = Object.entries(all).map(([k, v]) => {
@@ -64,55 +62,43 @@ export function bayerFits(px: Buffer, width: number, height: number, cards: Reco
   return Buffer.concat([header, data]);
 }
 
+export interface Shot {
+  jpeg: Buffer;
+  raw?: Frame;
+}
+
 export class SeestarCapture {
   private lapse: { camera: Camera; dir: string; frames: number; intervalS: number; endsAt: number | null; timer: NodeJS.Timeout; startedAt: number } | null = null;
 
   constructor(
     private readonly scope: Seestar,
-    /** the live preview of each camera: a still just taken is shown there too */
-    private readonly stream: (camera: Camera) => Source,
+    /** show a frame just taken on that camera's live view */
+    private readonly show: (camera: Camera, jpeg: Buffer) => void,
   ) {}
-
-  /** The live preview shows the frame a still just took, so the UI follows the tools. */
-  private show(camera: Camera, jpeg: Buffer): void {
-    const live = this.stream(camera);
-    if (live instanceof SeestarCameraSource) live.offer(jpeg);
-  }
 
   private assertCanShoot(): void {
     if (!this.scope.state.connected) throw new Error('the Seestar is not connected');
     if (this.scope.state.mount.parked) throw new Error('the arm is parked: open it (Home) to take a photo');
   }
 
-  /**
-   * A frame for a photo. In a star (astro) view it is the frame the camera is actually exposing,
-   * from the image socket: one Bayer sub at full resolution, so mono - the honest astro frame, and
-   * the night is spent in that view. It comes back raw as well, for the FITS beside the JPEG: one
-   * exposure, not two. Otherwise it is the live video's colour frame, which the wide camera serves
-   * in the Normal view only (the scope is put there and back for the shot).
-   */
-  private async frame(camera: Camera): Promise<{ jpeg: Buffer; raw?: Frame }> {
-    // Every still is the next exposure the camera completes in its star view, from its image
-    // socket: the tele's view, or the wide camera's (SecondView), which withCameraView opens for
-    // the frame and closes again. A JPEG (a stack's) goes through as it stands; the 16-bit Bayer
-    // sub is decoded and stretched the way every other frame the tools see is.
-    return this.scope.withCameraView(camera, `a ${camera} photo`, async () => {
-      if (camera === 'tele') {
-        const why = await this.scope.ensureLiveView(true);
-        if (why) throw new Error(`cannot take a tele photo: ${why}`);
-      }
-      const f = await this.scope.streams[camera].grab('preview', RAW_TIMEOUT_MS);
-      const shot = f.payload.subarray(0, 2).equals(JPEG_SOI) ? { jpeg: f.payload } : { jpeg: await toJpeg(autoStretch(await frameImage(f, camera))), raw: f };
-      this.show(camera, shot.jpeg);
-      return shot;
-    });
+  /** The next full-resolution frame of a camera (the colour JPEG, or with raw the Bayer sub). */
+  async frame(camera: Camera, raw = false): Promise<Shot> {
+    await this.scope.ensureLiveView();
+    return this.scope.withCamera(camera, `a ${camera} photo`, () =>
+      this.scope.withFullRes(camera, `a ${camera} photo`, async () => {
+        const f = raw ? await this.scope.grabRaw(camera) : (await this.scope.grabImage(camera, 'preview', FRAME_TIMEOUT_MS)).frame;
+        const shot: Shot = f.payload.subarray(0, 2).equals(JPEG_SOI) ? { jpeg: f.payload } : { jpeg: await toJpeg(autoStretch(await frameImage(f, camera))), raw: f };
+        this.show(camera, shot.jpeg);
+        return shot;
+      }),
+    );
   }
 
-  /** One photo: the colour frame, and the raw Bayer frame beside it when the image socket has one. */
-  async photo(camera: Camera): Promise<MediaItem & { rawPath?: string; note?: string }> {
+  /** One photo: the colour frame; with raw, the camera's Bayer sub as FITS beside it. */
+  async photo(camera: Camera, o: { raw?: boolean } = {}): Promise<MediaItem & { rawPath?: string; note?: string }> {
     this.assertCanShoot();
     const at = new Date();
-    const { jpeg, raw } = await this.frame(camera);
+    const { jpeg, raw } = await this.frame(camera, !!o.raw);
     const file = photoPath('Seestar', camera, '.jpg', at);
     writeFileAtomic(file, jpeg);
     let rawPath: string | undefined;
@@ -130,7 +116,7 @@ export class SeestarCapture {
             IMAGETYP: 'Light',
             'DATE-OBS': new Date(raw.at).toISOString().replace('Z', ''),
             BAYERPAT: 'GRBG',
-            WIDECAM: 0,
+            WIDECAM: camera === 'wide' ? 1 : 0,
             ...(st.focus.position !== undefined ? { FOCUSPOS: st.focus.position } : {}),
             ...(st.view.target ? { OBJECT: st.view.target } : {}),
           }),
@@ -139,13 +125,10 @@ export class SeestarCapture {
         note = `the colour photo is saved; its raw frame could not be written (${errMsg(e)})`;
         log.info(`photo: ${note}`);
       }
-    } else if (camera === 'wide') note = 'colour photo only: the wide camera gives no raw frame outside its own stacking';
-    else if (this.scope.state.view.mode !== 'star') note = 'colour photo only: the raw frame comes from the image socket in an astro (star) view';
-    else note = 'colour photo only: no raw frame came from the image socket';
+    } else if (o.raw) note = 'colour photo only: no raw frame came from the picture socket';
     return { fileName: path.basename(file), filePath: file, fileSize: jpeg.length, mediaType: 1, modificationTime: Math.round(at.getTime() / 1000), rawPath, note };
   }
 
-  /** count photos back to back (colour frames: a raw frame each would take a minute apiece over the tunnel). */
   async burst(camera: Camera, count: number): Promise<string> {
     this.assertCanShoot();
     const n = Math.max(1, Math.min(BURST_MAX, Math.round(count)));
@@ -159,7 +142,6 @@ export class SeestarCapture {
     return `${n} photos saved in ${dir}`;
   }
 
-  /** Start or stop a timelapse: a colour frame every intervalS, made into an MP4 when it ends. */
   async timelapse(camera: Camera, on: boolean, intervalS?: number, totalS?: number): Promise<string> {
     if (!on) {
       if (!this.lapse) return 'no timelapse is running';

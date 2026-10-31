@@ -20,24 +20,23 @@ import { registerDutyTools } from '../../mcp/tools/duty.js';
 import { registerLibraryTools } from '../../mcp/tools/library.js';
 import { registerPlanningTools } from '../../mcp/tools/planning.js';
 import { registerStellariumTools } from '../../mcp/tools/stellarium.js';
+import { registerMapObstructions } from '../../mcp/tools/horizon.js';
 import type { DutyLoop } from '../../agent/duty.js';
+import type { StarfrontNights } from '../../agent/starfront.js';
 import type { McpSpec } from '../types.js';
-import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
-import { listDevices } from './zwo-cloud.js';
+import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
+import { NOMINAL_FOV } from './focus.js';
 import { registerSeestarMediaTools } from './mcp-media.js';
 import { registerSeestarParityTools } from './mcp-parity.js';
-import { registerMapObstructions } from '../../mcp/tools/horizon.js';
 import type { SeestarMedia } from './web.js';
-import type { StarfrontNights } from '../../agent/starfront.js';
+import { listDevices } from './zwo-cloud.js';
 
 export const SERVER_NAME = 'seestar';
-
-/** Nominal S30 tele field (150 mm, 1080×1920 at 2.9 µm, portrait as the frames are read) until the scope reports its optics. */
-export const NOMINAL_FOV = { h: 1.2, v: 2.13 };
 const SUN_WARN_DEG = 15;
 
 const INSTRUCTIONS = `Tools for a ZWO Seestar smart telescope, over its native JSON-RPC link (on the local network, or through ZWO Telescope Network via a seestar-portfwd tunnel on 127.0.0.1).
 Start with seestar_status. The Seestar runs its own pipeline: goto_target slews, plate-solves and centres in one operation and blocks until the scope reports it done; stacking is integrated on the scope (start_stacking / stop_stacking, get_image to look at the stack). Autofocus, park and polar alignment also block until the scope reports their end.
+The scope exposes one camera at a time (tele or wide): the one chosen as the main view in the web UI, or with select_camera. Tools that need the other camera borrow it for the frame and give it back.
 Only one operation runs at a time. Over ZWO Telescope Network only one remote session exists per telescope: connecting takes it from the official app.
 Coordinates are J2000 (RA in hours, Dec in degrees). Never point at the Sun without the user confirming a solar filter.`;
 
@@ -91,16 +90,17 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
   const tz = config.observer.timezone;
   const fov = () => scope.state.fov ?? NOMINAL_FOV;
   const plateScale = (width: number) => (fov().h * 3600) / width;
+  const cameras = () => ({ selected: scope.selected, exposing: scope.exposing, tele: scope.liveNote('tele'), wide: scope.liveNote('wide') });
 
   // ---- status & link -------------------------------------------------------
 
   tool(
     'seestar_status',
-    'Everything known about the Seestar: link and tunnel health, the device (model, firmware, optics, field of view), mount (pointing, tracking, EQ mode, parked), what the view and stack are doing (stacked/dropped frames), focuser, battery and temperature, storage, the last state of every operation, the latest alert and recent events, and the full device state as the scope reported it. refresh=true reads it from the scope first.',
+    'Everything known about the Seestar: link and tunnel health, the device (model, firmware, optics, field of view), mount (pointing, tracking, EQ mode, parked), what the view and stack are doing (stacked/dropped frames), which camera is selected and exposing, focuser, battery and temperature, storage, the last state of every operation, the latest alert and recent events, and the full device state as the scope reported it. refresh=true reads it from the scope first.',
     { refresh: z.boolean().optional().describe('read the device and app state from the scope first (default true)') },
     async ({ refresh }) => {
       if (refresh !== false && scope.state.connected) await scope.refreshState();
-      return json({ ...scope.state, busy: scope.isBusy(), localTime: localTime() });
+      return json({ ...scope.state, busy: scope.isBusy(), cameras: cameras(), images: { tele: scope.images.tele.status(), wide: scope.images.wide.status() }, localTime: localTime() });
     },
   );
 
@@ -113,6 +113,16 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
     await scope.release();
     return text('released');
   });
+
+  tool(
+    'select_camera',
+    'Choose which camera the Seestar exposes (its star view runs on one at a time): tele (the telescope) or wide (the wide-angle lens). The web UI\'s main view does the same. The selection is sticky: a tool or an operation that borrows the other camera gives it back.',
+    { camera: z.enum(['tele', 'wide']) },
+    async ({ camera }) => {
+      await scope.selectCamera(camera, 'selected by the agent');
+      return json(cameras());
+    },
+  );
 
   tool('zwo_devices', "The telescopes on the ZWO account (owned and shared, as a rented remote scope appears) with their network state: online, offline, shooting (busy with someone's session), occupied.", {}, async () => json(await listDevices()));
 
@@ -148,7 +158,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
 
   tool(
     'goto_target',
-    'GoTo a target by catalog name, or by J2000 RA/Dec: the Seestar slews, plate-solves and centres it, and this blocks until it reports the GoTo done (or failed). stack=true starts stacking on arrival. The Sun is refused unless solar_filter_confirmed.',
+    'GoTo a target by catalog name, or by J2000 RA/Dec: the Seestar slews, plate-solves and centres it on the tele, and this blocks until it reports the GoTo done (or failed). stack=true starts stacking on arrival. The Sun is refused unless solar_filter_confirmed.',
     {
       name: z.string().optional().describe('catalog name or designation; or give ra_hours/dec_deg (and a name for the session)'),
       ra_hours: z.number().min(0).lt(24).optional(),
@@ -179,29 +189,29 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
       }
       const r = await scope.gotoTarget({ raHours: ra, decDeg: dec, name, lpFilter: a.lp_filter, stack: a.stack });
       await scope.readPointing().catch(() => {});
-      return json({ target: name, raHours: ra, decDeg: dec, goto: { state: r.goto.state, seconds: Math.round(r.goto.ms / 1000) }, stacking: r.stacking, mount: scope.state.mount });
+      return json({ target: name, raHours: ra, decDeg: dec, goto: { state: r.goto.state, seconds: Math.round(r.goto.ms / 1000) }, stacking: r.stacking, mount: scope.state.mount, cameras: cameras() });
     },
   );
 
-  tool('stop', 'Stop what the view is doing (a GoTo, live view, stacking) and any manual motion.', {}, async () => {
-    await scope.stopMotion().catch(() => {});
-    return json(await scope.stopView());
+  tool('stop', 'Stop what the scope is doing (a GoTo, stacking, autofocus, polar alignment, a hand move), the way the app stops each; the live view keeps running.', {}, async () => {
+    const { stopped } = await scope.stopWork();
+    return json({ stopped, note: stopped.length ? undefined : 'nothing was running; the live view keeps running' });
   });
 
   const NUDGE_DIRECTIONS: Record<string, number> = { right: 0, 'up-right': 45, up: 90, 'up-left': 135, left: 180, 'down-left': 225, down: 270, 'down-right': 315 };
   tool(
     'nudge',
-    `Move the mount by hand: direction (up/down/left/right/up-left/…) or angle_deg (0 right, 90 up, 180 left, 270 down), speed (240 ≈ 1°/s, max ${NUDGE_MAX_SPEED}, default 240) for up to ${NUDGE_MAX_S} s. The live view keeps streaming through the move.`,
+    `Move the mount by hand, as the app's joystick does: direction (up/down/left/right/up-left/…) or angle_deg (0 right, 90 up, 180 left, 270 down), percent (the stick's throw, 1–${NUDGE_MAX_PERCENT}; 50 ≈ 2.7°/s, default 25) for up to ${NUDGE_MAX_S} s. Returns when the move has stopped. The live view keeps streaming through the move on whichever camera is selected.`,
     {
       direction: z.enum(['up', 'down', 'left', 'right', 'up-left', 'up-right', 'down-left', 'down-right']).optional(),
       angle_deg: z.number().optional(),
-      speed: z.number().min(1).max(NUDGE_MAX_SPEED).optional(),
+      percent: z.number().min(1).max(NUDGE_MAX_PERCENT).optional(),
       seconds: z.number().gt(0).max(NUDGE_MAX_S),
     },
-    async ({ direction, angle_deg, speed, seconds }) => {
+    async ({ direction, angle_deg, percent, seconds }) => {
       const angle = angle_deg ?? (direction ? NUDGE_DIRECTIONS[direction] : undefined);
       if (angle === undefined) throw new Error('give direction or angle_deg');
-      return json(await scope.nudge(angle, speed ?? 240, seconds));
+      return json(await scope.nudge(angle, percent ?? 25, seconds));
     },
   );
 
@@ -217,16 +227,19 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
 
   tool(
     'start_stacking',
-    'Start stacking on the current target (the scope registers and integrates each sub itself). restart=true begins a new stack instead of adding to the current one.',
+    'Start stacking on the current target (the scope registers and integrates each sub itself, on the tele). restart=true begins a new stack instead of adding to the current one.',
     { restart: z.boolean().optional() },
     async ({ restart }) => json(await scope.startStack(!!restart)),
   );
 
   tool('stop_stacking', 'Stop stacking; the stack so far is kept and saved by the scope.', {}, async () => json(await scope.stopStack()));
 
-  tool('start_live_view', 'Live view without a target (no GoTo), e.g. to check the sky or focus.', { lp_filter: z.boolean().optional() }, async ({ lp_filter }) => json(await scope.startView(!!lp_filter)));
+  tool('start_live_view', 'Live view without a target (no GoTo) on the selected camera, e.g. to check the sky or focus.', { lp_filter: z.boolean().optional() }, async ({ lp_filter }) => {
+    await scope.startView(!!lp_filter);
+    return json(cameras());
+  });
 
-  tool('autofocus', 'Run the Seestar autofocus; blocks until it reports done, with the focuser position it chose.', {}, async () => {
+  tool('autofocus', 'Run the Seestar autofocus (on the tele); blocks until it reports done, with the focuser position it chose.', {}, async () => {
     const r = await scope.autofocus();
     const position = await scope.focuserPosition().catch(() => null);
     return json({ ...r, position });
@@ -246,8 +259,8 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
   tool(
     'set_exposure',
     'Set the stack sub length and/or the live-view exposure, in seconds.',
-    { stack_s: z.number().positive().max(600).optional(), live_s: z.number().positive().max(60).optional() },
-    async ({ stack_s, live_s }) => json(await scope.setExposure({ stackMs: stack_s !== undefined ? stack_s * 1000 : undefined, continuousMs: live_s !== undefined ? live_s * 1000 : undefined })),
+    { stack_s: z.number().positive().max(600).optional(), live_s: z.number().positive().max(60).optional(), camera: z.enum(['tele', 'wide']).optional() },
+    async ({ stack_s, live_s, camera }) => json(await scope.setExposure({ stackMs: stack_s !== undefined ? stack_s * 1000 : undefined, continuousMs: live_s !== undefined ? live_s * 1000 : undefined }, camera ?? 'tele')),
   );
 
   tool('set_gain', 'Set the camera gain.', { gain: z.number().int().min(0).max(400) }, async ({ gain }) => json(await scope.setGain(gain)));
@@ -270,11 +283,12 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
 
   tool(
     'get_image',
-    'Look at the Seestar: the current stacked image (kind=stacked) or one live sub (kind=preview), with star count, HFR/FWHM and an assessment. camera wide for the wide-angle lens.',
+    'Look at the Seestar: the current stacked image (kind=stacked, the default) or one live sub (kind=preview, the default when a camera is given: from the camera as it exposes now, the selected one or the one given), with star count, HFR/FWHM and an assessment. camera wide for the wide-angle lens.',
     { kind: z.enum(['stacked', 'preview']).optional(), camera: z.enum(['tele', 'wide']).optional(), analyze: z.boolean().optional().describe('add the numbers (default true)') },
     async (a) => {
-      const camera = a.camera ?? 'tele';
-      const { image, frame } = await scope.grabImage(camera, a.kind ?? 'stacked');
+      const kind = a.kind ?? (a.camera ? 'preview' : 'stacked');
+      const camera = kind === 'stacked' ? 'tele' : (a.camera ?? scope.exposing ?? scope.selected);
+      const { image, frame } = camera === scope.exposing || kind === 'stacked' ? await scope.grabImage(camera, kind) : await scope.withCamera(camera, `a ${camera} preview`, () => scope.grabImage(camera, kind));
       const lines: string[] = [];
       if (a.analyze !== false) {
         const scale = camera === 'tele' ? plateScale(image.frameWidth ?? image.width) : undefined;
@@ -284,6 +298,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
         lines.push(
           JSON.stringify(
             {
+              camera,
               stars: an.stars.count,
               medianHfrPx: hfr,
               medianFwhmArcsec: hfr !== undefined && scale ? +(hfr * 2 * scale).toFixed(2) : undefined,
@@ -299,7 +314,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
           ),
         );
       }
-      return imageResult(image, `seestar_${camera}_${a.kind ?? 'stacked'}`, { note: lines.join('\n') || undefined });
+      return imageResult(image, `seestar_${camera}_${kind}`, { note: lines.join('\n') || undefined });
     },
   );
 
@@ -361,7 +376,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
   tool(
     'raw_rpc',
     'Send any JSON-RPC method to the Seestar and return its reply as sent (code, result, error). For methods the other tools do not cover, e.g. get_device_state, get_setting, get_view_state, iscope_get_app_state, get_stack_info, get_albums.',
-    { method: z.string().min(1), params: z.unknown().optional().describe('the method\'s params as a JSON value (an object for most methods), not as a string'), timeout_s: z.number().positive().max(300).optional() },
+    { method: z.string().min(1), params: z.unknown().optional().describe("the method's params as a JSON value (an object for most methods), not as a string"), timeout_s: z.number().positive().max(300).optional() },
     async ({ method, params, timeout_s }) => {
       // a params object that arrived as its JSON text (the scope answers "expected object param" to a string)
       if (typeof params === 'string' && /^\s*[[{]/.test(params)) {

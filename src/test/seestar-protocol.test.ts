@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import zlib from 'node:zlib';
-import { SeestarRpc, SeestarRpcError, type SeestarEvent } from '../drivers/seestar/rpc.js';
+import { SeestarLink, SeestarRpcError, type SeestarEvent } from '../drivers/seestar/link.js';
 import { handshake, signChallenge } from '../drivers/seestar/auth.js';
-import { encodeHeader, FrameReader, frameImage, IMG_TYPE, parseHeader, rawStackPixels, SeestarImageStream, type Frame } from '../drivers/seestar/image-stream.js';
-import { applyAppState, applyDeviceState, applyEvent, busyWith, fovFromOptics, initialState, isOuter } from '../drivers/seestar/state.js';
+import { encodeHeader, FrameReader, frameImage, IMG_TYPE, parseHeader, rawStackPixels, type Frame } from '../drivers/seestar/frames.js';
+import { SeestarImageLink } from '../drivers/seestar/image-link.js';
+import { applyAppState, applyDeviceState, applyEvent, busyWith, fovFromOptics, initialState, isOuter } from '../drivers/seestar/model.js';
 import { ZwoTunnel } from '../drivers/seestar/tunnel.js';
 import { listDevices, login } from '../drivers/seestar/zwo-cloud.js';
 import { toJpeg, type FloatImage } from '../media/images.js';
@@ -19,19 +20,23 @@ const until = async (cond: () => boolean, ms = 3000) => {
     await new Promise((r) => setTimeout(r, 10));
   }
 };
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ev = (e: Record<string, unknown>): SeestarEvent => ({ Event: String(e.Event), at: 1000, ...e }) as SeestarEvent;
+const noKey = (): string => {
+  throw new Error('SEESTAR_KEY_PATH is not set: the Seestar refuses every request until the app key signs its challenge');
+};
 
 describe('Seestar control link', () => {
   let fake: FakeSeestar;
-  let rpc: SeestarRpc | null = null;
+  let rpc: SeestarLink | null = null;
   afterEach(async () => {
     rpc?.stop();
     rpc = null;
     await fake?.close();
   });
 
-  const link = (loadKey: () => string | null = () => null, extra = {}) => {
-    rpc = new SeestarRpc({ host: '127.0.0.1', port: fake.port, loadKey, backoffMinMs: 50, ...extra });
+  const link = (loadKey: () => string = noKey, extra = {}) => {
+    rpc = new SeestarLink({ host: '127.0.0.1', port: fake.port, loadKey, backoffMinMs: 50, ...extra });
     rpc.start();
     return rpc;
   };
@@ -68,20 +73,20 @@ describe('Seestar control link', () => {
     fake.publicPem = keys.publicPem;
     await fake.listen();
     const failures: string[] = [];
-    const r = link(() => null);
+    const r = link(noKey);
     r.on('authFailed', (m: string) => failures.push(m));
     await until(() => failures.length > 0);
-    assert.match(failures[0], /SEESTAR_KEY_PATH/);
+    assert.match(failures[0]!, /SEESTAR_KEY_PATH/);
     assert.equal(r.usable, false);
     r.stop();
     const wrong = link(() => testKeys().privatePem);
     const f2: string[] = [];
     wrong.on('authFailed', (m: string) => f2.push(m));
     await until(() => f2.length > 0);
-    assert.match(f2[0], /rejected the handshake/);
+    assert.match(f2[0]!, /rejected the handshake/);
   });
 
-  test('a non-zero code rejects with the code and the scope\'s error, unless allowError', async () => {
+  test("a non-zero code rejects with the code and the scope's error, unless allowError", async () => {
     fake = new FakeSeestar();
     await fake.listen();
     fake.on('iscope_start_view', () => ({ code: 207, error: 'fail to operate' }));
@@ -103,20 +108,24 @@ describe('Seestar control link', () => {
     fake.event({ Event: 'PiStatus', battery_capacity: 80 });
     fake.event({ event: 'Stack', state: 'frame_complete', stacked_frame: 3 });
     await until(() => got.length === 2);
-    assert.equal(got[0].Event, 'PiStatus');
-    assert.equal(got[1].Event, 'Stack');
-    assert.equal(got[1].stacked_frame, 3);
-    await assert.rejects(r.request('never', undefined, { timeoutMs: 100 }), /no reply/);
+    assert.equal(got[0]!.Event, 'PiStatus');
+    assert.equal(got[1]!.Event, 'Stack');
+    assert.equal(got[1]!.stacked_frame, 3);
+    await assert.rejects(r.request('never', undefined, { timeoutMs: 100 }), /never: no reply from the Seestar/);
   });
 
-  test('the link reconnects after the scope drops it, and after silence', async () => {
+  test('the link reconnects after the scope drops it, and after silence; a request in flight fails with the reason', async () => {
     fake = new FakeSeestar();
     await fake.listen();
-    const r = link(() => null, { heartbeatMs: 50, silentAfterMs: 300 });
+    fake.on('slow', () => null);
+    const r = link(noKey, { heartbeatMs: 50, silentAfterMs: 300 });
     let downs = 0;
     r.on('disconnected', () => downs++);
     await until(() => r.usable);
+    const inFlight = r.request('slow', undefined, { timeoutMs: 5000 });
+    await wait(20);
     fake.kick();
+    await assert.rejects(inFlight, /slow: the connection to the Seestar closed/);
     await until(() => downs === 1);
     await until(() => r.usable);
     fake.silent = true;
@@ -124,14 +133,16 @@ describe('Seestar control link', () => {
     fake.silent = false;
     await until(() => r.usable);
     assert.ok(r.health().reconnects >= 2);
+    const lines = r.wireLines(10);
+    assert.ok(lines.length > 0 && lines.length <= 10);
   });
 
-  test('handshake: a challenge in result directly is signed too', async () => {
+  test('handshake: a challenge in result.str is signed', async () => {
     const keys = testKeys();
     const sent: Array<[string, unknown]> = [];
     const send = async (m: string, p: unknown) => {
       sent.push([m, p]);
-      return m === 'get_verify_str' ? { id: 1, code: 0, result: 'abc' } : { id: 2, code: 0 };
+      return m === 'get_verify_str' ? { id: 1, code: 0, result: { str: 'abc' } } : { id: 2, code: 0 };
     };
     const r = await handshake(send, () => keys.privatePem);
     assert.deepEqual(r, { required: true, verified: true });
@@ -139,17 +150,17 @@ describe('Seestar control link', () => {
   });
 });
 
-describe('Seestar image stream', () => {
+describe('Seestar picture frames', () => {
   const frame = (imgType: number, payload: Buffer, w = 0, h = 0, imageId = 1) => Buffer.concat([encodeHeader({ imgType, length: payload.length, width: w, height: h, imageId }), payload]);
 
   test('the header round-trips', () => {
-    const h = parseHeader(encodeHeader({ imgType: IMG_TYPE.rawStack, length: 1234, width: 1080, height: 1920, imageId: 7, hfd: 250 }))!;
+    const h = parseHeader(encodeHeader({ imgType: IMG_TYPE.rawStack, length: 1234, width: 1080, height: 1920, imageId: 7, hfdValue: 250 }));
     assert.equal(h.imgType, 5);
     assert.equal(h.length, 1234);
     assert.equal(h.width, 1080);
     assert.equal(h.height, 1920);
     assert.equal(h.imageId, 7);
-    assert.equal(h.hfd, 250);
+    assert.equal(h.hfdValue, 250);
     assert.equal(h.headerSize, 80);
   });
 
@@ -160,7 +171,10 @@ describe('Seestar image stream', () => {
     for (const size of [1, 7, 100, stream.length]) {
       const frames: Frame[] = [];
       const json: unknown[] = [];
-      const r = new FrameReader((f) => frames.push(f), (m) => json.push(m));
+      const r = new FrameReader(
+        (f) => frames.push(f),
+        (m) => json.push(m),
+      );
       for (let i = 0; i < stream.length; i += size) r.push(stream.subarray(i, i + size));
       assert.deepEqual(
         frames.map((f) => [f.header.imgType, f.payload.length]),
@@ -180,19 +194,21 @@ describe('Seestar image stream', () => {
     const h = 2;
     const px = Buffer.alloc(w * h * 6);
     for (let i = 0; i < w * h * 3; i++) px.writeUInt16LE(i * 1000, i * 2);
-    assert.equal(rawStackPixels(px, w, h), px);
+    const plain = rawStackPixels(px, w, h, 'x');
+    assert.ok(Math.abs(plain[1]! - 1000 / 65535) < 1e-6);
     const name = Buffer.from('raw_data');
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(8, 8); // deflate
     local.writeUInt16LE(name.length, 26);
     const zip = Buffer.concat([local, name, zlib.deflateRawSync(px)]);
-    assert.deepEqual(rawStackPixels(zip, w, h), px);
-    assert.throws(() => rawStackPixels(Buffer.alloc(10), w, h), /neither/);
-    const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.rawStack, length: zip.length, width: w, height: h }))!, payload: zip, at: 5 }, 'tele');
+    assert.deepEqual(rawStackPixels(zip, w, h, 'x'), plain);
+    assert.throws(() => rawStackPixels(Buffer.alloc(10), w, h, 'x'), /neither/);
+    const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.rawStack, length: zip.length, width: w, height: h })), payload: zip, at: 5 }, 'tele');
     assert.equal(img.channels, 3);
     assert.equal(img.linear, true);
     assert.equal(img.camera, undefined);
-    assert.ok(Math.abs(img.data[1] - 1000 / 65535) < 1e-6);
+    assert.ok(Math.abs(img.data[1]! - 1000 / 65535) < 1e-6);
   });
 
   test('a preview sub is debayered GRBG 2×2 to half-size colour; a JPEG stack decodes as display data', async () => {
@@ -202,77 +218,130 @@ describe('Seestar image stream', () => {
     // left cell: G=0 R=65535 / B=32768 G=16384 -> (1, 0.125, 0.5); right cell dark
     const vals = [0, 65535, 0, 0, 32768, 16384, 0, 0];
     vals.forEach((v, i) => px.writeUInt16LE(v, i * 2));
-    const prev = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.preview, length: px.length, width: w, height: h }))!, payload: px, at: 5 }, 'tele');
+    const prev = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.preview, length: px.length, width: w, height: h })), payload: px, at: 5 }, 'tele');
     assert.deepEqual([prev.width, prev.height, prev.channels], [2, 1, 3]);
     assert.deepEqual([...prev.data].map((v) => +v.toFixed(3)), [1, 0.125, 0.5, 0, 0, 0]);
     assert.equal(prev.header?.binned, 2);
     const src: FloatImage = { width: 16, height: 8, channels: 1, data: new Float32Array(128).fill(0.5), linear: false, source: 't' };
     const jpeg = await toJpeg(src, 16);
-    const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.jpegStack, length: jpeg.length }))!, payload: jpeg, at: 5 }, 'tele');
+    const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.jpegStack, length: jpeg.length })), payload: jpeg, at: 5 }, 'tele');
     assert.equal(img.width, 16);
     assert.equal(img.linear, false);
   });
+});
 
-  test('grab asks the image port for the stacked frame and skips the ack', async () => {
+describe('Seestar picture socket', () => {
+  const frame = (imgType: number, payload: Buffer, w = 0, h = 0, imageId = 1) => Buffer.concat([encodeHeader({ imgType, length: payload.length, width: w, height: h, imageId }), payload]);
+
+  test('a grab asks the socket for the stacked frame and skips the ack; a preview needs the stream', async () => {
     const fake = new FakeSeestar();
     await fake.listen();
     const payload = Buffer.alloc(4 * 2 * 6, 0x10);
     fake.frames.stacked = Buffer.concat([frame(IMG_TYPE.ack, Buffer.alloc(0)), frame(IMG_TYPE.rawStack, payload, 4, 2, 42)]);
-    const s = new SeestarImageStream('127.0.0.1', fake.imagePort, 'tele');
+    const s = new SeestarImageLink('127.0.0.1', fake.imagePort, 'tele');
     try {
+      await assert.rejects(s.grab('stacked', 200), /picture socket is not connected/);
+      s.open();
+      await until(() => s.connected);
       const f = await s.grab('stacked', 2000);
       assert.equal(f.header.imageId, 42);
       assert.equal(f.payload.length, payload.length);
       assert.ok(fake.methods().includes('image:get_stacked_img'));
-      await assert.rejects(s.grab('preview', 200), /no preview frame/);
+      await assert.rejects(s.grab('preview', 200), /no frame from the tele camera/);
+      assert.equal(s.streaming, false);
     } finally {
       s.close();
       await fake.close();
     }
   });
 
-  test('a preview is the next exposure: begin_streaming, one frame, stop_streaming, and the socket let go', async () => {
-    // get_current_img answers with the frame the firmware cached when the view started - the same
-    // pixels all night; only streaming yields the exposure the camera is making now
+  test('the stream: begin_streaming once, frames as they come, the socket kept and a heartbeat on it', async () => {
     const fake = new FakeSeestar();
     await fake.listen();
     const payload = Buffer.alloc(4 * 2 * 2, 0x20);
-    fake.frames.preview = frame(IMG_TYPE.preview, payload, 4, 2, 7);
-    const s = new SeestarImageStream('127.0.0.1', fake.imagePort, 'tele');
+    fake.frames.widePreview = frame(IMG_TYPE.preview, payload, 4, 2, 65535);
+    const s = new SeestarImageLink('127.0.0.1', fake.wideImagePort, 'wide');
     try {
+      s.startStream(); // asked before the socket is up: remembered
+      s.open();
+      await until(() => s.connected && s.streaming);
       const [a, b] = await Promise.all([s.grab('preview', 2000), s.grab('preview', 2000)]);
-      assert.equal(a.header.imageId, 7);
+      assert.equal(a.header.imageId, 65535);
       assert.equal(a, b, 'two callers waiting at once share the one exposure');
-      assert.equal(fake.methods().filter((m) => m === 'image:begin_streaming').length, 1);
-      assert.ok(!fake.methods().includes('image:get_current_img'), 'the cached frame was asked for');
-      await new Promise((r) => setTimeout(r, 100));
-      assert.ok(fake.methods().includes('image:stop_streaming'), 'streaming was left on');
-      const c = await s.grab('preview', 2000);
-      assert.equal(c.header.imageId, 7);
-      assert.equal(fake.methods().filter((m) => m === 'image:begin_streaming').length, 2, 'the next grab streams again');
+      assert.equal(fake.methods().filter((m) => m === 'wide:begin_streaming').length, 1);
+      assert.ok(!fake.methods().includes('wide:get_current_img'), 'the cached frame was asked for');
+      let pushed = 0;
+      s.on('frame', (_f: unknown, kind: string | null) => kind === null && pushed++);
+      await wait(450);
+      assert.ok(pushed >= 3, `pushed ${pushed}`);
+      assert.ok(s.liveFrames >= 3);
+      assert.ok(!fake.methods().includes('wide:stop_streaming'), 'the stream was stopped');
+      assert.equal(fake.imageConnections, 1, "the connection is the session's: one socket, kept");
+      s.stopStream();
+      await until(() => fake.methods().includes('wide:stop_streaming'));
+      assert.ok(s.connected);
+      assert.deepEqual(s.status().camera, 'wide');
     } finally {
       s.close();
       await fake.close();
     }
   });
 
-  test('a live grab landing leaves a waiting stacked grab alone', async () => {
-    // the video reader's live grab drops its connection with the frame; a get_stacked_img that was
-    // waiting on the same socket then failed with "closed before a stacked frame came"
+  test('firmware 9.75 in Jpg mode pushes the live frames as JPEGs with their own running ids: still live, still the preview', async () => {
+    const fake = new FakeSeestar();
+    await fake.listen();
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(30, 0x11)]);
+    fake.frames.preview = frame(IMG_TYPE.jpegStack, jpeg, 0, 0, 24761);
+    const s = new SeestarImageLink('127.0.0.1', fake.imagePort, 'tele');
+    try {
+      s.open();
+      s.startStream();
+      await until(() => s.connected && s.streaming);
+      let stackedError: Error | null = null;
+      const stacked = s.grab('stacked', 800).catch((e: Error) => {
+        stackedError = e;
+      });
+      const live = await s.grab('preview', 2000);
+      assert.equal(live.header.imageId, 24761);
+      assert.equal(live.header.imgType, IMG_TYPE.jpegStack);
+      await wait(350);
+      assert.ok(s.liveFrames >= 3, `live frames ${s.liveFrames}`);
+      assert.equal(stackedError, null, 'a pushed JPEG was taken for the stacked image');
+      await stacked;
+      assert.match(String(stackedError), /no stacked image/);
+    } finally {
+      s.close();
+      await fake.close();
+    }
+  });
+
+  test('a live frame landing leaves a waiting stacked grab alone; a drop fails it and redials', async () => {
     const fake = new FakeSeestar();
     await fake.listen();
     fake.frames.stacked = undefined; // a stack with no frame yet answers with nothing at all
-    fake.frames.preview = frame(IMG_TYPE.preview, Buffer.alloc(16, 0x20), 4, 2, 7);
-    const s = new SeestarImageStream('127.0.0.1', fake.imagePort, 'tele');
+    fake.frames.preview = frame(IMG_TYPE.preview, Buffer.alloc(16, 0x20), 4, 2, 65535);
+    const s = new SeestarImageLink('127.0.0.1', fake.imagePort, 'tele');
     try {
+      s.open();
+      s.startStream();
+      await until(() => s.connected);
       let stackedError: Error | null = null;
-      const stacked = s.grab('stacked', 1200).catch((e: Error) => { stackedError = e; });
+      const stacked = s.grab('stacked', 1200).catch((e: Error) => {
+        stackedError = e;
+      });
       const live = await s.grab('preview', 2000);
-      assert.equal(live.header.imageId, 7);
-      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(live.header.imageId, 65535);
+      await wait(300);
       assert.equal(stackedError, null, 'the stacked grab was failed by the live grab finishing');
       await stacked;
-      assert.match(String(stackedError), /no stacked frame/);
+      assert.match(String(stackedError), /no stacked image from the tele camera/);
+      const again = s.grab('stacked', 5000);
+      const next = s.grab('preview', 5000);
+      await wait(20);
+      fake.kick();
+      await assert.rejects(again, /picture socket closed/);
+      await until(() => s.connected && s.streaming, 5000);
+      assert.equal((await next).header.imageId, 65535, 'the wait for a live frame carries over the redial');
     } finally {
       s.close();
       await fake.close();
@@ -280,7 +349,7 @@ describe('Seestar image stream', () => {
   });
 });
 
-describe('Seestar state', () => {
+describe('Seestar model', () => {
   test('the field of view comes from the reported optics', () => {
     // chip_size is [width, height] as the frames are read (an S50 Pro: [2160, 3840], FITS NAXIS1 = 2160)
     const f = fovFromOptics([1080, 1920], 2.9, 150)!;
@@ -317,7 +386,7 @@ describe('Seestar state', () => {
     assert.equal(busyWith(st), 'goto');
     applyEvent(st, ev({ Event: 'AutoGoto', state: 'fail', page: 'preview', error: 'solve failed', code: 251 }));
     assert.equal(busyWith(st), 'goto');
-    assert.equal(st.ops['AutoGoto.step'].error, 'solve failed');
+    assert.equal(st.ops['AutoGoto.step']!.error, 'solve failed');
     applyEvent(st, ev({ Event: 'AutoGoto', state: 'complete', lapse_ms: 50_000, route: [] }));
     assert.equal(busyWith(st), null);
     assert.equal(isOuter({ state: 'complete', lapse_ms: 1 }), true);
@@ -337,10 +406,22 @@ describe('Seestar state', () => {
     assert.equal(st.power.batteryPct, 50);
     assert.deepEqual([st.mount.raHours, st.mount.decDeg], [10.5, 41.2]);
     assert.equal(st.alert?.error, 'low battery');
-    assert.ok(!st.recent.some((r) => r.name === 'PiStatus'));
+    assert.ok(!st.recent.some((r) => r.event === 'PiStatus'));
     applyAppState(st, { View: { state: 'working', stage: 'Stack', target_name: 'M 81', Stack: { state: 'working', stacked_frame: 20, dropped_frame: 2 } } });
     assert.equal(st.view.target, 'M 81');
     assert.equal(st.stack.stacked, 20);
+  });
+
+  test('the two views: the second view is the wide camera, and the selected camera follows the app state', () => {
+    const st = initialState('local');
+    applyAppState(st, { View: { state: 'working', stage: 'ContinuousExposure', mode: 'star' }, SecondView: { state: 'working', stage: 'Sleep', mode: 'star' }, selected_cam: 'SecondView' });
+    assert.equal(st.view.stage, 'ContinuousExposure');
+    assert.equal(st.secondView.stage, 'Sleep');
+    assert.equal(st.camera, 'wide');
+    applyEvent(st, ev({ Event: 'SecondView', state: 'working', stage: 'ContinuousExposure', mode: 'star' }));
+    assert.equal(st.secondView.stage, 'ContinuousExposure');
+    applyEvent(st, ev({ Event: 'SelectCamera', selected_cam: 'View' }));
+    assert.equal(st.camera, 'tele');
   });
 });
 
@@ -380,23 +461,23 @@ describe('ZWO tunnel supervisor', () => {
     t.start();
     assert.equal(t.status().phase, 'starting');
     open = true; // Docker's proxy accepts at once
-    await new Promise((r) => setTimeout(r, 20));
+    await wait(20);
     assert.equal(t.status().phase, 'starting');
-    children[0].stdout.write('[*] forwarding 12 ports:\n[*] tunnel ready - press Ctrl-C to disconnect\n');
+    children[0]!.stdout.write('[*] forwarding 12 ports:\n[*] tunnel ready - press Ctrl-C to disconnect\n');
     await until(() => t.status().phase === 'up', 5000);
     assert.ok(t.status().output.some((l) => /tunnel ready/.test(l)));
-    children[0].exitCode = 1;
-    children[0].emit('exit', 1, null);
+    children[0]!.exitCode = 1;
+    children[0]!.emit('exit', 1, null);
     assert.equal(t.status().phase, 'down');
     assert.equal(t.status().lastExit, 'exit code 1');
     t.stop();
     assert.equal(t.status().phase, 'stopped');
     t.start();
     t.stop();
-    assert.deepEqual(children[1].signals, ['SIGINT']);
+    assert.deepEqual(children[1]!.signals, ['SIGINT']);
   });
 
-  test('without a command the tunnel is the user\'s and only its port is watched', async () => {
+  test("without a command the tunnel is the user's and only its port is watched", async () => {
     let open = false;
     const t = new ZwoTunnel({ host: '127.0.0.1', port: 4700, command: '', readyTimeoutS: 60, env: {}, probeFn: async () => open });
     t.start();
@@ -409,16 +490,27 @@ describe('ZWO tunnel supervisor', () => {
 
   /** the JSON the supervisor inside the tunnel container answers on GET /status */
   const supState = (over: Record<string, unknown> = {}) => ({
-    phase: 'idle', desired: 'disconnected', attempts: 0, reconnects: 0, lastError: null, lastExit: null,
-    device: null, session: null, portOpen: false, mode: null, upSince: null, leaseSeconds: null,
-    leaseExpiresAt: null, backoffSeconds: 1, stopping: false, output: [], ...over,
+    phase: 'idle',
+    desired: 'disconnected',
+    attempts: 0,
+    reconnects: 0,
+    lastError: null,
+    lastExit: null,
+    device: null,
+    session: null,
+    portOpen: false,
+    mode: null,
+    upSince: null,
+    leaseSeconds: null,
+    leaseExpiresAt: null,
+    backoffSeconds: 1,
+    stopping: false,
+    output: [],
+    ...over,
   });
 
-  const supervisorTunnel = (
-    fetchFn: typeof fetch,
-    probeFn: () => Promise<boolean>,
-    supervisor: { host: string; port: number; token?: string; leaseS: number },
-  ) => new ZwoTunnel({ host: '127.0.0.1', port: 4700, command: '', readyTimeoutS: 60, env: {}, probeMs: 20, probeFn, fetchFn, supervisor });
+  const supervisorTunnel = (fetchFn: typeof fetch, probeFn: () => Promise<boolean>, supervisor: { host: string; port: number; token?: string; leaseS: number }) =>
+    new ZwoTunnel({ host: '127.0.0.1', port: 4700, command: '', readyTimeoutS: 60, env: {}, probeMs: 20, probeFn, fetchFn, supervisor });
 
   test('Connect asks the container for the telescope and Disconnect releases it', async () => {
     const sent: { url: string; body: Record<string, unknown>; auth: string }[] = [];
@@ -499,11 +591,11 @@ describe('ZWO account API', () => {
       assert.equal(h.Authorization, 'TOKEN');
       assert.equal(h['x-service-platform'], 'seestar');
       if (url.includes('/my-device/detail')) return json({ data: { remoteMode: 1, address: 'Starfront' } });
-      return json({ data: { list: [{ deviceSn: 'S30X', deviceModel: 'S30', deviceStatus: 3 }] } });
+      return json({ data: { list: [{ deviceSn: 'S30X', deviceModel: 'S30', status: 3 }] } });
     }) as typeof fetch;
     const d = await listDevices({ user: 'me@example.com', password: 'pw', fetch: f });
     assert.equal(d.length, 1);
-    assert.deepEqual([d[0].serial, d[0].status, d[0].remoteMode, d[0].address], ['S30X', 'shooting', 'relay', 'Starfront']);
+    assert.deepEqual([d[0]!.serial, d[0]!.status, d[0]!.remoteMode, d[0]!.address], ['S30X', 'shooting', 'relay', 'Starfront']);
     assert.equal(urls.length, 3);
     await assert.rejects(login('me@example.com', 'bad', (async () => new Response('{"msg":"wrong password"}', { status: 401 })) as typeof fetch), /HTTP 401 \(wrong password\)/);
     await assert.rejects(listDevices({ user: '', password: '' }), /SEESTAR_USER/);

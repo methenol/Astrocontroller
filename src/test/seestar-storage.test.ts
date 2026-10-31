@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { config } from '../config.js';
-import { encodeHeader, frameImage, framePixels, IMG_TYPE, parseHeader } from '../drivers/seestar/image-stream.js';
-import { nightOf, parseLight, parseStack, seestarLibrary, zonedEpochS } from '../drivers/seestar/library.js';
-import { parseFitsHeader, type SeestarEntry, type SeestarFiles } from '../drivers/seestar/files.js';
+import { encodeHeader, frameImage, framePixels, IMG_TYPE, parseHeader } from '../drivers/seestar/frames.js';
+import { nightOf, parseFitsHeader, parseLight, parseStack, seestarStorage, zonedEpochS, type SeestarEntry, type SeestarFiles } from '../drivers/seestar/storage.js';
 import { bayerFits } from '../drivers/seestar/capture.js';
 import { superviseStack } from '../drivers/seestar/duty.js';
-import { initialState } from '../drivers/seestar/state.js';
+import { initialState } from '../drivers/seestar/model.js';
 import type { Seestar } from '../drivers/seestar/device.js';
 import { readFits } from '../media/fits.js';
 import { decode } from '../media/images.js';
@@ -21,6 +20,7 @@ function zipped(data: Buffer, name = 'raw_data'): Buffer {
   const local = Buffer.alloc(30);
   local.writeUInt32LE(0x04034b50, 0);
   local.writeUInt16LE(8, 6); // sizes in a data descriptor, as the scope writes them
+  local.writeUInt16LE(8, 8); // deflate
   local.writeUInt16LE(n.length, 26);
   return Buffer.concat([local, n, zlib.deflateRawSync(data)]);
 }
@@ -40,15 +40,16 @@ describe('Seestar frames (S50 Pro, firmware 9.75)', () => {
     for (let i = 0; i < w * h; i++) px.writeUInt16LE(i < 2 || (i >= 4 && i < 6) ? 65535 : 0, i * 2);
     const zip = zipped(px);
     assert.deepEqual(framePixels(zip, px.length, 'x'), px);
-    const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.preview, length: zip.length, width: w, height: h }))!, payload: zip, at: 5 }, 'tele');
-    assert.deepEqual([img.width, img.height, img.channels], [2, 1, 1]);
-    assert.deepEqual([...img.data].map((v) => +v.toFixed(3)), [1, 0]);
+    const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.preview, length: zip.length, width: w, height: h })), payload: zip, at: 5 }, 'tele');
+    // colour: each GRBG 2×2 cell is one RGB pixel (the left cell's four samples are all full scale)
+    assert.deepEqual([img.width, img.height, img.channels], [2, 1, 3]);
+    assert.deepEqual([...img.data].map((v) => +v.toFixed(3)), [1, 1, 1, 0, 0, 0]);
     assert.throws(() => framePixels(Buffer.alloc(9), px.length, 'not a frame'), /not a frame/);
   });
 });
 
 describe('Seestar storage names', () => {
-  test('lights and stacks are read from their names, in the scope\'s local time', () => {
+  test("lights and stacks are read from their names, in the scope's local time", () => {
     assert.deepEqual(parseLight('Light_M 31_60.0s_IRCUT_20261028-003945.fit'), { target: 'M 31', exp: '60.0', filter: 'IRCUT', stamp: '2026-10-28-00-39-45' });
     assert.deepEqual(parseStack('Stacked_159_M 31_60.0s_IRCUT_20261028-004000.fit'), { frames: 159, target: 'M 31', exp: '60.0', filter: 'IRCUT', stamp: '2026-10-28-00-40-00' });
     assert.equal(parseStack('Stacked_37_IC 434_60.0s_LP_20261028-055344.jpg')?.target, 'IC 434');
@@ -118,8 +119,8 @@ describe('Seestar sessions', () => {
   };
   const headers = { 'MyWorks/M 31_sub/Light_M 31_60.0s_IRCUT_20261027-215123.fit': { GAIN: 200, WIDECAM: 0 } };
 
-  test('one session per target, sub length, filter and night, named like the Dwarf\'s', async () => {
-    const lib = seestarLibrary(fakeFiles(tree, headers).files);
+  test("one session per target, sub length, filter and night, named like the Dwarf's", async () => {
+    const lib = seestarStorage(fakeFiles(tree, headers).files);
     const { sessions, otherFolders } = await lib.listSessions(true);
     assert.deepEqual(
       sessions.map((s) => s.folder),
@@ -137,12 +138,12 @@ describe('Seestar sessions', () => {
     // what the library records carries no listing state
     const resolved = await lib.resolveSession(night.folder);
     assert.equal('transferred' in resolved, false);
-    assert.equal((await lib.resolveSession('latest')).folder, sessions[0].folder);
+    assert.equal((await lib.resolveSession('latest')).folder, sessions[0]!.folder);
     await assert.rejects(lib.resolveSession('DWARF_RAW_TELE_X_EXP_1_GAIN_1_2026-01-01-00-00-00'), /not a Seestar session/);
   });
 
-  test('the album: one tile per stack (its JPEG), linked to its night\'s session; videos with their thumbnails', async () => {
-    const lib = seestarLibrary(fakeFiles(tree, headers).files);
+  test("the album: one tile per stack (its JPEG), linked to its night's session; videos with their thumbnails", async () => {
+    const lib = seestarStorage(fakeFiles(tree, headers).files);
     const items = await lib.album.list(0, 0, 50);
     const stack = items.find((i) => i.mediaType === 4)!;
     assert.equal(stack.filePath, '/SEESTAR/MyWorks/M 31/Stacked_2_M 31_60.0s_IRCUT_20261028-004000.jpg');
@@ -158,7 +159,7 @@ describe('Seestar sessions', () => {
 
   test('deleting a session deletes its subs and stacks with their thumbnails, nothing else', async () => {
     const { files, deleted } = fakeFiles(tree, headers);
-    const lib = seestarLibrary(files);
+    const lib = seestarStorage(files);
     const r = await lib.deleteSession(await lib.resolveSession('SEESTAR_RAW_TELE_M 31_EXP_60_GAIN_200_2026-10-27-21-51-23_IRCUT'));
     assert.deepEqual(r, { deleted: true });
     assert.deepEqual(deleted.filter((d) => !d.endsWith('_thn.jpg')).sort(), [
@@ -170,7 +171,7 @@ describe('Seestar sessions', () => {
   });
 
   test('an album file lands under the library mirror of the scope, never outside it', () => {
-    const lib = seestarLibrary(fakeFiles(tree).files);
+    const lib = seestarStorage(fakeFiles(tree).files);
     assert.equal(lib.albumLocalPath('/SEESTAR/MyWorks/M 31/a.jpg', '2026-10-28'), path.join(path.resolve(config.paths.library), 'MyWorks', 'M 31', 'a.jpg'));
     assert.throws(() => lib.albumLocalPath('/SEESTAR/MyWorks/../../x', '2026-10-28'));
   });
@@ -206,7 +207,7 @@ describe('FITS', () => {
     assert.deepEqual([...f.rgb!], [1000, 0, 0, 0, 0, 1000]);
     const img = await decode(buf, 'stack.fit');
     assert.equal(img.channels, 3);
-    assert.ok(img.data[0] > img.data[2] && img.data[5] > img.data[3]);
+    assert.ok(img.data[0]! > img.data[2]! && img.data[5]! > img.data[3]!);
   });
 });
 

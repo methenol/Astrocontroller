@@ -1,14 +1,13 @@
 /**
- * The obstruction survey with a Seestar. The Dwarf's survey stitches wide frames into a panorama
- * from its motor model; a Seestar on an EQ wedge turns each frame by the field angle of where it
- * points, which only the sky can calibrate. So this survey judges the centre of the wide frame
- * only, where that turn does not matter: it slews (scope_goto, no plate solve) to each azimuth at
- * rising altitudes and asks whether the centre is sky or obstruction (media/horizon/mask.ts's own
- * evidence), stopping in each direction at the first clear sky. The obstruction top is taken half
- * way to that altitude, and the map is saved for the site like the Dwarf's.
+ * The obstruction survey with a Seestar. On an EQ wedge each frame is turned by the field angle of
+ * where it points, which only the sky can calibrate, so this survey judges the centre of the wide
+ * frame only: it slews (scope_goto, no plate solve) to each azimuth at rising altitudes and asks
+ * whether the centre is sky or obstruction (media/horizon/mask.ts's evidence), stopping in each
+ * direction at the first clear sky. The obstruction top is taken half way to that altitude, and
+ * the map is saved for the site like the Dwarf's.
  *
- * The sky reference is a frame at high altitude that must show stars (it is refused otherwise): a
- * survey under a closed roof or cloud would otherwise map everything as sky or everything as wall.
+ * The sky reference is a frame at high altitude that must show stars: a survey under a closed roof
+ * or cloud would otherwise map everything as sky or everything as wall.
  */
 import { errMsg, logger } from '../../log.js';
 import * as sky from '../../astro/sky.js';
@@ -16,25 +15,21 @@ import { describeMask, newMaskId, saveMask, unknownSectors, type HorizonMask } f
 import { analyze, crop, type FloatImage } from '../../media/images.js';
 import { frameEvidence, skyLevelOf } from '../../media/horizon/mask.js';
 import type { Seestar } from './device.js';
-import type { SeestarMedia } from './web.js';
-import { seestarImage } from './mcp-media.js';
 
-const log = logger('horizon');
+const log = logger('seestar.horizon');
 
 const AZ_STEP_DEG = 20;
 const ALTITUDES = [8, 16, 25, 35, 50];
 const ANCHOR_ALT = 70;
-/** the share of the frame, around its centre, that is judged */
 const CENTRE = 0.2;
-/** mean evidence above this is an obstruction (+1 obstruction … −1 sky) */
 const OBSTRUCTION_EVIDENCE = 0.2;
-/** stars the anchor frame needs to count as clear sky */
 const ANCHOR_MIN_STARS = 15;
 const MARGIN_DEG = 1;
 const SUN_DOWN_DEG = -12;
 const DEADLINE_MS = 45 * 60_000;
 
 export interface SeestarSurveyState {
+  [k: string]: unknown;
   running: boolean;
   phase: string;
   startedAt: number;
@@ -60,7 +55,8 @@ export class SeestarSurvey {
 
   constructor(
     private readonly scope: Seestar,
-    private readonly media: SeestarMedia,
+    /** a fresh wide frame */
+    private readonly wideFrame: () => Promise<FloatImage>,
   ) {}
 
   get isRunning(): boolean {
@@ -102,11 +98,10 @@ export class SeestarSurvey {
       if (this.stopping) throw new Error('the obstruction survey was stopped');
     };
     try {
-      // ---- the sky reference: high up, where the sky is open, with stars in it
       progress({ message: `pointing up at ${ANCHOR_ALT}° for the sky reference` });
       const azNow = this.scope.state.mount.azDeg ?? 180;
       await this.scope.slewAltAz(azNow, ANCHOR_ALT);
-      const anchorImg = (await seestarImage('wide', this.scope, this.media)).img;
+      const anchorImg = await this.wideFrame();
       const stars = analyze(anchorImg).stars.count;
       if (stars < ANCHOR_MIN_STARS) {
         throw new Error(`the sky reference at ${ANCHOR_ALT}° shows ${stars} stars (at least ${ANCHOR_MIN_STARS} are needed): the roof is closed, it is cloudy, or the wide camera is not seeing the sky. Nothing was mapped.`);
@@ -114,7 +109,6 @@ export class SeestarSurvey {
       const skyLevel = skyLevelOf(centreOf(anchorImg));
       log.info(`survey sky reference: ${stars} stars, level ${(skyLevel * 255).toFixed(1)}/255`);
 
-      // ---- each direction, upward until the centre is sky
       phase = 'sweep';
       const azimuths: number[] = [];
       for (let az = 0; az < 360; az += AZ_STEP_DEG) azimuths.push(az);
@@ -137,7 +131,7 @@ export class SeestarSurvey {
             notes.push(`az ${az}° alt ${alt}°: ${errMsg(e)}`);
             continue;
           }
-          const img = (await seestarImage('wide', this.scope, this.media)).img;
+          const img = await this.wideFrame();
           frames++;
           const ev = frameEvidence(centreOf(img), skyLevel);
           const mean = ev.data.reduce((a, b) => a + b, 0) / ev.data.length;
@@ -147,19 +141,17 @@ export class SeestarSurvey {
             break;
           }
         }
-        // the top lies between the last blocked altitude and the first clear one
         const alt = lastBlocked === null ? 0 : clearAt === null ? lastBlocked : (lastBlocked + clearAt) / 2;
         top.set(az, { alt, capped: lastBlocked !== null && clearAt === null });
       }
       if (!top.size) throw new Error(`no direction could be surveyed. ${notes.join('; ')}`);
 
-      // ---- the mask: each 1° bin from the nearest surveyed direction
       phase = 'build';
       progress({ message: 'building the horizon mask' });
       const profile: Array<number | null> = [];
       const capped: number[] = [];
       for (let k = 0; k < 360; k++) {
-        const near = Math.round((k + 0.5) / AZ_STEP_DEG) * AZ_STEP_DEG % 360;
+        const near = (Math.round((k + 0.5) / AZ_STEP_DEG) * AZ_STEP_DEG) % 360;
         const t = top.get(near);
         if (!t || t.alt === null) {
           profile.push(null);

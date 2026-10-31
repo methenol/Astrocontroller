@@ -1,64 +1,59 @@
 /**
- * The firmware 7.18+ handshake on the control port, run right after the TCP connect:
+ * The Seestar handshake (firmware 7.18+): the scope hands out a challenge string, the client signs
+ * it with the private key the official app carries (RSA-SHA1, PKCS#1 v1.5) and the scope checks the
+ * signature. Without a valid signature every other request is refused.
  *
- *   get_verify_str ("verify")             → {result: {str: challenge}}   (code 103 on older firmware: no handshake)
- *   verify_client {sign, data: challenge} → code 0                       sign = base64(RSA-SHA1 PKCS#1 v1.5 of the challenge)
- *   pi_is_verified ("verify")             → code 0                       (a non-zero code is tolerated, as the official app does)
- *
- * The key is the official app's own, the same for every scope. It is not shipped here: point
- * SEESTAR_KEY_PATH at the PEM you extracted from your copy of the app (see seestarpy's extract_pem).
+ *   get_verify_str('verify')  → { result: { str } }   (code 103, or an empty str: no handshake wanted)
+ *   verify_client({ sign, data })
+ *   pi_is_verified('verify')  → non-zero codes are tolerated: the scope answers requests either way
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { logger } from '../../log.js';
-import type { RpcResponse } from './rpc.js';
 
-const log = logger('seestar');
+export type Send = (method: string, params: unknown, timeoutMs: number) => Promise<RpcResponse>;
+
+export interface RpcResponse {
+  id?: number;
+  method?: string;
+  code?: number;
+  result?: unknown;
+  error?: unknown;
+  [k: string]: unknown;
+}
 
 const STEP_TIMEOUT_MS = 10_000;
-/** "method not found": firmware before 7.18 */
-const NO_SUCH_METHOD = 103;
+const NO_HANDSHAKE_CODE = 103;
+
+export function signChallenge(pem: string, challenge: string): string {
+  return crypto.sign('sha1', Buffer.from(challenge), { key: pem, padding: crypto.constants.RSA_PKCS1_PADDING }).toString('base64');
+}
+
+/** The handshake key from disk; a clear error when it is missing or not a PEM private key. */
+export function readKey(path: string): string {
+  if (!path) throw new Error('SEESTAR_KEY_PATH is not set: the Seestar refuses every request until the app key signs its challenge');
+  let pem: string;
+  try {
+    pem = fs.readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(`SEESTAR_KEY_PATH (${path}) cannot be read: ${(err as Error).message}`);
+  }
+  if (!/-----BEGIN (RSA )?PRIVATE KEY-----/.test(pem)) throw new Error(`SEESTAR_KEY_PATH (${path}) is not a PEM private key`);
+  return pem;
+}
 
 export interface HandshakeResult {
-  /** the scope asked for it (firmware 7.18+) */
   required: boolean;
   verified: boolean;
 }
 
-export type Send = (method: string, params: unknown, timeoutMs: number) => Promise<RpcResponse>;
-
-export function signChallenge(pem: string, challenge: string): string {
-  return crypto.sign('sha1', Buffer.from(challenge, 'utf8'), { key: pem, padding: crypto.constants.RSA_PKCS1_PADDING }).toString('base64');
-}
-
-/** The PEM at `path`, or null when no path is configured; a configured path that cannot be read throws. */
-export function readKey(path: string): string | null {
-  if (!path) return null;
-  const pem = fs.readFileSync(path, 'utf8');
-  if (!/-----BEGIN (RSA )?PRIVATE KEY-----/.test(pem)) throw new Error(`${path} holds no PEM private key`);
-  return pem;
-}
-
-export async function handshake(send: Send, loadKey: () => string | null): Promise<HandshakeResult> {
-  const challengeReply = await send('get_verify_str', 'verify', STEP_TIMEOUT_MS);
-  if (challengeReply.code === NO_SUCH_METHOD) return { required: false, verified: false };
-  const result = challengeReply.result;
-  const challenge = result && typeof result === 'object' ? (result as { str?: unknown }).str : result;
-  if (challengeReply.code !== 0 || typeof challenge !== 'string' || challenge === '') {
-    // no challenge to sign: a firmware that does not ask for it
-    log.debug(`get_verify_str answered code ${challengeReply.code} without a challenge: no handshake`);
-    return { required: false, verified: false };
-  }
-
-  const key = loadKey();
-  if (!key) {
-    throw new Error('this Seestar firmware (7.18+) requires the client handshake: set SEESTAR_KEY_PATH to the PEM key extracted from the official Seestar app');
-  }
-  const verify = await send('verify_client', { sign: signChallenge(key, challenge), data: challenge }, STEP_TIMEOUT_MS);
-  if (verify.code !== 0) {
-    throw new Error(`the Seestar rejected the handshake signature (verify_client code ${verify.code}${verify.error ? `: ${String(verify.error)}` : ''}): the key in SEESTAR_KEY_PATH does not match this firmware`);
-  }
-  const confirmed = await send('pi_is_verified', 'verify', STEP_TIMEOUT_MS);
-  if (confirmed.code !== 0) log.warn(`pi_is_verified answered code ${confirmed.code}: carrying on, as the official app does`);
+/** Run the handshake on a fresh connection. Throws when the scope rejects the signature or the key is unusable. */
+export async function handshake(send: Send, loadKey: () => string): Promise<HandshakeResult> {
+  const challenge = await send('get_verify_str', 'verify', STEP_TIMEOUT_MS);
+  const str = (challenge.result as { str?: unknown } | undefined)?.str;
+  if (challenge.code === NO_HANDSHAKE_CODE || typeof str !== 'string' || !str) return { required: false, verified: false };
+  const pem = loadKey();
+  const reply = await send('verify_client', { sign: signChallenge(pem, str), data: str }, STEP_TIMEOUT_MS);
+  if (reply.code && reply.code !== 0) throw new Error(`the Seestar rejected the handshake (verify_client code ${reply.code}): SEESTAR_KEY_PATH holds the wrong key`);
+  await send('pi_is_verified', 'verify', STEP_TIMEOUT_MS).catch(() => undefined);
   return { required: true, verified: true };
 }

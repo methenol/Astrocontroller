@@ -82,7 +82,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
         .finally(() => busy.delete(idx));
     };
     ws.on('message', (raw) => {
-      let m: { type?: unknown; sources?: unknown };
+      let m: { type?: unknown; sources?: unknown; main?: unknown };
       try {
         m = JSON.parse(String(raw));
       } catch {
@@ -90,6 +90,9 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
       }
       if (m.type !== 'subscribe' || !Array.isArray(m.sources)) return;
       const want = new Set<string>(m.sources.filter((x): x is string => typeof x === 'string' && (VIDEO_SOURCES as readonly string[]).includes(x)));
+      // `main` is the source in this viewer's main view: a telescope that streams one camera at a
+      // time (the Seestar) selects that one, not whichever thumbnail is also on screen
+      for (const name of VIDEO_SOURCES) hub.get(name).setPrimary(ws, want.has(name) && m.main === name);
       for (const [name, unsub] of subs) {
         if (want.has(name)) continue;
         unsub();
@@ -109,6 +112,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
       clearInterval(ping);
       for (const unsub of subs.values()) unsub();
       subs.clear();
+      for (const name of VIDEO_SOURCES) hub.get(name).setPrimary(ws, false);
     });
     ws.on('error', (e) => log.debug(`video socket: ${errMsg(e)}`));
   });

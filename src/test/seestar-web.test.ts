@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import * as sky from '../astro/sky.js';
 import type { Seestar } from '../drivers/seestar/device.js';
-import { initialState } from '../drivers/seestar/state.js';
+import { initialState } from '../drivers/seestar/model.js';
 import { projectState, seestarWeb } from '../drivers/seestar/web.js';
 import { dwarfWeb } from '../drivers/dwarf/web.js';
 import { controlRoutes } from '../web/routes/control.js';
@@ -15,16 +15,33 @@ import type { WebTelescope } from '../web/telescope.js';
 
 const SITE = { lat: 45.5, lon: -122.6, elev: 50 };
 
+/** A picture socket that never connects, as the live views see it. */
+class StubImages extends EventEmitter {
+  connected = false;
+  streaming = false;
+  constructor(readonly camera: 'tele' | 'wide') {
+    super();
+  }
+  status = () => ({ camera: this.camera, connected: false, streaming: false, liveFrames: 0, lastFrameAt: null, note: null });
+}
+
 /** The Seestar's surface the adapter uses, recording the commands it is sent. */
 class StubSeestar extends EventEmitter {
   state = initialState('local');
   calls: unknown[][] = [];
   busy: string | null = null;
+  selected: 'tele' | 'wide' = 'tele';
+  exposing: 'tele' | 'wide' | null = 'tele';
+  images = { tele: new StubImages('tele'), wide: new StubImages('wide') };
+  link = { wireLines: () => [], usable: true, health: () => ({}) };
   constructor() {
     super();
     this.state.connected = true;
   }
   isBusy = () => this.busy;
+  isStacking = () => false;
+  viewRunning = () => true;
+  liveNote = () => null;
   requireLocation = () => SITE;
   location = () => SITE;
   private rec =
@@ -35,11 +52,13 @@ class StubSeestar extends EventEmitter {
     };
   nudge = this.rec('nudge');
   stopMotion = this.rec('stopMotion');
+  stopWork = this.rec('stopWork', { stopped: ['autofocus'] });
   readPointing = this.rec('readPointing', {});
   focusBy = this.rec('focusBy', 1234);
   setExposure = this.rec('setExposure');
   setGain = this.rec('setGain');
   park = this.rec('park', { state: 'complete' });
+  selectCamera = this.rec('selectCamera');
   gotoTarget = this.rec('gotoTarget', { goto: { state: 'complete', ms: 42_000 }, stacking: 'not requested' });
 }
 
@@ -48,19 +67,20 @@ const make = () => {
   return { stub, web: seestarWeb(stub as unknown as Seestar) };
 };
 
-async function withControl(scope: WebTelescope, fn: (post: (b: unknown) => Promise<{ status: number; body: Record<string, unknown> }>, events: string[]) => Promise<void>) {
+async function withControl(scope: WebTelescope, fn: (post: (b: unknown, path?: string) => Promise<{ status: number; body: Record<string, unknown> }>, events: string[]) => Promise<void>) {
   const events: string[] = [];
   const ctx = { scope, duty: { event: (t: string) => events.push(t) } } as unknown as WebContext;
   const app = express();
   app.use(express.json());
   app.use('/api', controlRoutes(ctx));
+  app.use('/api', scope.routes!());
   app.use(jsonErrors);
   const server = app.listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
   try {
-    await fn(async (b) => {
-      const res = await fetch(`${base}/control`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
+    await fn(async (b, path = '/control') => {
+      const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
       return { status: res.status, body: (await res.json()) as Record<string, unknown> };
     }, events);
   } finally {
@@ -70,9 +90,9 @@ async function withControl(scope: WebTelescope, fn: (post: (b: unknown) => Promi
 }
 
 describe('Seestar behind the shared web UI', () => {
-  test("its state is published in the UI's field names", () => {
-    const st = initialState('local');
-    Object.assign(st, { connected: true });
+  test("its state is published in the UI's field names, with the camera the UI chose and the one exposing", () => {
+    const stub = new StubSeestar();
+    const st = stub.state;
     st.device = { name: 'S50 test', firmware: '6.45' };
     st.power = { batteryPct: 77, charging: true, tempC: 31 };
     st.storage = { freeMB: 20480, totalMB: 51200 };
@@ -81,7 +101,9 @@ describe('Seestar behind the shared web UI', () => {
     st.stack = { state: 'working', stacked: 40, dropped: 2, total: 100 };
     st.focus = { position: 1580 };
     st.ops.AutoGoto = { state: 'complete', at: 1, outer: true };
-    const t = projectState(st, 'stacking') as Record<string, any>;
+    stub.busy = 'stacking';
+    stub.selected = 'wide';
+    const t = projectState(stub as unknown as Seestar) as Record<string, any>;
     assert.equal(t.connected, true);
     assert.equal(t.link.state, 'connected');
     assert.equal(t.device.name, 'S50 test');
@@ -98,25 +120,40 @@ describe('Seestar behind the shared web UI', () => {
     assert.equal(t.operation, undefined);
     assert.equal(t.pointing.target, 'M 31');
     assert.ok(t.fov.tele.h > 0);
-    assert.equal(projectState(st, 'autofocus').operation, 'autofocus');
+    assert.deepEqual(t.camera, { selected: 'wide', exposing: 'tele' });
+    stub.busy = 'autofocus';
+    assert.equal((projectState(stub as unknown as Seestar) as any).operation, 'autofocus');
   });
 
   test('a released Seestar says so; one not connected says it is connecting', () => {
-    const st = initialState('local');
-    st.released = true;
-    assert.equal((projectState(st, null) as any).link.state, 'released');
-    st.released = false;
-    assert.equal((projectState(st, null) as any).link.state, 'connecting');
+    const stub = new StubSeestar();
+    stub.state.connected = false;
+    stub.state.released = true;
+    assert.equal((projectState(stub as unknown as Seestar) as any).link.state, 'released');
+    stub.state.released = false;
+    assert.equal((projectState(stub as unknown as Seestar) as any).link.state, 'connecting');
   });
 
-  test('a nudge turns the screen angle and speed into the Seestar joystick move, then stops it', async () => {
+  test('a nudge turns the screen angle and speed into the Seestar joystick move, answered at once', async () => {
     const { stub, web } = make();
     await withControl(web, async (post) => {
       const r = await post({ action: 'nudge', angle: 0, speed: 0.5, ms: 400 });
       assert.equal(r.status, 200);
-      // screen 0 (up) is the Seestar's 90; half speed of 1500; the Seestar moves for whole seconds
-      assert.deepEqual(stub.calls[0], ['nudge', 90, 750, 1]);
-      assert.equal(stub.calls[1][0], 'stopMotion');
+      // screen 0 (up) is the Seestar's 90; half throw is the app's percent 50; the move stops itself
+      assert.deepEqual(stub.calls[0], ['nudge', 90, 50, 0.4, { wait: false }]);
+      // a held arrow: the route takes up to 5 s a move, full throw is percent 100
+      await post({ action: 'nudge', angle: 90, speed: 1, ms: 5000 });
+      assert.deepEqual(stub.calls[1], ['nudge', 0, 100, 5, { wait: false }]);
+    });
+  });
+
+  test('the stop button ends whatever runs (stopWork) and the hand movement', async () => {
+    const { stub, web } = make();
+    await withControl(web, async (post) => {
+      const r = await post({ action: 'stop' });
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body, { ok: true, stopped: ['autofocus'] });
+      assert.deepEqual(stub.calls.map((c) => c[0]), ['stopWork', 'stopMotion']);
     });
   });
 
@@ -128,9 +165,20 @@ describe('Seestar behind the shared web UI', () => {
       assert.equal((await post({ action: 'setting', setting: 'gain', value: 80 })).status, 200);
       assert.deepEqual(stub.calls, [
         ['focusBy', -20],
-        ['setExposure', { stackMs: 10_000, continuousMs: 10_000 }],
+        ['setExposure', { stackMs: 10_000 }],
         ['setGain', 80],
       ]);
+    });
+  });
+
+  test('the camera is chosen through its own route', async () => {
+    const { stub, web } = make();
+    await withControl(web, async (post) => {
+      const r = await post({ camera: 'wide' }, '/seestar/camera');
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(stub.calls, [['selectCamera', 'wide', 'chosen in the web UI']]);
+      assert.deepEqual(r.body, { selected: 'tele', exposing: 'tele' });
+      assert.equal((await post({ camera: 'both' }, '/seestar/camera')).status, 400);
     });
   });
 
@@ -165,7 +213,7 @@ describe('Seestar behind the shared web UI', () => {
       assert.equal(name, 'gotoTarget');
       const now = sky.bodyRaDec(SITE, 'Jupiter');
       assert.ok(Math.abs(req.raHours - now.raHours) < 0.01 && Math.abs(req.decDeg - now.decDeg) < 0.1);
-      assert.match(events[0], /GoTo to Jupiter/);
+      assert.match(events[0]!, /GoTo to Jupiter/);
     });
   });
 

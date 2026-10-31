@@ -1,70 +1,69 @@
 /**
- * A ZWO Seestar as the rest of the application sees it: the seestar driver's TelescopeDevice.
+ * The Seestar as one object: the control link, the two picture sockets, the ZWO tunnel when the
+ * scope is remote, the state folded from its replies and events, and every operation the tools and
+ * the web UI ask for.
  *
- *   rpc.ts           the JSON-RPC control link (port 4700): handshake, heartbeat, events
- *   image-stream.ts  the stacked/preview image sockets (4800 tele, 4804 wide)
- *   tunnel.ts        the ZWO Telescope Network transport (seestar-portfwd on loopback)
- *   state.ts         the published state and the event reducer
+ * Camera selection is explicit and sticky. `selected` is the camera the user (the main live view)
+ * or a tool asked for; the scope's star session is kept exposing with that camera, and nothing
+ * else changes it. An operation that works from the tele's frames (GoTo, plate solve, autofocus,
+ * stacking, polar alignment) borrows the tele for its duration and the selection is put back when
+ * it ends; a tool that needs the other camera's frame borrows it the same way (withCamera).
  *
- * The transport only decides the address: local talks to the scope's own IP, zwo to the tunnel's
- * forwarded ports on 127.0.0.1. Everything above it is the same native protocol.
- *
- * Long operations (GoTo, autofocus, park, polar alignment, plate solve) are started with their
- * command and followed to the operation's own terminal event; one runs at a time.
- *
- * Events: 'state' (SeestarState, throttled), 'event' (SeestarEvent), 'released'.
+ * The picture sockets stay open from connect to disconnect; begin_streaming follows the exposing
+ * camera. Previews are at bin 2 (a 1080×1920 JPEG per exposure, 1 fps on the tele over the tunnel);
+ * a tool that asks for full resolution (withFullRes) sets bin 1 for its frames and bin 2 comes back
+ * afterwards. An operation is reserved (busy, stoppable) from the moment it is asked for, through
+ * its camera switch: stopWork() cancels one that has not started and stops a running one by its
+ * label, again once the scope shows it running (a stop that lands before that is ignored).
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import type net from 'node:net';
 import { config, observerLocation, requireObserverLocation, type ObserverLocation } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
 import { SafeEmitter } from '../../util/events.js';
 import { writeFileAtomic } from '../../util/fs.js';
-import type { FloatImage } from '../../media/images.js';
-import { correctionText, polarSummary, seestarCorrection } from '../../astro/polar.js';
 import { altAz, bodyAlt, bodyRaDec, raDecFromAltAz, separationDeg } from '../../astro/sky.js';
+import { correctionText, polarSummary, seestarCorrection } from '../../astro/polar.js';
+import type { FloatImage } from '../../media/images.js';
 import type { TelescopeDevice } from '../types.js';
-import { readKey } from './auth.js';
-import { frameImage, SeestarImageStream, type Frame, type GrabKind } from './image-stream.js';
-import { SeestarRpc, type RequestOptions, type RpcLinkOptions, type RpcResponse, type SeestarEvent } from './rpc.js';
-import { applyAppState, applyDeviceState, applyEvent, busyWith, initialState, isOuter, TERMINAL_STATES, type SeestarState } from './state.js';
+import { readKey, type RpcResponse } from './auth.js';
+import { SeestarLink, VIEW_TIMEOUT_MS, type LinkOptions, type RequestOptions, type SeestarEvent } from './link.js';
+import { SeestarImageLink, type GrabKind } from './image-link.js';
+import { frameImage, IMG_TYPE, type Camera, type Frame } from './frames.js';
+import { applyAppState, applyDeviceState, applyEvent, busyWith, initialState, isOuter, isStacking, pair, TERMINAL_STATES, VIEW_OF, type SeestarState, type ViewState } from './model.js';
 import { ZwoTunnel } from './tunnel.js';
+
+export type { Camera } from './frames.js';
 
 const log = logger('seestar');
 
-const STATE_POLL_MS = 10_000;
-/** While an operation runs the position and the battery must still move: a GoTo is six minutes of
- *  otherwise frozen dashboard, and the duty loop makes its decisions from these numbers. */
-const BUSY_POLL_MS = 5_000;
-const POLL_TICK_MS = 5_000;
 const STATE_THROTTLE_MS = 500;
-const GOTO_TIMEOUT_MS = 6 * 60_000;
-/** The floor for the live exposure during an operation. The scope picks its own exposures for
- *  autofocus and solving, so this only rescues a camera left on a daytime setting (about a second
- *  at low gain), where a night sky holds no star for it to find and it answers 279 "no star is
- *  detected" / 251 "solve failed": it never raises a setting the agent or an operator chose. */
-const NIGHT_CONTINUOUS_MS = 1_000;
-/** how long a Disconnect waits for the running view to stop before closing the links anyway */
-const STOP_VIEW_ON_RELEASE_MS = 8_000;
+const POLL_MS = 5_000;
+const FULL_POLL_MS = 10_000;
+const PREVIEW_BIN = 2;
+const WORK_BIN = 1;
+const PREVIEW_BIN_AFTER_OP_MS = 3_000;
+/** how long a stop watches for the operation it stopped to turn up running (and stops it again) */
+const STOP_RESEND_WINDOW_MS = 4000;
+const LIVE_EXPOSURE_OPTIONS = [500, 1000, 2000];
+const NIGHT_CONTINUOUS_MS = 1000;
 const NIGHT_GAIN = 100;
+const RAW_STILL_TIMEOUT_MS = 90_000;
+const GRAB_TIMEOUT_MS = 45_000;
+const STOP_VIEW_ON_RELEASE_MS = 8_000;
+const GOTO_TIMEOUT_MS = 6 * 60_000;
 const AUTOFOCUS_TIMEOUT_MS = 6 * 60_000;
 const PARK_TIMEOUT_MS = 3 * 60_000;
 const SOLVE_TIMEOUT_MS = 2 * 60_000;
 const POLAR_TIMEOUT_MS = 10 * 60_000;
 const FOCUS_MOVE_TIMEOUT_MS = 60_000;
-/** a live view the scope did not keep is not started again sooner than this */
-const LIVE_VIEW_RETRY_MS = 20_000;
-/** The view the wide camera's frames come from: the star view with the second camera selected
- *  (the app's ViewType WIDE, "SecondView"). Its raw subs arrive on the wide image socket; the tele's
- *  view sleeps meanwhile. */
-const WIDE_CAM = 'SecondView';
-/** a plain slew comes no closer to the Sun than this (the GoTo route's limit) */
 const SUN_SLEW_MIN_DEG = 15;
-/** the joystick command's own limit */
+const MOVE_RESEND_MS = 200;
+const MOVE_DUR_S = 3;
+const MOVE_LEVEL = 1;
 export const NUDGE_MAX_S = 10;
-export const NUDGE_MAX_SPEED = 1500;
-
-export type Camera = 'tele' | 'wide';
+export const NUDGE_MAX_PERCENT = 100;
 
 export interface OperationResult {
   state: string;
@@ -75,9 +74,7 @@ export interface OperationResult {
 }
 
 export interface PolarAlignResult extends OperationResult {
-  /** EqModePA x (horizontal) and y (vertical), degrees */
   deviation: { xDeg: number; yDeg: number };
-  /** "pitch up 1.0°, rotate 3.0° clockwise" */
   correction: string;
   summary: string;
 }
@@ -94,14 +91,14 @@ export interface GotoRequest {
 export interface SeestarOptions {
   host?: string;
   connection?: 'local' | 'zwo';
-  /** tests: socket factory for the control and image links, and no tunnel */
-  connect?: RpcLinkOptions['connect'];
-  link?: Partial<Pick<RpcLinkOptions, 'heartbeatMs' | 'silentAfterMs' | 'backoffMinMs'>>;
+  /** tests: a socket factory for the control and picture links, and no tunnel */
+  connect?: (host: string, port: number) => net.Socket;
+  link?: Partial<Pick<LinkOptions, 'heartbeatMs' | 'silentAfterMs' | 'backoffMinMs'>>;
   tunnel?: ZwoTunnel | null;
   dataDir?: string;
+  ports?: { rpc?: number; image?: number; wideImage?: number };
 }
 
-/** An operation ended badly: the scope's error and code, as it sent them. */
 export class SeestarOperationError extends Error {
   constructor(
     readonly operation: string,
@@ -112,238 +109,313 @@ export class SeestarOperationError extends Error {
   }
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const OTHER: Record<Camera, Camera> = { tele: 'wide', wide: 'tele' };
+
 export class Seestar extends SafeEmitter implements TelescopeDevice {
   readonly driver = 'seestar' as const;
-  readonly rpc: SeestarRpc;
+  readonly link: SeestarLink;
+  readonly images: Record<Camera, SeestarImageLink>;
   readonly tunnel: ZwoTunnel | null;
-  readonly streams: Record<Camera, SeestarImageStream>;
-  /** Overrides from the agent/UI for this run (falls back to .env). */
-  locationOverride: ObserverLocation | null = null;
-
   private readonly st: SeestarState;
   private readonly releasedFile: string;
-  private host: string;
-  private operation: string | null = null;
-  /** when the scope's state was last read in full over this connection (0: not yet) */
-  private stateReadAt = 0;
-  /** view changes in flight (a tool's, a still's): the readers never start a view over one */
-  private viewChanging = 0;
-  private viewSettled: Promise<void> = Promise.resolve();
-  private settleView: (() => void) | null = null;
-  private pollTimer: NodeJS.Timeout | null = null;
-  private emitTimer: NodeJS.Timeout | null = null;
+  private readonly rpcPort: number;
+  /** the camera the user or a tool wants exposing; the scope is kept on it */
+  private wanted: Camera = 'tele';
+  /** an operation or a tool is borrowing a camera: the selection is applied when it is done */
+  private borrowed: Camera | null = null;
+  private borrowDepth = 0;
+  /** the operation in flight (its label), one at a time */
+  operation: string | null = null;
+  /** an operation reserved through its camera switch (withTele), before follow() takes it */
+  private reservedBy: string | null = null;
+  /** stopWork() came while the operation was still being prepared: it must not start */
+  private pendingCancel = false;
+  private fullRes = 0;
+  private stateTimer: NodeJS.Timeout | null = null;
+  private statePending = false;
+  private poll: NodeJS.Timeout | null = null;
+  private lastFullPoll = 0;
+  private viewQueue: Promise<unknown> = Promise.resolve();
+  private rawQueue: Promise<unknown> = Promise.resolve();
+  private moveTimer: NodeJS.Timeout | null = null;
+  private moveGen = 0;
+  private moveLoopEnd: ((outcome: 'superseded') => void) | null = null;
   private started = false;
-  private liveViewAt = 0;
+  private readonly onTunnel = () => this.tunnelChanged();
 
   constructor(o: SeestarOptions = {}) {
     super();
-    const s = config.seestar;
-    const connection = o.connection ?? s.connection;
-    this.host = o.host ?? s.host;
+    this.setMaxListeners(100);
+    const cfg = config.seestar;
+    const connection = o.connection ?? cfg.connection;
+    const host = o.host ?? cfg.host;
+    this.rpcPort = o.ports?.rpc ?? cfg.rpcPort;
     this.st = initialState(connection);
     this.releasedFile = path.join(o.dataDir ?? config.paths.data, 'released.json');
-    this.rpc = new SeestarRpc({ host: this.host, port: s.rpcPort, loadKey: () => readKey(s.keyPath), connect: o.connect, ...o.link });
-    const connectImage = o.connect ? (h: string, p: number) => o.connect!(h, p) : undefined;
-    this.streams = { tele: new SeestarImageStream(this.host, s.imagePort, 'tele', connectImage), wide: new SeestarImageStream(this.host, s.wideImagePort, 'wide', connectImage) };
-    this.tunnel =
-      o.tunnel !== undefined
-        ? o.tunnel
-        : connection === 'zwo'
-          ? new ZwoTunnel({
-              host: this.host,
-              port: s.rpcPort,
-              command: s.tunnel.command,
-              cwd: s.tunnel.cwd,
-              readyTimeoutS: s.tunnel.readyTimeoutS,
-              supervisor: s.tunnel.control.enabled
-                ? { host: s.tunnel.control.host, port: s.tunnel.control.port, token: s.tunnel.control.token, leaseS: s.tunnel.control.leaseS }
-                : null,
-              env: Object.fromEntries(
-                Object.entries({ SEESTAR_USER: s.account.user, SEESTAR_PASSWORD: s.account.password, SEESTAR_SN: s.account.serial }).filter(([, v]) => v),
-              ),
-            })
-          : null;
-
-    this.rpc.on('event', (e: SeestarEvent) => this.onEvent(e));
-    this.rpc.on('connected', () => {
-      this.stateReadAt = 0; // what the scope is doing is unknown again until it is read
-      this.syncLink();
-      void this.onConnected();
-    });
-    this.rpc.on('disconnected', () => this.syncLink());
-    this.rpc.on('health', () => this.syncLink());
-    this.rpc.on('authFailed', (msg: string) => {
-      this.st.alert = { error: msg, at: Date.now() };
-      this.changed();
-    });
-    this.tunnel?.on('status', (t) => {
-      this.st.tunnel = t;
-      this.changed();
-    });
+    this.link = new SeestarLink({ host, port: this.rpcPort, loadKey: () => readKey(cfg.keyPath), connect: o.connect, ...o.link });
+    this.images = {
+      tele: new SeestarImageLink(host, o.ports?.image ?? cfg.imagePort, 'tele', o.connect),
+      wide: new SeestarImageLink(host, o.ports?.wideImage ?? cfg.wideImagePort, 'wide', o.connect),
+    };
+    this.tunnel = o.tunnel !== undefined ? o.tunnel : connection === 'zwo' ? this.makeTunnel(host) : null;
     this.st.tunnel = this.tunnel?.status() ?? null;
+    this.st.link = this.link.health();
+    this.link.on('connected', () => void this.onConnected());
+    this.link.on('disconnected', (reason: string) => this.onDisconnected(reason));
+    this.link.on('event', (e: SeestarEvent) => this.onEvent(e));
+    this.link.on('health', (h) => {
+      this.st.link = h;
+      this.changed();
+    });
+    this.link.on('authFailed', (msg: string) => log.error(`the scope refused the handshake: ${msg}`));
+    for (const cam of ['tele', 'wide'] as Camera[]) this.images[cam].on('status', () => this.changed());
+    this.tunnel?.on('status', this.onTunnel);
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.releasedFile, 'utf8')) as { released?: boolean };
+      this.st.released = !!saved.released;
+    } catch {
+      /* never released */
+    }
   }
 
-  // ---- lifecycle -----------------------------------------------------------
+  private makeTunnel(host: string): ZwoTunnel {
+    const t = config.seestar.tunnel;
+    const a = config.seestar.account;
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries({ SEESTAR_USER: a.user, SEESTAR_PASSWORD: a.password, SEESTAR_SN: a.serial })) if (v) env[k] = v;
+    return new ZwoTunnel({
+      host,
+      port: this.rpcPort,
+      command: t.command,
+      cwd: t.cwd || undefined,
+      readyTimeoutS: t.readyTimeoutS,
+      env,
+      supervisor: t.control.enabled && !t.command ? { host: t.control.host, port: t.control.port, token: t.control.token || undefined, leaseS: t.control.leaseS } : null,
+    });
+  }
 
-  private lastStatePollAt = 0;
+  // ---- lifecycle --------------------------------------------------------------------------------
 
   start(): void {
     if (this.started) return;
     this.started = true;
-    this.st.released = fs.existsSync(this.releasedFile);
-    if (this.st.released) log.warn('the Seestar is released (Disconnect): not connecting until Connect is pressed');
-    else this.openTransport();
-    this.pollTimer = setInterval(() => {
-      if (this.rpc.usable) {
-        // a read between the operation's own commands is what keeps the position and the battery
-        // honest while the scope works; skipping it froze the state for the length of a GoTo
-        const every = this.operation ? BUSY_POLL_MS : STATE_POLL_MS;
-        if (Date.now() - this.lastStatePollAt >= every) {
-          this.lastStatePollAt = Date.now();
-          void this.refreshState().catch(() => {});
-        }
-      }
-      this.st.link = this.rpc.health();
-    }, POLL_TICK_MS);
-    this.pollTimer.unref?.();
-    this.syncLink();
+    if (this.st.released) {
+      log.info('the Seestar was released (Disconnect): press Connect to take it again');
+      this.changed();
+      return;
+    }
+    this.open();
   }
 
+  private open(): void {
+    if (this.tunnel) {
+      this.tunnel.start();
+      if (this.tunnel.up) this.link.start();
+    } else this.link.start();
+    if (!this.poll) {
+      this.poll = setInterval(() => void this.tick(), POLL_MS);
+      this.poll.unref?.();
+    }
+  }
+
+  private tunnelChanged(): void {
+    const t = this.tunnel!;
+    this.st.tunnel = t.status();
+    if (this.started && !this.st.released && t.up) this.link.start();
+    else if (!t.up && this.link.health().connected === false) this.link.stop();
+    this.changed();
+  }
+
+  /** Shutdown: close every link; the tunnel's session stays with its supervisor for a restart. */
   async stop(): Promise<void> {
     this.started = false;
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    if (this.emitTimer) clearTimeout(this.emitTimer);
-    this.pollTimer = this.emitTimer = null;
-    // a shutdown is not a Disconnect: the session stays with the tunnel container, on its lease, for
-    // the restart that usually follows
-    this.closeTransport(false);
+    this.closeLinks();
+    this.tunnel?.stop(false);
     await this.tunnel?.flush(1200);
   }
 
-  /**
-   * Disconnect: close every link, and the ZWO session too, so the official app can have the scope.
-   *
-   * A preview view left running is stopped first: a scope that keeps exposing after its client has
-   * gone reports SHOOTING to the ZWO account, and nobody is watching those frames. A running stack
-   * is left alone - it is the night's work, and the official app can pick it up.
-   */
+  /** Disconnect: hand the scope back until connectLink(). */
   async release(): Promise<void> {
-    if (this.rpc.usable && this.viewing() && !this.stacking() && !this.operation) {
-      log.info(`Disconnect: stopping the ${this.st.view.mode} view first, so the scope is not left exposing (SHOOTING) for nobody`);
-      await Promise.race([this.stopView().catch((e) => log.warn(`Disconnect: the view did not stop: ${errMsg(e)}`)), sleep(STOP_VIEW_ON_RELEASE_MS)]);
-    }
-    try {
-      writeFileAtomic(this.releasedFile, JSON.stringify({ since: Date.now() }));
-    } catch (e) {
-      log.warn(`could not record the release in ${this.releasedFile} (a restart reconnects): ${errMsg(e)}`);
-    }
     this.st.released = true;
-    this.closeTransport();
-    this.syncLink();
-    log.info('Seestar released by the user: links closed until Connect');
+    writeFileAtomic(this.releasedFile, JSON.stringify({ released: true, at: new Date().toISOString() }));
+    if (this.link.usable) {
+      try {
+        if (this.fullRes) await this.call('set_camera_bin', PREVIEW_BIN).catch(() => undefined);
+        if (this.viewRunning() && !isStacking(this.st)) await this.call('iscope_stop_view', undefined, { timeoutMs: STOP_VIEW_ON_RELEASE_MS });
+      } catch (e) {
+        log.warn(`release: ${errMsg(e)}`);
+      }
+    }
+    this.closeLinks();
+    this.tunnel?.stop(true);
+    this.changed();
     this.emit('released');
   }
 
   connectLink(): void {
+    this.st.released = false;
     try {
       fs.rmSync(this.releasedFile, { force: true });
-    } catch (e) {
-      log.warn(`could not clear the release in ${this.releasedFile}: ${errMsg(e)}`);
+    } catch {
+      /* fine */
     }
-    this.st.released = false;
-    log.info('connecting to the Seestar (Connect pressed)');
-    this.openTransport();
-    this.syncLink();
+    this.started = true;
+    this.open();
+    this.changed();
   }
 
+  /** Point every link at another host (the tunnel moved). */
   setHost(host: string): void {
-    log.info(`Seestar address set to ${host}`);
-    this.host = host;
-    this.st.device = {};
-    this.st.deviceState = undefined;
-    this.rpc.retarget(host);
-    for (const s of Object.values(this.streams)) s.retarget(host);
-    this.changed();
+    this.link.retarget(host);
+    this.images.tele.retarget(host, config.seestar.imagePort);
+    this.images.wide.retarget(host, config.seestar.wideImagePort);
   }
 
-  private openTransport(): void {
-    this.tunnel?.start();
-    this.rpc.start();
-  }
-
-  private closeTransport(release = true): void {
-    this.rpc.stop();
-    for (const s of Object.values(this.streams)) s.close();
-    this.tunnel?.stop(release);
-  }
-
-  private syncLink(): void {
-    this.st.connected = this.rpc.usable;
-    this.st.link = this.rpc.health();
-    this.changed();
+  private closeLinks(): void {
+    this.stopMoveLoop();
+    this.images.tele.close();
+    this.images.wide.close();
+    this.link.stop();
+    if (this.poll) clearInterval(this.poll);
+    this.poll = null;
+    this.st.connected = false;
   }
 
   private async onConnected(): Promise<void> {
-    if (config.seestar.connection === 'zwo') await this.lowRtspQuality().catch((e) => log.warn(`could not lower the live video quality: ${errMsg(e)}`));
+    this.st.connected = true;
+    this.st.link = this.link.health();
+    this.changed();
+    this.images.tele.open();
+    this.images.wide.open();
     try {
       await this.refreshState();
-      // A star view found running is adopted: it is the live stream, and the user wants it up the
-      // whole time the controller is connected (it is stopped on Disconnect, so a scope is never
-      // left "Capturing" by a session that ended). A scenery view is never this controller's and
-      // shows nothing useful (the tele's is black): it is stopped.
-      if (this.viewing() && this.st.view.mode === 'scenery' && !this.stacking() && !this.isBusy()) {
-        log.info('connected with a scenery view running (never this controller\'s): stopping it');
-        await this.stopView().catch((e) => log.warn(`the leftover view did not stop: ${errMsg(e)}`));
-        await this.refreshState().catch(() => {});
+      if (this.st.connection === 'zwo') await this.lowRtspQuality();
+      await this.prepareLiveFrames();
+      if (this.viewRunning() && this.st.view.mode === 'scenery') {
+        log.info('stopping the scenery view the scope was left in');
+        await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS });
+        await this.refreshState();
       }
-      if (this.isBusy()) {
-        log.info(`connected while the Seestar is ${this.isBusy()}: time and location not pushed`);
-        return;
-      }
-      if (config.seestar.autoSyncTimeLocation) await this.syncTimeLocation().catch((e) => log.warn(`time/location sync failed: ${errMsg(e)}`));
+      if (config.seestar.autoSyncTimeLocation && !this.busy) await this.syncTimeLocation().catch((e) => log.warn(`time/location sync: ${errMsg(e)}`));
+      await this.applySelection('connected');
+      await this.applyBin('connected');
     } catch (e) {
-      log.warn(`post-connect refresh failed: ${errMsg(e)}`);
+      log.warn(`after connecting: ${errMsg(e)}`);
     }
+    this.syncStreams();
+    this.changed();
   }
 
-  /**
-   * Over ZWO Telescope Network the live video is a preview: HighQuality RTSP (1080×1920) through the
-   * tunnel's one session starves its control link within a minute, "Smooth" (360×640) does not.
-   * Stills and stacks are unaffected. wide_cam picks the camera a preview setting is for, as the
-   * Seestar app does (setPreviewForBothCameras): the wide one first, then the tele, leaving wide_cam
-   * false as it was.
-   */
+  private onDisconnected(reason: string): void {
+    this.st.connected = false;
+    this.st.link = this.link.health();
+    this.stopMoveLoop();
+    log.warn(`control link lost: ${reason}`);
+    this.changed();
+  }
+
+  private onEvent(e: SeestarEvent): void {
+    applyEvent(this.st, e);
+    const name = e.Event ?? e.event;
+    if (name === 'View' || name === 'SecondView' || name === 'SelectCamera' || name === 'Stack') this.syncStreams();
+    if (name === 'Stack' && e.state && TERMINAL_STATES.has(String(e.state)) && isOuter(e)) setTimeout(() => void this.applySelection('stack ended'), 1000);
+    this.emit('event', e);
+    if (name) this.emit(name, e);
+    this.changed();
+  }
+
+  /** The RTSP streams (moon/planet views) at the quality that fits the tunnel. */
   private async lowRtspQuality(): Promise<void> {
-    type Preview = { preview?: { rtsp_quality?: string } };
-    const s = (await this.settings()) as (Preview & { second_camera?: Preview }) | undefined;
-    if (s?.preview?.rtsp_quality === 'Smooth' && s?.second_camera?.preview?.rtsp_quality === 'Smooth') return;
-    await this.call('set_setting', { wide_cam: true, preview: { rtsp_quality: 'Smooth' } });
-    await this.call('set_setting', { wide_cam: false, preview: { rtsp_quality: 'Smooth' } });
-    log.info('live video quality set to Smooth (360×640) on both cameras for ZWO Telescope Network');
+    for (const wide of [true, false]) await this.call('set_setting', { wide_cam: wide, preview: { rtsp_quality: 'Smooth' } }, { allowError: true }).catch(() => undefined);
   }
 
-  // ---- state ---------------------------------------------------------------
+  /** Live frames as JPEG at bin 2 on both cameras, with a live-view exposure that keeps them coming. */
+  private async prepareLiveFrames(): Promise<void> {
+    for (const cam of ['wide', 'tele'] as Camera[]) await this.setTransferMode(cam, 'Jpg').catch((e) => log.warn(`${cam}: transfer mode: ${errMsg(e)}`));
+    const s = (await this.call('get_setting', undefined, { allowError: true }).catch(() => null))?.result as { exp_ms?: { continuous?: number } } | undefined;
+    const cont = s?.exp_ms?.continuous;
+    if (typeof cont === 'number' && !LIVE_EXPOSURE_OPTIONS.includes(cont)) await this.call('set_setting', { exp_ms: { continuous: 1000 } }).catch((e) => log.warn(`live exposure: ${errMsg(e)}`));
+  }
+
+  private setTransferMode(camera: Camera, mode: 'Jpg' | 'Raw'): Promise<RpcResponse> {
+    return this.call('set_setting', { wide_cam: camera === 'wide', preview: { image_transfer_mode: mode, raw_bin2: mode === 'Jpg' } });
+  }
+
+  // ---- state ------------------------------------------------------------------------------------
 
   get state(): SeestarState {
     return this.st;
   }
 
-  /** Throttled 'state' broadcast. */
+  /** Tell the listeners the state changed (coalesced to a few times a second). */
   changed(): void {
-    if (this.emitTimer) return;
-    this.emitTimer = setTimeout(() => {
-      this.emitTimer = null;
-      this.emit('state', this.st);
+    if (this.stateTimer) {
+      this.statePending = true;
+      return;
+    }
+    this.emit('state', this.st);
+    this.stateTimer = setTimeout(() => {
+      this.stateTimer = null;
+      if (this.statePending) {
+        this.statePending = false;
+        this.changed();
+      }
     }, STATE_THROTTLE_MS);
-    this.emitTimer.unref?.();
   }
 
-  private onEvent(e: SeestarEvent): void {
-    applyEvent(this.st, e);
-    if (e.Event === 'Alert') log.warn(`Seestar alert: ${String(e.error ?? '')} (code ${String(e.code ?? '?')})`);
-    this.emit('event', e);
-    this.changed();
+  viewOf(camera: Camera): ViewState {
+    return camera === 'tele' ? this.st.view : this.st.secondView;
   }
+
+  /** The camera asked for (sticky: the main live view, or a tool). */
+  get selected(): Camera {
+    return this.wanted;
+  }
+
+  /** The camera the scope exposes with now, as far as it has told. */
+  get exposing(): Camera | null {
+    if (!this.viewRunning()) return null;
+    return this.st.camera ?? this.wanted;
+  }
+
+  viewRunning(): boolean {
+    const s = this.st.view.state;
+    return !!s && !TERMINAL_STATES.has(s) && s !== 'idle';
+  }
+
+  /** The camera's picture exposes right now (ContinuousExposure or a stack). */
+  liveStage(camera: Camera): boolean {
+    if (this.exposing !== camera) return false;
+    const stage = this.viewOf(camera).stage;
+    return stage === 'ContinuousExposure' || stage === 'Stack' || (!stage && camera === 'tele' && isStacking(this.st));
+  }
+
+  isStacking(): boolean {
+    return isStacking(this.st);
+  }
+
+  /** Why a camera shows no live picture right now, or null when it should. */
+  liveNote(camera: Camera): string | null {
+    if (this.st.released) return 'disconnected from the Seestar (press Connect)';
+    if (!this.st.connected) return this.tunnel && !this.tunnel.up ? `the ZWO tunnel is ${this.st.tunnel?.phase ?? 'down'}${this.st.tunnel?.detail ? ` (${this.st.tunnel.detail})` : ''}` : 'the Seestar is not connected';
+    if (!this.viewRunning()) return 'no live view running';
+    const mode = this.st.view.mode;
+    if (mode && mode !== 'star') return camera === 'tele' ? null : `the ${mode} view uses the tele camera only`;
+    const exposing = this.exposing;
+    if (exposing !== camera) {
+      const why = this.borrowed ? ` for ${this.operation ?? 'a tool'}` : this.isStacking() ? ' (stacking)' : '';
+      return `${exposing ?? 'the other'} camera is selected${why}${this.wanted === camera ? '; switching back when it is free' : ' — make this the main view to select it'}`;
+    }
+    const stage = this.viewOf(camera).stage;
+    if (stage && stage !== 'ContinuousExposure' && stage !== 'Stack') return `${this.operation ?? stage} in progress (the picture is the last frame)`;
+    const sock = this.images[camera];
+    if (!sock.connected) return sock.note ?? `the ${camera} picture socket is reconnecting`;
+    return null;
+  }
+
+  /** a location set for this session by a tool, over .env OBSERVER_* */
+  locationOverride: ObserverLocation | null = null;
 
   location(): ObserverLocation | null {
     return this.locationOverride ?? observerLocation();
@@ -354,85 +426,242 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   isBusy(): string | null {
-    return this.operation ?? busyWith(this.st);
+    return this.operation ?? busyWith(this.st) ?? (this.moveTimer ? 'hand movement' : null);
   }
 
-  /** Read the device and app state and the pointing. */
+  get busy(): boolean {
+    return this.isBusy() !== null;
+  }
+
   async refreshState(): Promise<SeestarState> {
     const dev = await this.call('get_device_state');
     if (dev.result && typeof dev.result === 'object') applyDeviceState(this.st, dev.result as Record<string, unknown>);
     const app = await this.call('iscope_get_app_state', undefined, { allowError: true });
-    if (app.code === 0 && app.result && typeof app.result === 'object') applyAppState(this.st, app.result as Record<string, unknown>);
-    await this.readPointing().catch(() => {});
-    this.stateReadAt = Date.now();
+    if (app.result && typeof app.result === 'object') applyAppState(this.st, app.result as Record<string, unknown>);
+    const track = await this.call('scope_get_track_state', undefined, { allowError: true });
+    if (typeof track.result === 'boolean') this.st.mount.tracking = track.result;
+    await this.readPointing().catch(() => undefined);
+    this.lastFullPoll = Date.now();
     this.changed();
     return this.st;
   }
 
   async readPointing(): Promise<SeestarState['mount']> {
     const equ = await this.call('scope_get_equ_coord', undefined, { allowError: true });
-    const e = pairOf(equ.result, 'ra', 'dec');
-    if (e) [this.st.mount.raHours, this.st.mount.decDeg] = e;
+    const rd = pairOf(equ.result, 'ra', 'dec');
+    if (rd) [this.st.mount.raHours, this.st.mount.decDeg] = rd;
     const hor = await this.call('scope_get_horiz_coord', undefined, { allowError: true });
-    const h = pairOf(hor.result, 'alt', 'az');
-    if (h) [this.st.mount.altDeg, this.st.mount.azDeg] = h;
+    const aa = pairOf(hor.result, 'alt', 'az');
+    if (aa) [this.st.mount.altDeg, this.st.mount.azDeg] = aa;
     this.st.mount.at = Date.now();
     this.changed();
     return this.st.mount;
   }
 
-  // ---- commands ------------------------------------------------------------
-
-  /** One command; a non-zero code throws (SeestarRpcError) unless allowError. */
-  call(method: string, params?: unknown, opts?: RequestOptions): Promise<RpcResponse> {
-    return this.rpc.request(method, params, opts);
+  private async tick(): Promise<void> {
+    if (!this.link.usable) return;
+    try {
+      if (Date.now() - this.lastFullPoll >= FULL_POLL_MS) await this.refreshState();
+      else if (this.st.mount.moving || this.moveTimer) await this.readPointing();
+    } catch (e) {
+      log.debug(`poll: ${errMsg(e)}`);
+    }
   }
 
-  /** Escape hatch: any method, the reply as the scope sent it. */
+  call(method: string, params?: unknown, opts?: RequestOptions): Promise<RpcResponse> {
+    return this.link.request(method, params, opts);
+  }
+
+  /** Any method, for the raw_rpc tool: errors come back as the reply, not as a throw. */
   raw(method: string, params?: unknown, timeoutMs = 15_000): Promise<RpcResponse> {
-    return this.rpc.request(method, params, { timeoutMs, allowError: true });
+    return this.link.request(method, params, { timeoutMs, allowError: true });
+  }
+
+  // ---- camera selection -------------------------------------------------------------------------
+
+  /** Select a camera: the scope's star session exposes with it from now on (sticky). */
+  async selectCamera(camera: Camera, why = 'selected'): Promise<void> {
+    if (this.wanted !== camera) log.info(`${camera} camera ${why}`);
+    this.wanted = camera;
+    this.changed();
+    await this.applySelection(why);
   }
 
   /**
-   * Start an operation and follow it to its own terminal event. The listener is attached before the
-   * command is sent, so an operation that ends at once is not missed.
+   * Make the scope expose with the wanted camera, unless something else owns the view: an
+   * operation, a borrowed camera, or a stack (its frames are the tele's). Called whenever that
+   * owner is done.
    */
+  private applySelection(why: string): Promise<void> {
+    return this.serial(async () => {
+      if (!this.link.usable || this.st.released) return;
+      const target = this.borrowed ?? this.wanted;
+      if (!this.viewRunning()) return;
+      if (this.st.view.mode && this.st.view.mode !== 'star') return;
+      if (this.exposing === target) {
+        this.syncStreams();
+        return;
+      }
+      if (!this.borrowed && (this.operation || this.isStacking())) return;
+      log.info(`switching the live view to the ${target} camera (${why})`);
+      await this.restartView(target, this.st.view.lpFilter ?? false);
+    });
+  }
+
+  /** Stop the running star view and start it again with this camera exposing. */
+  private async restartView(camera: Camera, lpFilter: boolean): Promise<void> {
+    if (this.viewRunning()) await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch((e) => log.warn(`the view did not stop before the camera change: ${errMsg(e)}`));
+    await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF[camera], lp_filter: lpFilter }, { timeoutMs: VIEW_TIMEOUT_MS });
+    this.st.camera = camera;
+    this.st.view.state = 'working';
+    this.st.view.mode = 'star';
+    this.syncStreams();
+    await this.refreshState().catch(() => undefined);
+    this.st.camera = camera;
+    await this.applyBin(`${camera} selected`).catch((e) => log.warn(`camera bin: ${errMsg(e)}`));
+    this.syncStreams();
+    this.changed();
+  }
+
+  /** begin_streaming on the exposing camera's socket, stop_streaming on the other. */
+  private syncStreams(): void {
+    const live = this.exposing;
+    for (const cam of ['tele', 'wide'] as Camera[]) {
+      if (cam === live) this.images[cam].startStream();
+      else this.images[cam].stopStream();
+    }
+  }
+
+  /**
+   * Run with this camera borrowed (and, unless `select` is false, exposing), then give the
+   * selection back. `select: false` is for an operation that starts the view itself (a GoTo).
+   */
+  async withCamera<T>(camera: Camera, what: string, run: () => Promise<T>, select = true): Promise<T> {
+    if (this.borrowed && this.borrowed !== camera) throw new Error(`cannot use the ${camera} camera for ${what}: the ${this.borrowed} camera is in use`);
+    if (select && !this.viewRunning()) await this.ensureLiveView();
+    this.borrowed = camera;
+    this.borrowDepth++;
+    try {
+      if (select && this.exposing !== camera) {
+        if (this.isStacking()) throw new Error(`cannot use the ${camera} camera for ${what} while stacking`);
+        await this.applySelection(what);
+        if (this.exposing !== camera) throw new Error(`the ${camera} camera could not be selected for ${what}`);
+      }
+      return await run();
+    } finally {
+      if (--this.borrowDepth === 0) {
+        this.borrowed = null;
+        void this.applySelection(`after ${what}`).catch((e) => log.warn(`after ${what}: ${errMsg(e)}`));
+      }
+    }
+  }
+
+  /** A star view without a target, with the selected camera, unless one is running. */
+  async ensureLiveView(): Promise<string | null> {
+    return this.serial(async () => {
+      if (!this.link.usable) throw new Error('the Seestar is not connected');
+      if (this.viewRunning()) return null;
+      if (this.operation) throw new Error(`no live view: ${this.operation} is running`);
+      await this.restartView(this.borrowed ?? this.wanted, false);
+      return 'started the live view';
+    });
+  }
+
+  startView(lpFilter = false, camera: Camera = this.wanted): Promise<void> {
+    this.wanted = camera;
+    return this.serial(() => this.restartView(camera, lpFilter));
+  }
+
+  stopView(): Promise<RpcResponse> {
+    return this.serial(async () => {
+      const r = await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS });
+      this.st.view = {};
+      this.st.secondView = {};
+      this.st.stack = {};
+      this.syncStreams();
+      this.changed();
+      return r;
+    });
+  }
+
+  private serial<T>(run: () => Promise<T>): Promise<T> {
+    const p = this.viewQueue.then(run, run);
+    this.viewQueue = p.catch(() => undefined);
+    return p;
+  }
+
+  // ---- bin --------------------------------------------------------------------------------------
+
+  /** bin 2 for previews, bin 1 while a tool wants full resolution. */
+  async applyBin(reason: string): Promise<boolean> {
+    if (!this.link.usable || !this.viewRunning()) return false;
+    const want = this.fullRes > 0 ? WORK_BIN : PREVIEW_BIN;
+    const cur = await this.call('get_camera_bin', undefined, { allowError: true }).catch(() => null);
+    if (cur && typeof cur.result === 'number' && cur.result === want) return false;
+    await this.call('set_camera_bin', want);
+    log.info(`camera bin ${want} (${reason})`);
+    return true;
+  }
+
+  /** Full-resolution frames from this camera for the duration of `run`. */
+  async withFullRes<T>(camera: Camera, what: string, run: () => Promise<T>): Promise<T> {
+    this.fullRes++;
+    try {
+      if (this.fullRes === 1) await this.applyBin(`${what} (${camera})`);
+      return await run();
+    } finally {
+      if (--this.fullRes === 0) setTimeout(() => void this.applyBin(`after ${what}`).catch(() => undefined), 100);
+    }
+  }
+
+  // ---- operations -------------------------------------------------------------------------------
+
   private async follow(label: string, events: string[], start: () => Promise<unknown>, timeoutMs: number, accept: (e: SeestarEvent) => boolean = isOuter): Promise<OperationResult> {
-    if (this.operation) throw new Error(`cannot start ${label}: ${this.operation} is running`);
-    if (!this.rpc.usable) throw new Error(`cannot start ${label}: the Seestar is not connected`);
+    const reserved = this.reservedBy === label && this.operation === label;
+    if (this.operation && !reserved) throw new Error(`cannot start ${label}: ${this.operation} is running`);
+    if (!this.link.usable) throw new Error(`cannot start ${label}: the Seestar is not connected`);
+    if (!reserved) this.pendingCancel = false;
+    this.reservedBy = null;
     this.operation = label;
     this.changed();
     const started = Date.now();
     let onEvent: ((e: SeestarEvent) => void) | null = null;
     let onDrop: (() => void) | null = null;
+    let timer: NodeJS.Timeout | null = null;
     try {
       const ended = new Promise<SeestarEvent>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`${label}: the Seestar reported no end within ${Math.round(timeoutMs / 60_000)} min`)), timeoutMs);
+        timer = setTimeout(() => reject(new Error(`${label}: the Seestar reported no end within ${Math.round(timeoutMs / 60_000)} min`)), timeoutMs);
         onEvent = (e) => {
-          if (events.includes(e.Event) && TERMINAL_STATES.has(String(e.state)) && accept(e)) {
-            clearTimeout(timer);
-            resolve(e);
-          }
+          const name = e.Event ?? e.event;
+          if (name && events.includes(name) && TERMINAL_STATES.has(String(e.state)) && accept(e)) resolve(e);
         };
         onDrop = () => {
-          clearTimeout(timer);
-          reject(new Error(`${label}: the connection to the Seestar dropped (the scope may still be running it: check seestar_status after reconnecting)`));
+          reject(new Error(`${label}: the connection to the Seestar dropped (the scope may still be running it: check the status after reconnecting)`));
         };
-        this.rpc.on('event', onEvent);
-        this.rpc.once('disconnected', onDrop);
+        this.link.on('event', onEvent);
+        this.link.once('disconnected', onDrop);
       });
+      // a start that fails leaves `ended` behind: not an unhandled rejection
+      ended.catch(() => undefined);
+      if (this.pendingCancel) throw new Error(`${label} was stopped before it started`);
       await start();
       const e = await ended;
       const r: OperationResult = { state: String(e.state), ms: Date.now() - started, error: typeof e.error === 'string' ? e.error : undefined, code: typeof e.code === 'number' ? e.code : undefined, event: e };
       log.info(`${label}: ${r.state} after ${(r.ms / 1000).toFixed(1)} s${r.error ? ` (${r.error})` : ''}`);
       return r;
     } finally {
-      if (onEvent) this.rpc.off('event', onEvent);
-      if (onDrop) this.rpc.off('disconnected', onDrop);
+      if (timer) clearTimeout(timer);
+      if (onEvent) this.link.off('event', onEvent);
+      if (onDrop) this.link.off('disconnected', onDrop);
       this.operation = null;
+      this.pendingCancel = false;
       this.changed();
-      // the events do not carry everything an operation changed (the arm leaving park, the view stopping)
-      if (this.rpc.usable) void this.refreshState().catch(() => {});
+      if (this.link.usable) {
+        void this.refreshState()
+          .then(() => this.applySelection(`after ${label}`))
+          .catch(() => undefined);
+        setTimeout(() => void this.applyBin(`after ${label}`).catch(() => undefined), PREVIEW_BIN_AFTER_OP_MS);
+      }
     }
   }
 
@@ -441,12 +670,33 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return r;
   }
 
-  /** Push the host's clock and the observer location (the scope plans and solves with them). */
+  /** Borrow the tele for an operation that works from its frames (the selection comes back after). */
+  private async withTele<T>(what: string, run: () => Promise<T>, select = true): Promise<T> {
+    if (this.exposing === 'tele' || !this.viewRunning()) return run();
+    // the switch to the tele takes seconds: the operation is reserved through it, so the scope
+    // reports busy and a stop lands (follow() takes the reservation over)
+    if (this.operation) throw new Error(`cannot start ${what}: ${this.operation} is running`);
+    this.operation = what;
+    this.reservedBy = what;
+    this.pendingCancel = false;
+    this.changed();
+    try {
+      return await this.withCamera('tele', what, run, select);
+    } finally {
+      if (this.reservedBy === what) this.reservedBy = null;
+      if (this.operation === what) {
+        this.operation = null;
+        this.pendingCancel = false;
+        this.changed();
+      }
+    }
+  }
+
   async syncTimeLocation(loc: ObserverLocation | null = this.location()): Promise<string[]> {
     const done: string[] = [];
     const tz = config.observer.timezone;
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(new Date()).map((p) => [p.type, p.value]));
-    await this.call('pi_set_time', [{ year: +parts.year, mon: +parts.month, day: +parts.day, hour: +parts.hour, min: +parts.minute, sec: +parts.second, time_zone: tz }]);
+    await this.call('pi_set_time', [{ year: +parts.year!, mon: +parts.month!, day: +parts.day!, hour: +parts.hour!, min: +parts.minute!, sec: +parts.second!, time_zone: tz }]);
     done.push(`time ${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${tz}`);
     if (loc) {
       await this.call('set_user_location', { lat: loc.lat, lon: loc.lon, force: true });
@@ -455,33 +705,40 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return done;
   }
 
-  /** GoTo a sky position: slew, plate-solve and centre (iscope_start_view with a target), then optionally stack. */
+  /** GoTo: slew, plate-solve and centre on the tele (iscope_start_view with a target), then optionally stack. */
   async gotoTarget(g: GotoRequest): Promise<{ goto: OperationResult; stacking: string }> {
-    // the live video keeps the scope in a scenery view, where its plate solver cannot work: the
-    // imaging camera belongs to the operation, not to the preview
-    await this.leaveVideoView(`GoTo ${g.name}`);
-    const r = Seestar.ok(
-      `GoTo ${g.name}`,
-      await this.follow(
-        `GoTo ${g.name}`,
-        ['AutoGoto'],
-        () => this.call('iscope_start_view', { mode: 'star', target_ra_dec: [g.raHours, g.decDeg], target_name: g.name, lp_filter: !!g.lpFilter }),
-        GOTO_TIMEOUT_MS,
+    const label = `GoTo ${g.name}`;
+    const r = await this.withTele(label, async () =>
+      Seestar.ok(
+        label,
+        await this.follow(
+          label,
+          ['AutoGoto'],
+          () =>
+            this.serial(async () => {
+              if (this.viewRunning() && this.exposing !== 'tele') await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+              const res = await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF.tele, target_ra_dec: [g.raHours, g.decDeg], target_name: g.name, lp_filter: !!g.lpFilter }, { timeoutMs: VIEW_TIMEOUT_MS });
+              this.st.camera = 'tele';
+              this.st.view.state = 'working';
+              this.st.view.mode = 'star';
+              this.st.view.target = g.name;
+              this.syncStreams();
+              return res;
+            }),
+          GOTO_TIMEOUT_MS,
+        ),
       ),
+      false,
     );
     if (!g.stack) return { goto: r, stacking: 'not requested' };
-    // stack_after_goto (on by default) has the scope start the stack by itself
     await sleep(3000);
-    await this.refreshState().catch(() => {});
-    if (this.st.stack.state && !TERMINAL_STATES.has(this.st.stack.state)) return { goto: r, stacking: 'started by the scope (stack_after_goto)' };
+    await this.refreshState().catch(() => undefined);
+    if (this.isStacking()) return { goto: r, stacking: 'started by the scope (stack_after_goto)' };
     await this.startStack();
     return { goto: r, stacking: 'started' };
   }
 
-  /**
-   * Slew to a sky position without plate solving or centring (scope_goto), followed to the scope's
-   * ScopeGoto end. Refused within SUN_SLEW_MIN_DEG of the Sun and below the horizon.
-   */
+  /** Slew without solving (scope_goto); refused below the horizon or near the Sun. */
   async slewTo(raHours: number, decDeg: number): Promise<OperationResult> {
     const site = this.requireLocation();
     const where = altAz(site, raHours, decDeg);
@@ -493,223 +750,113 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return Seestar.ok('slew', await this.follow('slew', ['ScopeGoto'], () => this.call('scope_goto', [raHours, decDeg]), GOTO_TIMEOUT_MS, () => true));
   }
 
-  /** Slew to an azimuth and altitude (true, degrees) now. */
   slewAltAz(azDeg: number, altDeg: number): Promise<OperationResult> {
     const p = raDecFromAltAz(this.requireLocation(), azDeg, altDeg);
     return this.slewTo(p.raHours, p.decDeg);
   }
 
-  /**
-   * Live view without a target: the star (astro) view, always. This controller is for
-   * astrophotography only: the scenery (daytime) view is never started by it - its tele RTSP is
-   * black indoors, its plate solver and stacker do not exist, and a scope left in it shows
-   * "Capturing" to the ZWO account for nobody.
-   */
-  startView(lpFilter = false): Promise<RpcResponse> {
-    return this.changingView(async () => {
-      const r = await this.call('iscope_start_view', { mode: 'star', lp_filter: lpFilter });
-      this.wideView = false;
-      await this.refreshState().catch(() => {});
-      return r;
-    });
+  stopGoto(): Promise<RpcResponse> {
+    return this.call('iscope_stop_view', { stage: 'AutoGoto' }, { timeoutMs: VIEW_TIMEOUT_MS });
   }
 
-  /**
-   * A view change with the readers held off. The scope takes seconds over iscope_start_view, and a
-   * reader whose RTSP had just ended (the stop that precedes the start) used to ask for a view of
-   * its own meanwhile: set_shooting_mode DSO came back "done" with the scope in the scenery view the
-   * reader had started over it. Nested changes (a still's stop + start) count as one.
-   */
-  private async changingView<T>(run: () => Promise<T>): Promise<T> {
-    this.liveViewAt = Date.now();
-    if (this.viewChanging++ === 0) this.viewSettled = new Promise<void>((r) => (this.settleView = r));
-    try {
-      return await run();
-    } finally {
-      this.liveViewAt = Date.now();
-      if (--this.viewChanging === 0) this.settleView?.();
+  /** Stack on the tele's view (restart = drop what is stacked so far). */
+  async startStack(restart = false): Promise<RpcResponse> {
+    if (!this.viewRunning()) await this.ensureLiveView();
+    if (this.exposing !== 'tele') await this.serial(() => this.restartView('tele', this.st.view.lpFilter ?? false));
+    const r = await this.call('iscope_start_stack', { restart });
+    this.st.stack.state = 'working';
+    this.st.stack.at = Date.now();
+    this.changed();
+    return r;
+  }
+
+  async stopStack(): Promise<RpcResponse> {
+    const r = await this.call('iscope_stop_view', { stage: 'Stack' }, { timeoutMs: VIEW_TIMEOUT_MS });
+    if (this.st.stack.state && !TERMINAL_STATES.has(this.st.stack.state)) this.st.stack.state = 'cancel';
+    this.changed();
+    setTimeout(() => void this.applySelection('stack stopped').catch(() => undefined), 1500);
+    return r;
+  }
+
+  /** Stop whatever runs: hand movement, GoTo, autofocus, polar alignment, a stack, a non-star view. */
+  async stopWork(): Promise<{ stopped: string[] }> {
+    const stopped: string[] = [];
+    if (this.moveTimer) {
+      await this.stopMotion();
+      stopped.push('hand movement');
     }
-  }
-
-  /** The wide camera's view (SecondView) is up: its image socket streams, the tele's sleeps. */
-  private wideView = false;
-
-  get wideViewActive(): boolean {
-    return this.wideView;
-  }
-
-  private viewing(): boolean {
-    const v = this.st.view;
-    return !!v.state && !TERMINAL_STATES.has(v.state) && v.state !== 'idle' && v.mode !== 'none';
-  }
-
-  /** An operation (goto, capture, focus, plate-solve) is running: the live readers keep their hands
-   *  off the control link until it finishes, so a command never competes with a stream. */
-  get busy(): boolean {
-    return this.operation !== null;
-  }
-
-  /**
-   * The view the scope runs is decided by the work, never by the preview: the star (astro) view,
-   * where the plate solver and the stacker live and the image sockets push every exposure. A viewer
-   * of the live video gets one started when none is running (the Dwarf's streams are always on); a
-   * view that is already running is never changed. Returns why there is no video, or null.
-   */
-  async ensureLiveView(now = false): Promise<string | null> {
-    if (!this.rpc.usable || this.st.released) return 'the telescope is not connected';
-    if (this.st.mount.parked) return 'the arm is parked: open it (Home) and live video starts';
-    // mid-operation the readers keep their hands off: dialling a port the scope does not serve steals
-    // tunnel bandwidth from the command that is running
-    if (this.operation) return `${this.operation} is running: live video resumes when it finishes`;
-    // right after a (re)connect the view is whatever the scope was left doing: a controller restart
-    // during a star view started a scenery view over it, because the readers asked before the
-    // first state read had landed
-    if (!this.stateReadAt) await this.refreshState().catch(() => {});
-    if (this.viewChanging) await this.viewSettled;
-    if (this.viewing()) return this.videoNote();
-    // the readers' throttle: a view the scope did not keep is not asked for again every tick. A
-    // tool that needs a frame now (now=true) starts the view regardless - the stop that preceded
-    // its request (a wide frame's, the idle stop) is no reason to wait 45 s for nothing.
-    if (!now && Date.now() - this.liveViewAt < LIVE_VIEW_RETRY_MS) return null;
-    log.info('starting a star view for the live video');
-    await this.startView(false);
-    return this.videoNote();
-  }
-
-  // ---- the view is the live stream: it runs the whole time the controller is connected --------
-  // (a star view is never stopped while the link is up; Disconnect/release stops it)
-
-  private stacking(): boolean {
-    return !!this.st.stack.state && !TERMINAL_STATES.has(this.st.stack.state) && this.st.stack.state !== 'idle';
-  }
-
-  /** A stack is running: the view is the night's work and is not to be swapped for a wide frame. */
-  isStacking(): boolean {
-    return this.stacking();
-  }
-
-  /**
-   * A frame was asked for from the live video. In the star view the scope serves no RTSP at all
-   * (firmware 9.75): the readers fill the preview from the image sockets, which push every exposure
-   * as it completes. This starts a star view when none runs and says why there is no picture.
-   */
-  async ensureVideoView(): Promise<string | null> {
-    return (await this.ensureLiveView()) ?? this.videoNote();
-  }
-
-  /** Why a camera's reader has nothing right now, or null. */
-  private videoNote(): string | null {
-    return null;
-  }
-
-  /**
-   * Drop a view that is not the tele's star view before an operation that needs the imaging camera
-   * (GoTo, autofocus, stacking): the plate solver works from the tele's star view only. The readers
-   * are closed so they cannot promote a view back mid-operation; they resume when it finishes.
-   */
-  private async leaveVideoView(what: string): Promise<void> {
-    if (this.operation || !this.viewing() || (this.st.view.mode === 'star' && !this.wideView)) return;
-    for (const s of Object.values(this.streams)) s.close();
-    this.liveViewAt = Date.now(); // the readers' own throttle: keep them off the view for a moment
-    log.info(`leaving the ${this.wideView ? 'wide camera' : this.st.view.mode ?? ''} view for ${what}: the tele star view is needed`);
-    await this.stopView().catch(() => {});
-    await this.refreshState().catch(() => {});
-  }
-
-  /**
-   * Run something that needs a camera's frames, in the view that camera is served from. The tele
-   * camera answers in the star view from its image socket; the wide camera's socket streams in the
-   * star view with the second camera selected (SecondView), so a wide frame briefly goes there and
-   * the tele's star view comes back afterwards. The night belongs to the tele - a single frame never
-   * gets to keep the scope elsewhere. The scenery view is never used: this is astrophotography.
-   */
-  async withCameraView<T>(camera: Camera, what: string, run: () => Promise<T>): Promise<T> {
-    if (camera === 'wide' && !this.wideView) return this.withWideView(what, run);
-    return run();
-  }
-
-  /** A brief star view on the wide camera for its frames, with the tele's star view restored. */
-  private async withWideView<T>(what: string, run: () => Promise<T>): Promise<T> {
-    if (this.operation) throw new Error(`cannot take ${what}: ${this.operation} is running`);
-    if (this.stacking()) throw new Error(`cannot take ${what}: the scope is stacking, and the wide camera's view would stop it`);
-    const was = this.st.view.mode;
-    log.info(`opening the wide camera's star view for ${what}`);
-    await this.changingView(async () => {
-      if (this.viewing()) await this.stopView().catch(() => {});
-      await this.call('iscope_start_view', { mode: 'star', selected_cam: WIDE_CAM, lp_filter: false });
-      this.wideView = true;
-      await this.refreshState().catch(() => {});
-    });
-    try {
-      return await run();
-    } finally {
-      // The scope can be taken by an operation while this is shooting: the agent starts a GoTo, a
-      // focus run or a stack, and iscope_stop_view stops whatever the view is doing. Restoring the
-      // preview view must never run over a command that belongs to somebody else - it cancels it.
-      // Leave the view to the operation; the readers reopen what they need once it has finished.
-      if (this.operation) {
-        log.info(`leaving the view alone: ${this.operation} took the scope during ${what}`);
-      } else {
-        await this.changingView(async () => {
-          for (const s of Object.values(this.streams)) s.close(); // nothing keeps the view alive behind us
-          await this.stopView().catch(() => {});
-          this.wideView = false;
-          if (was === 'star') await this.call('iscope_start_view', { mode: 'star', lp_filter: false }, { allowError: true });
-          await this.refreshState().catch(() => {});
-        });
+    const running = (op: string) => {
+      const o = this.st.ops[op];
+      return !!o && !TERMINAL_STATES.has(o.state);
+    };
+    for (const stage of ['AutoGoto', 'Initialise', 'DarkLibrary']) {
+      if (running(stage) || this.st.view.stage === stage) {
+        await this.call('iscope_stop_view', { stage }, { timeoutMs: VIEW_TIMEOUT_MS });
+        stopped.push(stage === 'AutoGoto' ? 'goto' : stage === 'DarkLibrary' ? 'dark library' : 'initialisation');
       }
-      if (this.operation) await this.refreshState().catch(() => {});
     }
+    if (running('AutoFocus') || this.st.view.stage === 'AutoFocus') {
+      await this.call('stop_auto_focuse');
+      stopped.push('autofocus');
+    }
+    if (running('3PPA') || running('EqModePA')) {
+      await this.call('stop_polar_align');
+      stopped.push('polar alignment');
+    }
+    if (this.isStacking() || this.st.view.stage === 'Stack') {
+      await this.stopStack();
+      stopped.push('stacking');
+    }
+    if (this.viewRunning() && this.st.view.mode && this.st.view.mode !== 'star') {
+      await this.stopView();
+      stopped.push(`${this.st.view.mode ?? 'the'} view`);
+    }
+    // an operation the scope's state does not show yet (being prepared, or just started): stop it by
+    // its label, and keep it from starting if it has not
+    const op = this.operation;
+    if (op) {
+      this.pendingCancel = true;
+      const by: Record<string, [string | null, unknown, string]> = { autofocus: ['stop_auto_focuse', undefined, 'autofocus'], 'polar alignment': ['stop_polar_align', undefined, 'polar alignment'] };
+      const [method, params, name]: [string | null, unknown, string] = by[op] ?? (op.startsWith('GoTo ') ? ['iscope_stop_view', { stage: 'AutoGoto' }, 'goto'] : [null, undefined, op]);
+      if (!stopped.includes(name)) {
+        if (method) {
+          await this.call(method, params, { allowError: true, timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+          // a stop that lands before the scope has the operation running does nothing (its start was
+          // just acknowledged): when it shows up running within a few seconds, stop it again
+          const stages = op === 'autofocus' ? ['AutoFocus'] : op === 'polar alignment' ? ['3PPA', 'EqModePA'] : ['AutoGoto'];
+          const end = Date.now() + STOP_RESEND_WINDOW_MS;
+          while (Date.now() < end && this.operation === op && !stages.some(running)) await sleep(250);
+          if (this.operation === op && stages.some(running)) await this.call(method, params, { allowError: true, timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+        }
+        stopped.push(name);
+      }
+    }
+    return { stopped };
   }
 
-  startStack(restart = false): Promise<RpcResponse> {
-    return this.call('iscope_start_stack', { restart });
-  }
-
-  stopStack(): Promise<RpcResponse> {
-    return this.call('iscope_stop_view', { stage: 'Stack' });
-  }
-
-  /** Stop whatever the view is doing: GoTo, live view, stacking. */
-  stopView(): Promise<RpcResponse> {
-    this.wideView = false;
-    return this.changingView(() => this.call('iscope_stop_view'));
-  }
-
-  /**
-   * The scope autofocuses and plate-solves from the live view. Left on a daytime 1 s exposure it
-   * finds no star in a night sky and answers "no star is detected" (279) or "solve failed" (251),
-   * which costs the whole imaging sequence: put the camera in night settings before asking it to
-   * find anything out there.
-   */
+  /** The live exposure and gain the solver and the autofocus need stars with. */
   private async prepareNightExposure(what: string): Promise<void> {
-    const s = (await this.call('get_setting', undefined, { allowError: true }).catch(() => null))?.result as
-      | { exp_ms?: { continuous?: number } }
-      | undefined;
-    // no answer at all is not a daytime camera: the command that follows reports the real trouble
-    if (!s) return;
-    const live = s.exp_ms?.continuous ?? 0;
-    const gain = this.st.view.gain ?? 0; // the gain travels with the view state, not with the settings
-    if (live >= NIGHT_CONTINUOUS_MS && gain >= NIGHT_GAIN) return;
-    log.info(`${what}: the live view is at ${live / 1000} s, gain ${gain}; taking it to night settings first`);
-    if (live < NIGHT_CONTINUOUS_MS) await this.setExposure({ continuousMs: NIGHT_CONTINUOUS_MS }).catch(() => {});
-    if (gain < NIGHT_GAIN) await this.setGain(NIGHT_GAIN).catch(() => {});
-    await this.refreshState().catch(() => {});
+    const s = (await this.call('get_setting', undefined, { allowError: true }).catch(() => null))?.result as { exp_ms?: { continuous?: number } } | undefined;
+    const cont = s?.exp_ms?.continuous;
+    if (typeof cont === 'number' && cont < NIGHT_CONTINUOUS_MS) {
+      await this.call('set_setting', { exp_ms: { continuous: NIGHT_CONTINUOUS_MS } }).catch((e) => log.warn(`${what}: live exposure: ${errMsg(e)}`));
+      await this.call('set_control_value', ['gain', NIGHT_GAIN]).catch((e) => log.warn(`${what}: gain: ${errMsg(e)}`));
+    }
   }
 
   async autofocus(): Promise<OperationResult> {
-    return Seestar.ok(
-      'autofocus',
-      await this.follow(
+    return this.withTele('autofocus', async () =>
+      Seestar.ok(
         'autofocus',
-        ['AutoFocus'],
-        // inside the operation, not before it: the settings read is a command of its own, and the
-        // scope must not slip into another operation between preparing the camera and focusing
-        async () => {
-          await this.prepareNightExposure('autofocus');
-          return this.call('start_auto_focuse');
-        },
-        AUTOFOCUS_TIMEOUT_MS,
+        await this.follow(
+          'autofocus',
+          ['AutoFocus'],
+          async () => {
+            await this.prepareNightExposure('autofocus');
+            return this.call('start_auto_focuse');
+          },
+          AUTOFOCUS_TIMEOUT_MS,
+        ),
       ),
     );
   }
@@ -720,83 +867,133 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
 
   async focuserPosition(): Promise<number | null> {
     const r = await this.call('get_focuser_position');
-    const p = typeof r.result === 'number' ? r.result : typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : null;
-    if (p !== null) this.st.focus.position = p;
-    this.changed();
-    return p;
+    const n = typeof r.result === 'number' ? r.result : typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : null;
+    if (n !== null) this.st.focus.position = n;
+    return n;
   }
 
-  /** Move the focuser to a step and return where it ended. */
   async focusTo(step: number): Promise<number | null> {
-    const max = this.st.focus.maxStep;
-    if (!Number.isInteger(step) || step < 0 || (max !== undefined && step > max)) throw new Error(`focuser step ${step} is outside 0–${max ?? '?'}`);
-    const r = await this.call('move_focuser', { step, ret_step: true }, { timeoutMs: FOCUS_MOVE_TIMEOUT_MS });
-    const at = typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : null;
-    if (at !== null) this.st.focus.position = at;
+    const max = this.st.focus.maxStep ?? 2600;
+    if (!Number.isFinite(step) || step < 0 || step > max) throw new Error(`focuser position ${step} is outside 0–${max}`);
+    const r = await this.call('move_focuser', { step: Math.round(step), ret_step: true }, { timeoutMs: FOCUS_MOVE_TIMEOUT_MS });
+    const n = typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : typeof r.result === 'number' ? r.result : null;
+    if (n !== null) this.st.focus.position = n;
     this.changed();
-    return at ?? (await this.focuserPosition());
+    return n;
   }
 
   async focusBy(delta: number): Promise<number | null> {
-    const now = this.st.focus.position ?? (await this.focuserPosition());
-    if (now === null || now === undefined) throw new Error('the focuser position is unknown');
-    return this.focusTo(now + Math.round(delta));
+    const cur = this.st.focus.position ?? (await this.focuserPosition());
+    if (cur === null) throw new Error('the focuser position is unknown');
+    return this.focusTo(cur + delta);
   }
 
-  /** Park (close the arm), keeping the mount mode it is in. */
   async park(): Promise<OperationResult> {
     return Seestar.ok('park', await this.follow('park', ['ScopeHome'], () => this.call('scope_park', { equ_mode: this.st.mount.eqMode ?? false }), PARK_TIMEOUT_MS, () => true));
   }
 
-  /** Raise the arm to the horizon position (out of park). */
   async openArm(): Promise<OperationResult> {
     return Seestar.ok('move to horizon', await this.follow('move to horizon', ['ScopeMoveToHorizon'], () => this.call('scope_move_to_horizon'), PARK_TIMEOUT_MS, () => true));
   }
 
-  /** Joystick move: angle 0 right, 90 up, 180 left, 270 down; speed in 15″ steps per second (240 ≈ 1°/s). */
-  nudge(angleDeg: number, speed: number, durS: number): Promise<RpcResponse> {
-    if (!(speed >= 0 && speed <= NUDGE_MAX_SPEED)) throw new Error(`speed must be 0–${NUDGE_MAX_SPEED}`);
-    if (!(durS > 0 && durS <= NUDGE_MAX_S)) throw new Error(`duration must be 0–${NUDGE_MAX_S} s`);
-    return this.call('scope_speed_move', { speed: Math.round(speed), angle: Math.round(((angleDeg % 360) + 360) % 360), dur_sec: Math.round(durS) });
+  /**
+   * Hand movement as the app's joystick: scope_speed_move renewed every 200 ms for `durS` seconds
+   * (angle 0 right, 90 up, 180 left, 270 down; percent 50 ≈ 2.7°/s), then a stop. A new nudge
+   * supersedes the running one; `wait: false` returns once the first command is acknowledged.
+   */
+  nudge(angleDeg: number, percent: number, durS: number, { wait = true } = {}): Promise<RpcResponse> {
+    if (!this.link.usable) return Promise.reject(new Error('cannot move: the Seestar is not connected'));
+    const dur = Math.min(NUDGE_MAX_S, Math.max(0.05, durS));
+    const pct = Math.min(NUDGE_MAX_PERCENT, Math.max(1, Math.round(percent)));
+    const angle = ((Math.round(angleDeg) % 360) + 360) % 360;
+    const move = { angle, percent: pct, level: MOVE_LEVEL, dur_sec: MOVE_DUR_S };
+    const gen = ++this.moveGen;
+    this.endMoveLoop('superseded');
+    const until = Date.now() + dur * 1000;
+    const first = this.call('scope_speed_move', move);
+    this.changed();
+    const loop = (async (): Promise<RpcResponse> => {
+      const firstReply = await first;
+      if (gen !== this.moveGen) return { ...firstReply, result: 'superseded' };
+      const outcome = await new Promise<'done' | 'superseded'>((resolve, reject) => {
+        this.moveLoopEnd = resolve;
+        this.moveTimer = setInterval(() => {
+          if (Date.now() >= until) {
+            this.endMoveLoop();
+            resolve('done');
+            return;
+          }
+          this.call('scope_speed_move', move).catch((e) => {
+            this.endMoveLoop();
+            reject(e);
+          });
+        }, MOVE_RESEND_MS);
+        this.changed();
+      });
+      // taken over (a newer nudge, or a stop): that one sends the scope its next command
+      if (outcome === 'superseded') return { ...firstReply, result: 'superseded' };
+      await this.sendStop();
+      return firstReply;
+    })();
+    void loop.catch(() => undefined);
+    return wait ? loop : first;
+  }
+
+  /** End the renewal loop; `outcome` tells the nudge waiting on it that it was taken over. */
+  private endMoveLoop(outcome?: 'superseded'): void {
+    if (this.moveTimer) clearInterval(this.moveTimer);
+    this.moveTimer = null;
+    const end = this.moveLoopEnd;
+    this.moveLoopEnd = null;
+    if (outcome && end) end(outcome);
+    this.changed();
+  }
+
+  private stopMoveLoop(): void {
+    this.endMoveLoop('superseded');
+  }
+
+  private sendStop(): Promise<RpcResponse> {
+    return this.call('scope_speed_move', { angle: 0, percent: 0, level: 0, dur_sec: MOVE_DUR_S });
   }
 
   stopMotion(): Promise<RpcResponse> {
-    return this.call('scope_speed_move', { speed: 0, angle: 0, dur_sec: 1 });
+    this.moveGen++;
+    this.endMoveLoop('superseded');
+    return this.sendStop();
   }
 
-  /** Plate-solve the current view; the solved position and field. */
+
   async plateSolve(): Promise<OperationResult> {
-    return Seestar.ok(
-      'plate solve',
-      await this.follow(
+    return this.withTele('plate solve', async () =>
+      Seestar.ok(
         'plate solve',
-        ['PlateSolve'],
-        async () => {
-          await this.prepareNightExposure('plate solve');
-          return this.call('start_solve');
-        },
-        SOLVE_TIMEOUT_MS,
-        () => true,
+        await this.follow(
+          'plate solve',
+          ['PlateSolve'],
+          async () => {
+            await this.prepareNightExposure('plate solve');
+            return this.call('start_solve');
+          },
+          SOLVE_TIMEOUT_MS,
+          () => true,
+        ),
       ),
     );
   }
 
-  /**
-   * EQ-mode polar alignment, as the Seestar app's EQ screen runs it: start_polar_align, then the
-   * deviation arrives as x/y (degrees) on EqModePA frames. The correction is worded in astro/polar.ts;
-   * progress and the outcome are published as state.polarAlign for the web page.
-   */
+  /** EQ-mode polar alignment as the app runs it; the deviation arrives on EqModePA frames. */
   async polarAlign(): Promise<PolarAlignResult> {
     const startedAt = Date.now();
     const seen: { dev?: { x: number; y: number } } = {};
     const onEvent = (e: SeestarEvent) => {
       if (e.Event === 'EqModePA' && Number.isFinite(e.x) && Number.isFinite(e.y)) seen.dev = { x: e.x as number, y: e.y as number };
     };
-    this.rpc.on('event', onEvent);
+    this.link.on('event', onEvent);
     this.st.polarAlign = { running: true, startedAt, message: 'plate-solving near the pole…' };
     this.changed();
     try {
-      const r = Seestar.ok('polar alignment', await this.follow('polar alignment', ['EqModePA', '3PPA'], () => this.call('start_polar_align', { restart: true, dec_pos_index: 3 }), POLAR_TIMEOUT_MS));
+      const r = await this.withTele('polar alignment', async () => Seestar.ok('polar alignment', await this.follow('polar alignment', ['EqModePA', '3PPA'], () => this.call('start_polar_align', { restart: true, dec_pos_index: 3 }), POLAR_TIMEOUT_MS)));
       const d = seen.dev;
       if (!d) throw new Error('polar alignment completed without reporting a deviation (no EqModePA x/y)');
       const fix = seestarCorrection(d.x, d.y);
@@ -807,7 +1004,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       this.st.polarAlign = { running: false, startedAt, finishedAt: Date.now(), ok: false, message: `polar alignment failed: ${errMsg(e)}` };
       throw e;
     } finally {
-      this.rpc.off('event', onEvent);
+      this.link.off('event', onEvent);
       this.changed();
     }
   }
@@ -816,12 +1013,14 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.call('stop_polar_align');
   }
 
-  /** Stack sub length (ms) and/or live-view exposure (ms). */
-  setExposure(o: { stackMs?: number; continuousMs?: number }): Promise<RpcResponse> {
+  // ---- settings ---------------------------------------------------------------------------------
+
+  setExposure(o: { stackMs?: number; continuousMs?: number }, camera: Camera = 'tele'): Promise<RpcResponse> {
     const exp: Record<string, number> = {};
     if (o.stackMs !== undefined) exp.stack_l = Math.round(o.stackMs);
     if (o.continuousMs !== undefined) exp.continuous = Math.round(o.continuousMs);
-    return this.call('set_setting', { exp_ms: exp });
+    if (!Object.keys(exp).length) throw new Error('nothing to set');
+    return this.call('set_setting', { wide_cam: camera === 'wide', exp_ms: exp });
   }
 
   setGain(gain: number): Promise<RpcResponse> {
@@ -832,19 +1031,14 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.call('set_setting', { stack_dither: o });
   }
 
-  /**
-   * set_setting, except heater_enable: get_setting reports it but set_setting refuses it (code 109
-   * on firmware 9.75), so the dew heater goes through pi_output_set2.
-   */
   async setSetting(settings: Record<string, unknown>): Promise<RpcResponse> {
     const { heater_enable, ...rest } = settings;
-    let r: RpcResponse | undefined;
-    if (heater_enable !== undefined) r = await this.setHeater(Boolean(heater_enable));
+    let r: RpcResponse | null = null;
+    if (typeof heater_enable === 'boolean') r = await this.setHeater(heater_enable);
     if (Object.keys(rest).length || !r) r = await this.call('set_setting', rest);
     return r;
   }
 
-  /** The dew heater, at powerPct (the Seestar app's default 90) when on. */
   setHeater(on: boolean, powerPct = 90): Promise<RpcResponse> {
     return this.call('pi_output_set2', { heater: { state: on, value: Math.max(0, Math.min(100, Math.round(powerPct))) } });
   }
@@ -853,39 +1047,33 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return (await this.call('get_setting')).result;
   }
 
-  /**
-   * The view mode: star (deep sky), moon, planet. The Sun is refused: a remote scope cannot tell
-   * whether its solar filter is fitted; the scenery (daytime) view is out of scope for an
-   * astrophotography controller. "moon" and "planet" are sent by name, never as a bare solar_sys,
-   * which the scope takes as the Sun.
-   */
+  /** The view's mode: star (the astro session), moon or planet (RTSP video of the tele). Never scenery. */
   async setViewMode(mode: 'star' | 'moon' | 'planet'): Promise<RpcResponse> {
-    if (this.operation) throw new Error(`cannot change the view mode: ${this.operation} is running`);
-    return this.changingView(async () => {
-      if (this.viewing()) await this.stopView();
-      const r = await this.call('iscope_start_view', mode === 'star' ? { mode, lp_filter: false } : { mode });
-      this.wideView = false;
-      await this.refreshState().catch(() => {});
+    return this.serial(async () => {
+      if (this.viewRunning()) await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+      const r = await this.call('iscope_start_view', mode === 'star' ? { mode, selected_cam: VIEW_OF[this.wanted], lp_filter: false } : { mode }, { timeoutMs: VIEW_TIMEOUT_MS });
+      this.st.view.state = 'working';
+      this.st.view.mode = mode;
+      this.st.camera = 'tele';
+      if (mode === 'star') this.st.camera = this.wanted;
+      await this.refreshState().catch(() => undefined);
+      if (mode === 'star') await this.applyBin('view started').catch(() => undefined);
+      this.syncStreams();
       return r;
     });
   }
 
-  /** Record the tele camera's video to the scope's storage (MyWorks/Scenery_video, …). */
   async record(on: boolean): Promise<RpcResponse> {
-    if (on && this.st.mount.parked) throw new Error('the arm is parked: open it (Home) to record');
-    if (on && !this.viewing()) await this.startView();
+    if (on && !this.viewRunning()) await this.ensureLiveView();
     return this.call(on ? 'start_record_avi' : 'stop_record_avi', on ? { raw: false } : undefined);
   }
 
-  /** The tilt sensor: angle from level (on an EQ wedge, about 90° minus the latitude it is set for). */
   async level(): Promise<{ tiltDeg: number; x: number; y: number; z: number }> {
     const r = await this.call('get_device_state', { keys: ['balance_sensor'] });
-    const d = (r.result as { balance_sensor?: { data?: Record<string, number> } })?.balance_sensor?.data;
-    if (!d || typeof d.angle !== 'number') throw new Error('the Seestar reported no tilt reading');
-    return { tiltDeg: d.angle, x: d.x, y: d.y, z: d.z };
+    const d = ((r.result as { balance_sensor?: { data?: Record<string, number> } })?.balance_sensor?.data ?? {}) as Record<string, number>;
+    return { tiltDeg: d.angle ?? 0, x: d.x ?? 0, y: d.y ?? 0, z: d.z ?? 0 };
   }
 
-  /** The scope's indicator light, 0 (off: kind to a shared observatory) to 100. */
   setLightBrightness(pct: number): Promise<RpcResponse> {
     return this.call('set_setting', { light_brightness: Math.max(0, Math.min(100, Math.round(pct))) });
   }
@@ -894,34 +1082,53 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.call(action === 'shutdown' ? 'pi_shutdown' : 'pi_reboot');
   }
 
-  // ---- images --------------------------------------------------------------
+  // ---- pictures ---------------------------------------------------------------------------------
 
-  /** The current stacked image (or one live sub) from the image socket. */
-  async grabImage(camera: Camera, kind: GrabKind, timeoutMs?: number): Promise<{ image: FloatImage; frame: Frame }> {
-    // the image sockets push exposures in the star view only, each camera in its own (the wide
-    // camera's is the SecondView, see withCameraView): a wait on the wrong one is a wait for nothing
-    if (kind === 'preview' && camera === 'wide' && !this.wideView) {
-      throw new Error("a wide raw sub comes from the wide camera's view: ask through take_photo / view_camera wide, which open it for the frame");
+  /**
+   * One picture from a camera: its next live preview, the firmware's current frame, or the stack.
+   * The camera has to be exposing (selected, in ContinuousExposure or a stack).
+   */
+  async grabImage(camera: Camera, kind: GrabKind, timeoutMs = GRAB_TIMEOUT_MS): Promise<{ image: FloatImage; frame: Frame }> {
+    const sock = this.images[camera];
+    if (!sock.connected) throw new Error(sock.note ?? `the ${camera} camera's picture socket is not connected`);
+    if (kind === 'stacked') {
+      if (camera !== 'tele') throw new Error('stacks are the tele camera\'s');
+      if (!this.isStacking() && !this.st.stack.stacked) throw new Error('no stack is running');
+      if (!this.st.stack.stacked) throw new Error('no stacked image yet (0 frames stacked)');
+    } else if (!this.liveStage(camera)) {
+      throw new Error(this.liveNote(camera) ?? `the ${camera} camera is not exposing (${this.viewOf(camera).stage ?? 'no stage'})`);
     }
-    if (kind === 'preview' && camera === 'tele' && this.wideView) {
-      throw new Error("the wide camera's view is running and the tele sleeps meanwhile: ask again in a moment");
-    }
-    if (kind === 'preview' && camera === 'tele' && !this.viewing()) {
-      const why = await this.ensureLiveView(true);
-      if (why) throw new Error(`a raw sub needs a running star view: ${why}`);
-    }
-    // get_stacked_img answers with nothing at all while the stack has no frame yet (S50 Pro, fw
-    // 9.75): the wait would run to its timeout and say "closed" or "no frame" without the reason
-    if (kind === 'stacked' && this.st.stack.stacked === 0 && busyWith(this.st) === 'stacking') {
-      throw new Error(`no stacked image yet: 0 frames stacked so far${this.st.stack.dropped ? ` (${this.st.stack.dropped} dropped)` : ''} - the stack is still collecting its first sub; ask again after an exposure or two, or use kind=preview for the live sub`);
-    }
-    const frame = await this.streams[camera].grab(kind, timeoutMs);
-    return { image: await frameImage(frame, camera), frame };
+    const frame = await sock.grab(kind, timeoutMs);
+    const image = await frameImage(frame, camera);
+    image.camera = camera;
+    return { image, frame };
+  }
+
+  /** One raw (Bayer) frame: the transfer mode goes to Raw for it and back to JPEG after. */
+  grabRaw(camera: Camera, timeoutMs = RAW_STILL_TIMEOUT_MS): Promise<Frame> {
+    const run = async (): Promise<Frame> => {
+      if (!this.liveStage(camera)) throw new Error(`a raw ${camera} frame needs the ${camera} camera exposing (${this.liveNote(camera) ?? 'it is changing stage'})`);
+      await this.setTransferMode(camera, 'Raw');
+      try {
+        const until = Date.now() + timeoutMs;
+        for (let n = 0; n < 3 && Date.now() < until; n++) {
+          const f = await this.images[camera].grab('preview', until - Date.now());
+          if (f.header.imgType === IMG_TYPE.preview) return f;
+        }
+        throw new Error(`the ${camera} camera kept sending JPEG frames after the switch to RAW`);
+      } finally {
+        await this.setTransferMode(camera, 'Jpg').catch((e) => log.warn(`could not put the ${camera} camera's live frames back to JPEG: ${errMsg(e)}`));
+      }
+    };
+    const p = this.rawQueue.then(run, run);
+    this.rawQueue = p.catch(() => undefined);
+    return p;
   }
 }
 
 function pairOf(v: unknown, a: string, b: string): [number, number] | null {
-  if (Array.isArray(v) && typeof v[0] === 'number' && typeof v[1] === 'number') return [v[0], v[1]];
+  const p = pair(v);
+  if (p) return p;
   if (v && typeof v === 'object') {
     const o = v as Record<string, unknown>;
     if (typeof o[a] === 'number' && typeof o[b] === 'number') return [o[a] as number, o[b] as number];
@@ -929,4 +1136,4 @@ function pairOf(v: unknown, a: string, b: string): [number, number] | null {
   return null;
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+export { OTHER as OTHER_CAMERA };

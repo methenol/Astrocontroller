@@ -2,6 +2,10 @@
  * The Seestar behind the shared web UI (public/): its state projected onto the field names the UI
  * renders, the UI's controls mapped onto the Seestar's commands, its live views, and the
  * Seestar-only API under /api/seestar (tunnel, ZWO devices, raw RPC, the stacked image).
+ *
+ * The camera the UI shows as its main view is the camera the scope exposes: the video socket's
+ * `main` reaches the hub (hub.ts), which selects it on the device. A tool or an operation that
+ * needs the other camera borrows it and the selection comes back after (device.ts).
  */
 import express, { type Router } from 'express';
 import { z } from 'zod';
@@ -9,20 +13,20 @@ import { config } from '../../config.js';
 import * as sky from '../../astro/sky.js';
 import { displayJpeg } from '../../mcp/tools/common.js';
 import { sharpnessLine, starSharpness } from '../../media/focus.js';
+import { decode, type FloatImage } from '../../media/images.js';
 import { body, route } from '../../web/http.js';
 import { unsupported, type Capabilities, type GotoTarget, type WebTelescope } from '../../web/telescope.js';
 import type { ControlAction } from '../../web/routes/control.js';
-import { SeestarCapture } from './capture.js';
-import { NUDGE_MAX_S, NUDGE_MAX_SPEED, type Seestar } from './device.js';
-import { SeestarFiles } from './files.js';
-import { seestarFocusSweep } from './focus.js';
-import { seestarLibrary, type SeestarStorage } from './library.js';
-import { SeestarSurvey } from './survey.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
-import { NOMINAL_FOV } from './mcp.js';
-import { TERMINAL_STATES, type OperationState, type SeestarState } from './state.js';
-import type { SeestarEvent } from './rpc.js';
-import { SeestarVideoHub } from './video.js';
+import { SeestarCapture } from './capture.js';
+import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
+import { NOMINAL_FOV, seestarFocusSweep } from './focus.js';
+import { frameImage, JPEG_SOI } from './frames.js';
+import { SeestarVideoHub } from './hub.js';
+import type { SeestarEvent } from './link.js';
+import { isStacking, TERMINAL_STATES, type OperationState, type SeestarState } from './model.js';
+import { SeestarFiles, seestarStorage, type SeestarStorage } from './storage.js';
+import { SeestarSurvey } from './survey.js';
 import { listDevices } from './zwo-cloud.js';
 
 const LABEL = 'ZWO Seestar';
@@ -100,8 +104,10 @@ function modeName(v: SeestarState['view']): string | undefined {
 const gb = (mb: number | undefined) => (mb === undefined ? undefined : +(mb / 1024).toFixed(1));
 
 /** The Seestar's state in the UI's field names; the fields it has no equivalent of are left out. */
-export function projectState(st: SeestarState, busy: string | null): WebTelescope['state'] {
-  const stackRunning = !!st.stack.state && !TERMINAL_STATES.has(st.stack.state) && st.stack.state !== 'idle';
+export function projectState(scope: Pick<Seestar, 'state' | 'isBusy' | 'selected' | 'exposing'>): WebTelescope['state'] {
+  const st = scope.state;
+  const busy = scope.isBusy();
+  const stackRunning = isStacking(st);
   const taken = (st.stack.stacked ?? 0) + (st.stack.dropped ?? 0);
   const target = st.view.target;
   const raDec = st.view.targetRaDec;
@@ -136,51 +142,61 @@ export function projectState(st: SeestarState, busy: string | null): WebTelescop
     pointing: target && raDec ? { target, raHours: raDec[0], decDeg: raDec[1], at: st.ops.AutoGoto?.at ?? Date.now() } : undefined,
     mount: st.mount,
     alert: st.alert,
-  };
+    // which camera the scope exposes, and which one the UI chose (they differ while something borrows the other)
+    camera: { selected: scope.selected, exposing: scope.exposing },
+  } as WebTelescope['state'];
 }
 
 /** "30", "30s", "500ms", "1/100" → milliseconds. */
 function exposureMs(v: string | number | boolean): number {
   const s = String(v).trim().toLowerCase();
   const frac = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(s);
-  const ms = frac ? (1000 * +frac[1]) / +frac[2] : s.endsWith('ms') ? parseFloat(s) : parseFloat(s) * 1000;
+  const ms = frac ? (1000 * +frac[1]!) / +frac[2]! : s.endsWith('ms') ? parseFloat(s) : parseFloat(s) * 1000;
   if (!Number.isFinite(ms) || ms <= 0) throw new Error(`exposure "${v}" is not a duration (seconds, e.g. 10, or a fraction, e.g. 1/100)`);
   return ms;
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-/** The live views and photo capture, shared by the web UI and the agent's tools. */
+/** The live views, photo capture, storage and the horizon survey, shared by the web UI and the agent's tools. */
 export interface SeestarMedia {
   hub: SeestarVideoHub;
   capture: SeestarCapture;
   /** its storage (sessions, album, transfers), registered for the library by the runtime */
   storage: SeestarStorage;
   survey: SeestarSurvey;
+  /** the next full-resolution frame of a camera as an image (shown on its live view too) */
+  liveFrame(camera: 'tele' | 'wide'): Promise<{ img: FloatImage; encoded: Buffer }>;
 }
 
 export function seestarMedia(scope: Seestar): SeestarMedia {
   const hub = new SeestarVideoHub(scope, () => config.seestar.host);
-  const media: SeestarMedia = { hub, capture: new SeestarCapture(scope, (camera) => hub.get(camera)), storage: seestarLibrary(new SeestarFiles(scope)), survey: null as unknown as SeestarSurvey };
-  media.survey = new SeestarSurvey(scope, media);
-  return media;
+  const capture = new SeestarCapture(scope, (camera, jpeg) => hub.camera(camera).offer(jpeg));
+  const liveFrame = async (camera: 'tele' | 'wide') => {
+    const shot = await capture.frame(camera, false);
+    const img = shot.raw && !shot.raw.payload.subarray(0, 2).equals(JPEG_SOI) ? await frameImage(shot.raw, camera) : await decode(shot.jpeg, `seestar:${camera}.jpg`);
+    img.capturedAt = Date.now();
+    return { img, encoded: shot.jpeg };
+  };
+  const survey = new SeestarSurvey(scope, async () => (await liveFrame('wide')).img);
+  return { hub, capture, storage: seestarStorage(new SeestarFiles(scope)), survey, liveFrame };
 }
 
-export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedia = seestarMedia(scope), nights: StarfrontNights | null = null): WebTelescope {
-
+export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: SeestarMedia = seestarMedia(scope), nights: StarfrontNights | null = null): WebTelescope {
   const control = async (b: ControlAction): Promise<unknown> => {
     switch (b.action) {
       case 'nudge': {
         // the UI's angle is the screen's (0 up, 90 right), the Seestar's the math one (0 right, 90 up);
-        // the Seestar moves for whole seconds, so the move is stopped after the UI's duration
-        await scope.nudge(90 - b.angle, b.speed * NUDGE_MAX_SPEED, Math.min(NUDGE_MAX_S, Math.max(1, Math.ceil(b.ms / 1000))));
-        await sleep(b.ms);
-        await scope.stopMotion();
-        return scope.readPointing();
-      }
-      case 'stop':
-        await scope.stopMotion();
+        // the UI's speed is the stick's throw (0-1): the app's percent. A held arrow sends these
+        // faster than they run out, each taking the move over; the answer comes as soon as the
+        // scope has the command, so the next one is not held behind the stop.
+        await scope.nudge(90 - b.angle, Math.max(1, Math.round(b.speed * NUDGE_MAX_PERCENT)), Math.min(NUDGE_MAX_S, b.ms / 1000), { wait: false });
         return { ok: true };
+      }
+      case 'stop': {
+        // the UI's stop ends whatever runs: hand movement, an operation, a stack
+        const { stopped } = await scope.stopWork();
+        if (!stopped.includes('hand movement')) await scope.stopMotion();
+        return { ok: true, stopped };
+      }
       case 'home':
         // the Seestar keeps its own axis positions: home is raising the arm out of park
         return { result: (await scope.openArm()).state };
@@ -248,14 +264,15 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedi
         return { result: `focuser at ${at ?? '?'}` };
       }
       case 'star_measure': {
-        // one live sub, measured; the plate scale comes from the tele field
-        const { image } = await scope.grabImage('tele', 'preview');
+        // one full-resolution tele frame, measured; the plate scale comes from the tele field
+        const { img } = await liveFrame('tele');
         const fov = scope.state.fov ?? NOMINAL_FOV;
-        const sharp = starSharpness(image, { arcsecPerPx: (fov.h * 3600) / (image.frameWidth ?? image.width) });
+        const sharp = starSharpness(img, { arcsecPerPx: (fov.h * 3600) / (img.frameWidth ?? img.width) });
         return { result: sharpnessLine(sharp), focusPosition: scope.state.focus.position, ...sharp };
       }
       case 'setting': {
-        if (b.setting === 'exposure') return { result: await scope.setExposure({ stackMs: exposureMs(b.value), continuousMs: exposureMs(b.value) }) };
+        // the stack sub length only: the live view's exposure is the stream's cadence
+        if (b.setting === 'exposure') return { result: await scope.setExposure({ stackMs: exposureMs(b.value) }) };
         if (b.setting === 'gain') {
           const g = Number(b.value);
           if (!Number.isFinite(g)) throw new Error(`gain "${b.value}" is not a number`);
@@ -272,7 +289,7 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedi
         await scope.stopPolarAlign();
         return { result: 'Polar alignment stopped' };
       case 'goto_stop':
-        await scope.stopView();
+        await scope.stopGoto();
         return { ok: true };
       case 'sync':
         return { result: (await scope.syncTimeLocation()).join(', ') };
@@ -300,12 +317,20 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedi
 
   const routes = (): Router => {
     const api = express.Router();
-    api.get('/seestar/status', route(async () => ({ ...scope.state, busy: scope.isBusy() })));
+    api.get('/seestar/status', route(async () => ({ ...scope.state, busy: scope.isBusy(), selected: scope.selected, exposing: scope.exposing, images: { tele: scope.images.tele.status(), wide: scope.images.wide.status() } })));
     api.post('/seestar/refresh', route(async () => scope.refreshState()));
     api.get('/seestar/events', route(async () => scope.state.recent));
     api.get('/seestar/tunnel', route(async () => scope.tunnel?.status() ?? null));
     api.post('/seestar/tunnel/restart', route(async () => scope.tunnel?.restart()));
     api.get('/seestar/zwo-devices', route(async () => listDevices()));
+    api.post(
+      '/seestar/camera',
+      route(async (req) => {
+        const b = body(req, z.object({ camera: z.enum(['tele', 'wide']) }));
+        await scope.selectCamera(b.camera, 'chosen in the web UI');
+        return { selected: scope.selected, exposing: scope.exposing };
+      }),
+    );
     // Starfront's autonomous nights (agent tab), when STARFRONT_REMOTE_ZWO offers them
     api.get('/starfront', route(async () => nights?.status() ?? { available: false }));
     api.post(
@@ -339,7 +364,7 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedi
   // the UI's 'state' is the projection; the Seestar's event frames are its notifications
   const listeners = new Map<(...a: any[]) => void, (...a: any[]) => void>();
   const wrap = (event: 'state' | 'notification', fn: (...a: any[]) => void) => {
-    const w = event === 'state' ? () => fn(projectState(scope.state, scope.isBusy())) : (e: SeestarEvent) => fn({ name: e.Event, data: e, ts: e.at });
+    const w = event === 'state' ? () => fn(projectState(scope)) : (e: SeestarEvent) => fn({ name: e.Event, data: e, ts: e.at });
     listeners.set(fn, w);
     return w;
   };
@@ -348,7 +373,7 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedi
     driver: 'seestar',
     label: LABEL,
     get state() {
-      return projectState(scope.state, scope.isBusy());
+      return projectState(scope);
     },
     capabilities: CAPABILITIES,
     hub,
@@ -361,7 +386,7 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey }: SeestarMedi
     control,
     goto,
     routes,
-    wireLines: (n, o) => scope.rpc.wireLines(n, o),
+    wireLines: (n, o) => scope.link.wireLines(n, o),
     horizonSurvey: {
       start: async () => ({ summary: (await survey.run()).summary }),
       stop: async () => survey.stop(),

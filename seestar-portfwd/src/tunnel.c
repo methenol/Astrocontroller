@@ -257,6 +257,10 @@ int main(void) {
     void (*tcp_relay_only)(void) = sym(h_iotc, "IOTC_TCPRelayOnly_TurnOn");   // returns nothing
     void (*connect_timeout)(unsigned) = sym(h_iotc, "IOTC_Setup_P2PConnection_Timeout");   // returns nothing
     int (*nat_type)(void) = sym(h_iotc, "IOTC_Get_Nat_Type");
+    // The app sizes every tunnel session's buffer (P2PTunnel_SetBufSize(sid, 512000), its
+    // RemotePortMappingConfig.tunnelBufferSize) before it maps a port; the SDK default is far
+    // smaller and throttles the multi-MB live frames on 4800/4804 to well under 1 MB/s.
+    int (*set_bufsize)(int, int) = sym(h_tunnel, "P2PTunnel_SetBufSize");
     if (!set_license || !alive || !tun_init2 || !tun_connect_ex || !port_mapping)
         return 1;
 
@@ -309,7 +313,10 @@ int main(void) {
         printf("[*] asked for TCP relay (IOTC_TCPRelayOnly_TurnOn)\n");
     }
     if (tun_init2(4, 1) != 0) { fprintf(stderr, "[!] tunnel init failed\n"); return 1; }
-    int nchan = 1;   // one session: every port on it
+    // The app opens two sessions per connection (P2PTunnelAgent_Connect_Ex, then _Second): the
+    // control ports on the first, every bulk port on the second, so image traffic never starves
+    // the control link. TUTK_SESSIONS=1 puts every port on one session.
+    int nchan = env_int("TUTK_SESSIONS", 2, 1, 2);
     int chan_sid[2] = { -1, -1 };
 
     // Open the session every port rides on. The first Connect_Ex after a session ended routinely
@@ -331,7 +338,11 @@ int main(void) {
                 int r = tun_connect_stop(uid);
                 printf("    Connect_Stop before retry %d: %d\n", try_, r);
             }
-            if (reinit_socket) {
+            // ... but only before the FIRST session: the app sanitises once per connect and
+            // then calls Connect_Ex twice back to back ("_Second" is just its log prefix). A
+            // ReInitSocket between the two resets the socket session 0 lives on, and its port
+            // mappings then fail (-55 on every write) while session 1 comes up fine.
+            if (reinit_socket && (i == 0 || try_ > 1)) {
                 int r = reinit_socket(0);
                 if (r != 0) printf("    IOTC_ReInitSocket: %d\n", r);
             }
@@ -356,6 +367,11 @@ int main(void) {
         }
         if (check_ex) print_mode(check_ex, chan_sid[i]);
         if (nat_type) printf("    our NAT type (SDK): %d\n", nat_type());
+        int bufsz = env_int("TUTK_TUNNEL_BUFSIZE", 512000, 0, 8 * 1024 * 1024);
+        if (bufsz > 0 && set_bufsize) {
+            int r = set_bufsize(chan_sid[i], bufsz);
+            printf("    P2PTunnel_SetBufSize(%d): %d\n", bufsz, r);
+        }
     }
 
     // Map each port onto its channel; a single failure is reported, not fatal.
@@ -366,8 +382,10 @@ int main(void) {
         PORTS[i].mapped = port_mapping(chan_sid[ci], PORTS[i].port, PORTS[i].port);
         int ok = PORTS[i].mapped >= 0;
         if (ok) mapped++;
-        printf("    127.0.0.1:%-5u -> device:%-5u  %s\n",
-               PORTS[i].port, PORTS[i].port, ok ? "ok" : "FAILED");
+        if (ok) printf("    127.0.0.1:%-5u -> device:%-5u  ok (session %d)\n",
+                       PORTS[i].port, PORTS[i].port, ci);
+        else printf("    127.0.0.1:%-5u -> device:%-5u  FAILED (%d, session %d)\n",
+                    PORTS[i].port, PORTS[i].port, PORTS[i].mapped, ci);
     }
     if (mapped == 0) { fprintf(stderr, "[!] no port mappings succeeded\n"); return 1; }
 

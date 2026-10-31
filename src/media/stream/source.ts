@@ -27,6 +27,8 @@ export abstract class Source extends SafeEmitter {
   private readonly clients = new Map<Response, { busy: boolean }>();
   private readonly sinks = new Set<Sink>();
   private holds = 0;
+  /** the viewers that have this source in their main view (the picture they are looking at) */
+  private readonly primaries = new Set<unknown>();
   private idleTimer: NodeJS.Timeout | null = null;
 
   constructor(readonly name: string) {
@@ -85,8 +87,22 @@ export abstract class Source extends SafeEmitter {
     }
   }
 
-  private get wanted(): boolean {
+  /** Someone is watching or holding this source right now (unlike `running`, which lingers
+   *  IDLE_STOP_MS after the last viewer so a reload does not restart the source). */
+  get wanted(): boolean {
     return this.clients.size > 0 || this.sinks.size > 0 || this.holds > 0;
+  }
+
+  /** A viewer (keyed by anything that identifies it) has this source in its main view, or not. */
+  setPrimary(viewer: unknown, on: boolean): void {
+    if (on) this.primaries.add(viewer);
+    else this.primaries.delete(viewer);
+  }
+
+  /** Someone is looking at this source in their main view right now: a camera a telescope can
+   *  only stream one of at a time goes to this source before one that is merely on screen. */
+  get primary(): boolean {
+    return this.primaries.size > 0;
   }
 
   private release(): void {

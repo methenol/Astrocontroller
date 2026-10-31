@@ -96,6 +96,8 @@ services:
       # 1 = carry the session over TUTK's TCP relay instead of a UDP hole punch; the punch does
       # not work from behind a symmetric NAT (Connect_Ex -42/-60 for an hour, 2026-10-30).
       TUTK_TCP_RELAY_ONLY: ${SEESTAR_TUTK_TCP_RELAY_ONLY:-0}
+      TUTK_TUNNEL_BUFSIZE: ${SEESTAR_TUTK_TUNNEL_BUFSIZE:-512000}
+      TUTK_SESSIONS: ${SEESTAR_TUTK_SESSIONS:-2}
       # IOTC_Setup_P2PConnection_Timeout seconds; 0 = not called (the T SDK did not honour 20)
       TUTK_CONNECT_TIMEOUT_S: ${SEESTAR_TUTK_CONNECT_TIMEOUT_S:-0}
       # the SDK's own log, dumped to the tunnel log after a refused Connect_Ex (level 0 = verbose)
