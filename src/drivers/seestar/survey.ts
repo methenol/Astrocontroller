@@ -106,8 +106,6 @@ export class SeestarSurvey {
       progress({ message: `pointing up at ${ANCHOR_ALT}° for the sky reference` });
       const azNow = this.scope.state.mount.azDeg ?? 180;
       await this.scope.slewAltAz(azNow, ANCHOR_ALT);
-      // the wide frames come from RTSP, which the scope serves in a scenery view only
-      await this.scope.setViewMode('scenery');
       const anchorImg = (await seestarImage('wide', this.scope, this.media)).img;
       const stars = analyze(anchorImg).stars.count;
       if (stars < ANCHOR_MIN_STARS) {

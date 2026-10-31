@@ -11,10 +11,21 @@ second one never exists and that the one we hold is always given back:
     connect while already connected is a lease refresh, never a second session;
   * a session that is lost, hangs, or never becomes ready is killed and reopened after a backoff,
     so a dropped P2P link heals by itself while the container stays up;
+  * a session the scope's rendezvous refuses (Connect_Ex -42/-60) is kept and dialled again: the
+    scope's P2P agent takes minutes to answer after a session ended, and handing the session back
+    to ask for another one only restarts that wait. One session per connect request, as the app;
+  * the backend hears about every session the way it hears from the official app: p2pConnectStart
+    once online-link has handed the session out, p2pConnectSucceed when the tunnel is up,
+    p2pConnectFailed (with the SDK's code) for a session given back without coming up, and
+    p2pConnectCancel for one abandoned because a disconnect was asked for first. The app sends
+    these on every connect; a backend that tracks the scope's one session by them must never be
+    left waiting for ours;
   * every teardown releases the telescope: SIGINT to the tunnel (stop the port mappings, abort and
-    disconnect the SDK sessions) and then stop_p2p for the conId. On Disconnect, before every
-    reconnect, on SIGTERM, and at start for the session a crashed run left behind (its conId stays
-    in the state file until the backend confirms the release).
+    disconnect the SDK sessions, which is all the official app ever does), then the account is
+    watched until the scope reports itself free again; stop_p2p for the conId only when it does
+    not, or for a session that never came up. On Disconnect, before every reconnect, on SIGTERM,
+    and at start for the session a crashed run left behind (its conId stays in the state file until
+    the backend confirms the release).
 
 Control API on SEESTAR_TUNNEL_CONTROL_PORT (4710), JSON over HTTP:
 
@@ -58,6 +69,8 @@ DNSHOOK = os.environ.get("TUNNEL_DNSHOOK", "/work/libdnshook.so")
 
 #: the tunnel binary prints "[*] tunnel ready" once its ports are forwarded
 UP_BANNER = re.compile(r"tunnel ready|TUNNEL UP", re.I)
+#: the tunnel's own report of a Connect_Ex refusal, with the SDK's code
+REFUSAL_LINE = re.compile(r"Connect_Ex failed: (-?\d+)")
 #: "[*] mode P2P (direct), remote 1.2.3.4", from IOTC_Session_Check_Ex
 MODE_LINE = re.compile(r"mode\s+(.+?),\s*remote\s+(\S+)")
 #: the credentials the tunnel binary reads, mapped from the online-link response
@@ -105,26 +118,45 @@ class Config:
         self.control_bind = os.environ.get("SEESTAR_TUNNEL_CONTROL_BIND", "0.0.0.0")
         self.control_token = os.environ.get("SEESTAR_TUNNEL_CONTROL_TOKEN", "")
         self.probe_port = int(env_num("SEESTAR_TUNNEL_PROBE_PORT", 4700))
-        self.ready_timeout_s = env_num("SEESTAR_TUNNEL_READY_TIMEOUT_S", 180, 5)
+        #: long enough for the child to work through its own Connect_Ex retries (TUTK_CONNECT_TRIES,
+        #: about a minute each): the -42/-60 right after a session ended is cured by trying again on
+        #: the same session, so cutting that short turns one refusal into a storm of them. A refusal
+        #: the child has given up on is noticed from its output and cut short instead.
+        self.ready_timeout_s = env_num("SEESTAR_TUNNEL_READY_TIMEOUT_S", 240, 5)
         self.retry_min_s = env_num("SEESTAR_TUNNEL_RETRY_MIN_S", 5, 1)
         self.retry_max_s = env_num("SEESTAR_TUNNEL_RETRY_MAX_S", 120, 1)
-        self.stop_grace_s = env_num("SEESTAR_TUNNEL_STOP_GRACE_S", 10, 1)
+        #: long enough for a child blocked inside Connect_Ex to come back out of it and abort the
+        #: session on its way out; SIGKILL before that leaves the scope occupied by a session of ours
+        self.stop_grace_s = env_num("SEESTAR_TUNNEL_STOP_GRACE_S", 75, 1)
         self.watchdog_s = env_num("SEESTAR_TUNNEL_WATCHDOG_S", 10, 1)
         self.liveness_fails = int(env_num("SEESTAR_TUNNEL_LIVENESS_FAILS", 3, 1))
         #: how often to re-prove that the tunnel carries traffic once it is up. The binary checks the
         #: P2P session itself every second and exits when it goes away, so dialling the scope's
         #: control service any more often than this only competes with the traffic that matters
         self.liveness_s = max(self.watchdog_s, env_num("SEESTAR_TUNNEL_LIVENESS_S", 60, 5))
+        #: while connected, re-read the scope's status (ONLINE/SHOOTING/OCCUPIED) from the account this
+        #: often so /status does not keep the value seen at connect time; 0 = only at connect/release
+        self.status_refresh_s = env_num("SEESTAR_TUNNEL_STATUS_REFRESH_S", 120, 0)
         self.leave_port_s = env_num("SEESTAR_TUNNEL_LEAVE_PORT_S", 5, 0)
-        #: the tunnel died before it ever came up: try it again on the SAME session this many times
-        #: before giving it back — putting a session back and asking for a new one is what turns a
-        #: single Connect_Ex -42 into a string of them
-        self.connect_retries = min(5, int(env_num("SEESTAR_TUNNEL_CONNECT_RETRIES", 2, 0)))
+        #: the tunnel died before it ever came up (the scope's rendezvous refused it with -42/-60,
+        #: typically): try it again on the SAME session, this many times and for at most
+        #: session_budget_s since the session was allocated, before giving it back. Putting a session
+        #: back and asking for a new one is what turns a single Connect_Ex -42 into a string of them:
+        #: the scope's P2P agent needs minutes to answer again after a session ended, and the wait
+        #: starts over with every new session.
+        self.connect_retries = min(60, int(env_num("SEESTAR_TUNNEL_CONNECT_RETRIES", 20, 0)))
         self.connect_retry_s = min(60.0, env_num("SEESTAR_TUNNEL_CONNECT_RETRY_S", 3, 0))
+        self.session_budget_s = env_num("SEESTAR_TUNNEL_SESSION_BUDGET_S", 900, 0)
+        #: after the SDK disconnect, how long to watch the account for the scope reporting itself free
+        #: (ONLINE) before stop_p2p is sent for the session; 0 = always send it
+        self.release_wait_s = env_num("SEESTAR_TUNNEL_RELEASE_WAIT_S", 20, 0)
         #: hold the session at most this long without a refresh from the controller; 0 = until Disconnect
         self.lease_s = env_num("SEESTAR_TUNNEL_LEASE_S", 0, 0)
         self.lock_path = os.environ.get("SEESTAR_TUNNEL_LOCK", "/var/lib/seestar-portfwd/tunnel.lock")
         self.state_path = os.environ.get("SEESTAR_TUNNEL_STATE", "/var/lib/seestar-portfwd/session.json")
+        #: the id the backend keys sessions by; it lives on the state volume, not in the image, so it
+        #: survives rebuilds and a new allocation supersedes the session the last container held
+        self.src_id_path = os.environ.get("SEESTAR_TUNNEL_SRC_ID", "/var/lib/seestar-portfwd/srcid")
         self.log_lines = int(env_num("SEESTAR_TUNNEL_LOG_LINES", 40, 5))
 
 
@@ -233,6 +265,10 @@ class Supervisor:
         self.lease_expires = 0.0
         self.backoff = cfg.retry_min_s
         self.stopping = False
+        #: which dial of the current session is running (1 = the first)
+        self.session_attempt = 0
+        #: the last Connect_Ex result the tunnel printed for the current session, for the report
+        self.connect_code: int | None = None
         self.output: deque[str] = deque(maxlen=cfg.log_lines)
         self.token: str | None = None
         self.lock_fh: Any = None
@@ -252,8 +288,9 @@ class Supervisor:
                 if self.phase == "failed":  # a refusal is retried when somebody asks again
                     self.last_error = None
                     self._set_phase("idle")
-        log(f"connect requested ({'lease' if self.lease_s else 'held'} "
-            f"{self.lease_s:.0f} s, " + ("already wanted" if not fresh else "start trying") + ")")
+        # the controller renews its lease every 30 s: that is noise once the wish is known
+        if fresh:
+            log(f"connect requested ({'lease' if self.lease_s else 'held'} {self.lease_s:.0f} s, start trying)")
 
     def disconnect(self, wait_s: float) -> dict:
         """Release the telescope, waiting (bounded) until the backend has given it back."""
@@ -303,6 +340,7 @@ class Supervisor:
                 "leaseSeconds": self.lease_s or None,
                 "leaseExpiresAt": self.lease_expires or None,
                 "backoffSeconds": round(self.backoff, 1),
+                "sessionAttempt": self.session_attempt,
                 "stopping": self.stopping,
                 "output": list(self.output),
             }
@@ -391,26 +429,41 @@ class Supervisor:
         if not self._acquire_lock():
             return False, True
         session: dict[str, Any] | None = None
+        came_up = False
         try:
             session = self._allocate()
             if session:
-                came_up = False
                 for go in range(self.cfg.connect_retries + 1):
+                    with self.cond:
+                        self.session_attempt = go + 1
                     self._spawn(session)
                     came_up = self._monitor(session)
                     with self.cond:
-                        child = self.child
-                    # a tunnel that DIED before coming up is worth restarting on this same session; a
-                    # hung one goes back through the release and the backoff
+                        child, refused = self.child, self.refused
+                    # A child that printed its last refusal exits right after it: give it the moment
+                    # rather than killing it, so its SDK teardown runs in the app's order.
+                    if child is not None and refused and child.poll() is None:
+                        try:
+                            child.wait(5)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    # a tunnel that DIED before coming up is worth dialling again on this same session,
+                    # within the session's budget; a hung one goes back through the release and the backoff
                     died = child is not None and child.poll() is not None
+                    age = time.time() - float(session.get("at") or time.time())
                     with self.cond:
                         again = (not came_up and not self.stopping and self.desired == "connected"
-                                and go < self.cfg.connect_retries and died)
+                                and go < self.cfg.connect_retries and died
+                                and age < self.cfg.session_budget_s)
                     if not again:
+                        if not came_up and died and not self.stopping and self.desired == "connected":
+                            log(f"giving session {str(session['con_id'])[:8]}... back after "
+                                f"{go + 1} dial(s) over {age:.0f} s: asking for another one")
                         break
                     self._stop_child()
-                    log(f"the tunnel did not come up; trying again on session "
-                        f"{str(session['con_id'])[:8]}... ({self.cfg.connect_retries - go} left)")
+                    log(f"the tunnel did not come up on session {str(session['con_id'])[:8]}... "
+                        f"(dial {go + 1}, {age:.0f} s since it was allocated): dialling it again in "
+                        f"{self.cfg.connect_retry_s:.0f} s, {self.cfg.connect_retries - go} left")
                     with self.cond:
                         self.cond.wait(self.cfg.connect_retry_s)
                 return came_up, True
@@ -435,9 +488,18 @@ class Supervisor:
         finally:
             self._stop_child()
             if session:
+                if not session.get("came_up"):
+                    # the app's one report per session that never came up: Cancel when the user
+                    # gave up on it first, Failed (with the SDK's answer) when the scope did
+                    with self.cond:
+                        cancelled = self.stopping or self.desired != "connected"
+                        code = self.connect_code
+                    self._report(session, cloud.REPORT_CANCEL if cancelled else cloud.REPORT_FAILED,
+                                 None if cancelled else code)
                 self._release(session)
             with self.cond:
                 self.session = None
+                self.session_attempt = 0
                 self.port_open = False
             self._release_lock()
 
@@ -481,6 +543,35 @@ class Supervisor:
             self.token = cloud.login(user, password)
         return self.token
 
+    def _source_id(self) -> str:
+        """The client id the backend keys sessions by.
+
+        The backend keeps one active session per device/srcId, so allocating again under the same id
+        supersedes the session a previous run left behind. The upstream id is derived from the host's
+        machine id, which a container either lacks or rebuilds: that hands out a fresh id per
+        allocation, every session then sits orphaned holding the scope, and each later Connect_Ex
+        answers -42 until the backend times it out (the storm). So it is generated once and kept on
+        the state volume beside the session journal.
+        """
+        try:
+            with open(self.cfg.src_id_path) as fh:
+                sid = fh.read().strip()
+            if sid:
+                return sid
+        except OSError:
+            pass
+        sid = cloud.source_id()
+        try:
+            os.makedirs(os.path.dirname(self.cfg.src_id_path) or ".", exist_ok=True)
+            tmp = self.cfg.src_id_path + ".tmp"
+            with open(tmp, "w") as fh:
+                fh.write(f"{sid}\n")
+            os.replace(tmp, self.cfg.src_id_path)
+            log(f"this installation's session id is {sid[:8]}... (kept in {self.cfg.src_id_path})")
+        except OSError as exc:
+            log(f"could not persist the session id, using a fresh one: {exc}")
+        return sid
+
     def _allocate(self) -> dict[str, Any] | None:
         """Ask for the scope's one P2P session, after giving back any session of ours still out there."""
         self._reap_stale()
@@ -501,7 +592,7 @@ class Supervisor:
             # ends. online-link and Connect_Ex are the real answers; log the claim and connect anyway.
             log(f"{sn} reports {state}; connecting regardless")
         log(f"requesting the P2P session for {sn}...")
-        status, body = cloud.online_link(token, sn, model, cloud.source_id())
+        status, body = cloud.online_link(token, sn, model, self._source_id())
         data = body.get("data") or {}
         if not all(data.get(k) for k in TUTK_FIELDS.values()) or not data.get("conId"):
             raise TransientError(f"online-link failed (HTTP {status}): {json.dumps(body)[:300]}")
@@ -516,8 +607,39 @@ class Supervisor:
         self._write_state(session)
         with self.cond:
             self.session = session
-        log(f"session {str(session['con_id'])[:8]}... allocated for {sn}")
+        p2p = data.get("p2pStatus")
+        log(f"session {str(session['con_id'])[:8]}... allocated for {sn} "
+            f"(device uid {str(data.get('deviceUid'))[:4]}..., p2pStatus {p2p})")
+        self._report(session, cloud.REPORT_START)
         return session
+
+    def _report(self, session: dict[str, Any], event: str, code: int | None = None) -> None:
+        """Tell the backend how the session is going, as the official app does (device-log/report).
+
+        Never fatal: the report is bookkeeping for the backend, the tunnel is the work. It is sent
+        on the worker thread, in order, so Start always precedes Succeed/Failed/Cancel."""
+        con_id = str(session.get("con_id") or "")
+        if not con_id:
+            return
+        label = con_id[:8]
+        try:
+            status, body = cloud.report_connect_result(
+                self.token or self._login(), str(session.get("sn") or ""), str(session.get("model") or ""),
+                con_id, event, code)
+        except Exception as exc:  # noqa: BLE001  (a report that cannot be delivered changes nothing here)
+            log(f"could not report {event} for session {label}...: {exc}")
+            return
+        # this backend answers {"code": 200, "msg": "OK", "data": {"result": true}}
+        taken = status == 200 and (not isinstance(body, dict) or body.get("code") in (0, 200, None))
+        if taken:
+            log(f"reported {event} for session {label}..." + (f" (code {code})" if code is not None else ""))
+        else:
+            log(f"the backend did not take the {event} report for session {label}... "
+                f"(HTTP {status}): {json.dumps(body)[:200]}")
+
+    #: set when the child reports a Connect_Ex refusal it has given up on - the ones it is still
+    #: working through print "(retrying)"; waiting on a child that has finished trying buys nothing
+    refused: bool = False
 
     def _spawn(self, session: dict[str, Any]) -> None:
         env = {**os.environ, **session["env"], "LD_LIBRARY_PATH": "/opt/lib"}
@@ -525,8 +647,11 @@ class Supervisor:
         log(f"opening the tunnel: {os.path.basename(argv[0])} {TUNNEL_BIN}")
         with self.cond:
             self.banner = False
+            self.refused = False
+            self.connect_code = None
         child = subprocess.Popen(  # noqa: S603  (fixed argv; the credentials go only in the env)
             argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            errors="replace",  # the SDK's output is not always UTF-8; a bad byte must not kill the reader
         )
         with self.cond:
             self.child = child
@@ -548,8 +673,16 @@ class Supervisor:
                 if found:
                     with self.cond:
                         self.mode = found.group(1).strip()
+            # "... (retrying)" is the child working through the retries that the -42/-60 after a
+            # session ending actually need; only a refusal it has given up on is worth cutting short
+            refused = "Connect_Ex failed" in line and "retrying" not in line
+            answer = REFUSAL_LINE.search(line)
             with self.cond:
                 self.output.append(line)
+                if answer:
+                    self.connect_code = int(answer.group(1))
+                if refused:
+                    self.refused = True
             log(f"tunnel: {line}")
 
     def _monitor(self, session: dict[str, Any]) -> bool:
@@ -563,6 +696,7 @@ class Supervisor:
         came_up = False
         misses = 0
         last_liveness = 0.0  # the first liveness pass after coming up waits liveness_s
+        last_status = 0.0  # the account's view of the scope is re-read every status_refresh_s
         while True:
             with self.cond:
                 child, wanted = self.child, self.desired == "connected"
@@ -577,6 +711,15 @@ class Supervisor:
                 log("nobody is holding the session any more: releasing the telescope")
                 break
             if child is None:
+                break
+            with self.cond:
+                refused = self.refused
+            if refused and not came_up:
+                self._fail(
+                    "the scope's P2P agent did not answer the rendezvous (Connect_Ex -42/-60): it takes "
+                    "minutes to come back after a session ended; dialling the same session again",
+                    retry=True,
+                )
                 break
             code = child.poll()
             if code is not None:
@@ -605,6 +748,9 @@ class Supervisor:
                         if self.lease_s:  # the lease is time we hold the scope, not time since it was asked for
                             self.lease_expires = time.time() + self.lease_s
                     log(f"the tunnel is up for {session['sn']} ({detail})")
+                    if not session.get("came_up"):
+                        session["came_up"] = True  # the app reports Succeed as soon as it is up
+                        self._report(session, cloud.REPORT_SUCCEED)
                 elif time.time() > deadline:
                     self._fail(
                         f"the tunnel did not come up within {cfg.ready_timeout_s:.0f} s "
@@ -619,6 +765,9 @@ class Supervisor:
                     misses = 0
                     with self.cond:
                         self.backoff = self.cfg.retry_min_s  # it answers: start the next backoff short
+                    if cfg.status_refresh_s and time.time() - last_status >= cfg.status_refresh_s:
+                        last_status = time.time()
+                        self._scope_free()  # refreshes self.device["status"] as a side effect
                 else:
                     misses += 1
                     log(f"the tunnel stopped answering ({detail}), "
@@ -660,8 +809,34 @@ class Supervisor:
         while tcp_open(self.cfg.probe_port) and time.time() < deadline:
             time.sleep(0.25)
 
+    def _scope_free(self) -> bool | None:
+        """What the account says about the scope right now: True when it is not OCCUPIED, None when
+        the account could not be asked."""
+        try:
+            devices = cloud.list_devices(self.token or self._login())
+        except Exception as exc:  # noqa: BLE001  (the account is only a witness here)
+            log(f"could not read the scope's status from the account: {exc}")
+            return None
+        sn = str((self.session or {}).get("sn") or os.environ.get("SEESTAR_SN") or "")
+        dev = next((d for d in devices if not sn or d.get("deviceSn") == sn), None)
+        if dev is None:
+            return None
+        state = cloud.DEVICE_STATUS.get(dev.get("deviceStatus"), "?")
+        with self.cond:
+            if self.device:
+                self.device = {**self.device, "status": state}
+        return dev.get("deviceStatus") != 4
+
     def _release(self, session: dict[str, Any]) -> None:
-        """Give the scope back. Closing our sockets is not enough: the backend has to end the session."""
+        """Give the scope back.
+
+        The SDK disconnect the tunnel ran on its way out is what the official app does, and the scope
+        reports itself free (ONLINE) to the backend on its own once the session is gone. The backend's
+        stop_p2p is the fallback: for a session that never came up (the scope never saw it end) and
+        for one the account still shows as OCCUPIED after the SDK teardown. It is not sent for the
+        sake of it: a stop the backend carries out is followed by minutes of Connect_Ex -42 for the
+        next session.
+        """
         con_id = str(session.get("con_id") or "")
         if not con_id:
             self._clear_state(session)
@@ -669,13 +844,28 @@ class Supervisor:
         label = con_id[:8]
         with self.cond:
             self._set_phase("releasing")
-        for attempt in (1, 2):
+        if session.get("came_up") and self.cfg.release_wait_s > 0:
+            started = time.time()
+            deadline = started + self.cfg.release_wait_s
+            while True:
+                free = self._scope_free()
+                if free:
+                    log(f"session {label}... ended by the SDK disconnect: the scope reports itself free "
+                        f"after {time.time() - started:.0f} s, no stop needed")
+                    self._clear_state(session)
+                    return
+                if free is None or time.time() >= deadline:
+                    break
+                time.sleep(2.0)
+            log(f"the scope still reports OCCUPIED {time.time() - started:.0f} s after the SDK "
+                f"disconnect: asking the backend to stop session {label}...")
+        for attempt in (1, 2, 3, 4):
             try:
                 status, body = cloud.stop_p2p(self.token or self._login(), con_id)
             except Exception as exc:  # noqa: BLE001  (anything the backend does is a failed release: retry, keep the state file)
                 log(f"could not release session {label}... (attempt {attempt}): {exc}")
                 self.token = None if attempt == 1 else self.token
-                time.sleep(0.5 * attempt)
+                time.sleep(1.5 * attempt)  # a session the backend is still chewing on frees itself shortly
                 continue
             if status == 401:
                 log(f"the backend rejected the token while releasing {label}...")
@@ -711,6 +901,7 @@ class Supervisor:
                 record["leaseS"] = self.lease_s
                 json.dump(record, fh)
             os.replace(tmp, self.cfg.state_path)
+            self._note_held(str(session.get("con_id") or ""))
         except OSError as exc:
             log(f"could not record the session in {self.cfg.state_path}: {exc}")
 
@@ -720,8 +911,54 @@ class Supervisor:
                 held = json.load(fh).get("con_id")
             if str(held) == str(session.get("con_id")):
                 os.remove(self.cfg.state_path)
+            self._forget_held(str(session.get("con_id") or ""))
         except (OSError, ValueError):
             pass
+
+    # ---- every session we were ever given -------------------------------------------------------
+    #
+    # The state file holds the current session only. A run that was killed, segfaulted or restarted
+    # can leave older ones allocated on the backend, and each of those keeps the scope occupied:
+    # every later Connect_Ex answers -42 until the backend times them out (up to a day). So the
+    # conIds are journalled, and everything in the journal goes back before a new session is asked
+    # for. That is what "release the telescope of sessions" means in practice.
+
+    def _held_path(self) -> str:
+        return self.cfg.state_path + ".held"
+
+    def _held_list(self) -> list[str]:
+        try:
+            with open(self._held_path()) as fh:
+                return [line.strip() for line in fh if line.strip()]
+        except OSError:
+            return []
+
+    def _write_held(self, con_ids: list[str]) -> None:
+        try:
+            if not con_ids:
+                try:
+                    os.remove(self._held_path())
+                except FileNotFoundError:
+                    pass
+                return
+            tmp = self._held_path() + ".tmp"
+            with open(tmp, "w") as fh:
+                fh.write("\n".join(con_ids[-20:]) + "\n")
+            os.replace(tmp, self._held_path())
+        except OSError as exc:
+            log(f"could not write the held-session journal: {exc}")
+
+    def _note_held(self, con_id: str) -> None:
+        if not con_id:
+            return
+        held = self._held_list()
+        if con_id not in held:
+            self._write_held([*held, con_id])
+
+    def _forget_held(self, con_id: str) -> None:
+        held = self._held_list()
+        if con_id in held:
+            self._write_held([c for c in held if c != con_id])
 
     def _reap_stale(self) -> None:
         """Release what a crashed or killed run left allocated before opening another session."""
@@ -737,6 +974,12 @@ class Supervisor:
         if con_id:
             log(f"the previous run left session {con_id[:8]}... allocated; releasing it first")
             self._release({"con_id": con_id})
+        for con_id in self._held_list():
+            if con_id == str(stale.get("con_id") or ""):
+                continue
+            log(f"an earlier run still holds session {con_id[:8]}...; giving the scope back before connecting")
+            self._release({"con_id": con_id})
+            self._forget_held(con_id)
 
     def restore_desired(self) -> bool:
         """True when a controller was holding this connection the last time the container ran."""
@@ -764,8 +1007,11 @@ class Supervisor:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # a controller shutting down asks and does not wait for the answer
 
             def _authorized(self) -> bool:
                 want = supervisor.cfg.control_token

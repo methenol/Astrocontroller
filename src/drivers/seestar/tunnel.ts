@@ -185,7 +185,12 @@ export class ZwoTunnel extends SafeEmitter {
     void this.probe();
   }
 
-  stop(): void {
+  /**
+   * Stop. `release` (the default) hands the scope back; a process shutdown passes false and leaves
+   * the session with the supervisor, whose lease outlives a restart: a redeploy then costs no
+   * session, and the scope's P2P agent is not made to start its minutes-long recovery for nothing.
+   */
+  stop(release = true): void {
     this.running = false;
     for (const t of [this.probeTimer, this.restartTimer, this.readyTimer]) if (t) clearTimeout(t);
     this.probeTimer = this.restartTimer = this.readyTimer = null;
@@ -198,7 +203,8 @@ export class ZwoTunnel extends SafeEmitter {
     }
     // The supervisor keeps the session for someone else to hold it: tell it we are done. A lost
     // request is not fatal (its lease expires by itself), but this is the polite, immediate way.
-    if (this.supUrl) this.ask('disconnect');
+    if (this.supUrl && release) this.ask('disconnect');
+    else if (this.supUrl) log.info('ZWO tunnel left to the supervisor for a restart (its lease expires by itself)');
     if (this.o.command || this.supUrl) this.set('stopped');
   }
 

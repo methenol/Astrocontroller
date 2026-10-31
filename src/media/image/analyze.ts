@@ -148,7 +148,11 @@ function findStars(lum: Float32Array, W: number, H: number, thresh: number, back
 }
 
 /** Quantitative look at an image: exposure, focus, star quality, tracking. */
-export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis {
+/**
+ * `plateScaleArcsecPerPx` is the scale of this image's pixels when the caller knows it (a Seestar's
+ * optics); without it the lens table of FOV_DEG (the Dwarf's lenses) stands in.
+ */
+export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide', plateScaleArcsecPerPx?: number): Analysis {
   const lum = luminance(img);
   const n = lum.length;
   const step = Math.max(1, Math.floor(n / STATS_SAMPLES));
@@ -197,7 +201,7 @@ export function analyze(img: FloatImage, cameraHint?: 'tele' | 'wide'): Analysis
   const found = flat ? [] : findStars(lum, img.width, img.height, median + STAR_SIGMA * sigma, median);
   const med = (arr: number[]) => (arr.length ? middle(arr) : undefined);
   const camera = cameraHint ?? img.camera;
-  const plate = camera ? imagePlateScale(img, camera) : undefined;
+  const plate = plateScaleArcsecPerPx ?? (camera ? imagePlateScale(img, camera) : undefined);
   const medHfr = med(found.slice(0, MEDIAN_STARS).map((s) => s.hfr));
   const medRound = med(found.slice(0, MEDIAN_STARS).map((s) => s.round));
 

@@ -109,8 +109,8 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
     return text('connecting; check seestar_status in a few seconds');
   });
 
-  tool('seestar_disconnect', 'Release the Seestar: close every link and, over ZWO Telescope Network, hand the session back (the tunnel releases it with stop_p2p, so the scope leaves OCCUPIED and the official app can take it). It stays released, across restarts, until seestar_connect.', {}, async () => {
-    scope.release();
+  tool('seestar_disconnect', 'Release the Seestar: stop a running view (what it stacked is kept), close every link and, over ZWO Telescope Network, hand the session back so the scope leaves OCCUPIED and the official app can take it. It stays released, across restarts, until seestar_connect.', {}, async () => {
+    await scope.release();
     return text('released');
   });
 
@@ -188,11 +188,21 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
     return json(await scope.stopView());
   });
 
+  const NUDGE_DIRECTIONS: Record<string, number> = { right: 0, 'up-right': 45, up: 90, 'up-left': 135, left: 180, 'down-left': 225, down: 270, 'down-right': 315 };
   tool(
     'nudge',
-    `Move the mount by hand: direction as an angle (0 right, 90 up, 180 left, 270 down), speed (240 ≈ 1°/s, max ${NUDGE_MAX_SPEED}) for up to ${NUDGE_MAX_S} s.`,
-    { angle_deg: z.number(), speed: z.number().min(1).max(NUDGE_MAX_SPEED).optional(), seconds: z.number().gt(0).max(NUDGE_MAX_S) },
-    async ({ angle_deg, speed, seconds }) => json(await scope.nudge(angle_deg, speed ?? 240, seconds)),
+    `Move the mount by hand: direction (up/down/left/right/up-left/…) or angle_deg (0 right, 90 up, 180 left, 270 down), speed (240 ≈ 1°/s, max ${NUDGE_MAX_SPEED}, default 240) for up to ${NUDGE_MAX_S} s. The live view keeps streaming through the move.`,
+    {
+      direction: z.enum(['up', 'down', 'left', 'right', 'up-left', 'up-right', 'down-left', 'down-right']).optional(),
+      angle_deg: z.number().optional(),
+      speed: z.number().min(1).max(NUDGE_MAX_SPEED).optional(),
+      seconds: z.number().gt(0).max(NUDGE_MAX_S),
+    },
+    async ({ direction, angle_deg, speed, seconds }) => {
+      const angle = angle_deg ?? (direction ? NUDGE_DIRECTIONS[direction] : undefined);
+      if (angle === undefined) throw new Error('give direction or angle_deg');
+      return json(await scope.nudge(angle, speed ?? 240, seconds));
+    },
   );
 
   tool('park', 'Park the Seestar (close the arm); blocks until it reports parked.', {}, async () => json(await scope.park()));
@@ -268,7 +278,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
       const lines: string[] = [];
       if (a.analyze !== false) {
         const scale = camera === 'tele' ? plateScale(image.frameWidth ?? image.width) : undefined;
-        const an = analyze(image);
+        const an = analyze(image, camera, scale);
         const hfr = an.stars.medianHfrPx;
         const sharp = starSharpness(image, { arcsecPerPx: scale });
         lines.push(
@@ -351,7 +361,17 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
   tool(
     'raw_rpc',
     'Send any JSON-RPC method to the Seestar and return its reply as sent (code, result, error). For methods the other tools do not cover, e.g. get_device_state, get_setting, get_view_state, iscope_get_app_state, get_stack_info, get_albums.',
-    { method: z.string().min(1), params: z.unknown().optional(), timeout_s: z.number().positive().max(300).optional() },
-    async ({ method, params, timeout_s }) => json(await scope.raw(method, params, timeout_s ? timeout_s * 1000 : undefined)),
+    { method: z.string().min(1), params: z.unknown().optional().describe('the method\'s params as a JSON value (an object for most methods), not as a string'), timeout_s: z.number().positive().max(300).optional() },
+    async ({ method, params, timeout_s }) => {
+      // a params object that arrived as its JSON text (the scope answers "expected object param" to a string)
+      if (typeof params === 'string' && /^\s*[[{]/.test(params)) {
+        try {
+          params = JSON.parse(params);
+        } catch {
+          /* not JSON: sent as the string it is */
+        }
+      }
+      return json(await scope.raw(method, params, timeout_s ? timeout_s * 1000 : undefined));
+    },
   );
 }

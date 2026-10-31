@@ -26,6 +26,12 @@ const NAMED_HEADER_BYTES = 34;
 const HEARTBEAT_MS = 4000;
 /** a raw 4K stack is ~50 MB and takes ~30 s over Wi-Fi; a tunnel is slower still */
 const GRAB_TIMEOUT_MS = 120_000;
+/** a begin_streaming the scope answered by closing the socket (its view still starting) is sent again after this */
+const EARLY_CLOSE_RETRY_MS = 3000;
+/** a live streaming connection that pushes nothing for this long is dropped and dialled again */
+const STREAM_SILENCE_MS = 60_000;
+const STREAM_MAX_BACKOFF_MS = 30_000;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const CONNECT_TIMEOUT_MS = 8000;
 /** close an image socket nobody has used for this long */
 const IDLE_CLOSE_MS = 60_000;
@@ -33,6 +39,9 @@ const IDLE_CLOSE_MS = 60_000;
 const MAX_PAYLOAD_BYTES = 200 * 1024 * 1024;
 
 export const IMG_TYPE = { ack: 0, preview: 1, jpegStack: 4, rawStack: 5 } as const;
+/** The start of a JPEG: what an image-socket payload must begin with to be usable as a picture
+ *  as it stands, rather than something the firmware wrapped (a 16-bit Bayer sub, a ZIP). */
+export const JPEG_SOI = Buffer.from([0xff, 0xd8]);
 
 export interface FrameHeader {
   version: number;
@@ -220,21 +229,26 @@ export async function frameImage(f: Frame, camera: 'tele' | 'wide'): Promise<Flo
     return { width: h.width, height: h.height, channels: 3, data, linear: true, source, capturedAt: f.at, header: { imageId: h.imageId, hfd: h.hfd } };
   }
   if (h.imgType === IMG_TYPE.preview) {
-    // one Bayer sub: binned 2×2 to luminance, which needs no knowledge of the pattern and keeps star shapes
+    // One Bayer sub, debayered 2×2 superpixel to half-resolution colour (both S50 Pro cameras report
+    // the GRBG pattern, "GR"): the stills and previews come out in colour, as the app shows them,
+    // and the binning keeps star shapes. Position 0 of each cell is G, 1 is R, 2 is B, 3 is G.
     const w = h.width >> 1;
     const ht = h.height >> 1;
     // ZIP-wrapped on an S50 Pro with firmware 9.75 (entry "raw_data")
     const payload = framePixels(f.payload, h.width * h.height * 2, `preview of ${f.payload.length} B is neither ${h.width}×${h.height}×2 nor ZIP`);
-    const data = new Float32Array(w * ht);
+    const data = new Float32Array(w * ht * 3);
     for (let y = 0; y < ht; y++) {
       const r0 = 2 * y * h.width;
       const r1 = r0 + h.width;
       for (let x = 0; x < w; x++) {
         const c = 2 * x;
-        data[y * w + x] = (payload.readUInt16LE((r0 + c) * 2) + payload.readUInt16LE((r0 + c + 1) * 2) + payload.readUInt16LE((r1 + c) * 2) + payload.readUInt16LE((r1 + c + 1) * 2)) / (4 * U16);
+        const o = (y * w + x) * 3;
+        data[o] = payload.readUInt16LE((r0 + c + 1) * 2) / U16;
+        data[o + 1] = (payload.readUInt16LE((r0 + c) * 2) + payload.readUInt16LE((r1 + c + 1) * 2)) / (2 * U16);
+        data[o + 2] = payload.readUInt16LE((r1 + c) * 2) / U16;
       }
     }
-    return { width: w, height: ht, channels: 1, data, linear: true, source, capturedAt: f.at, frameWidth: w, header: { imageId: h.imageId, hfd: h.hfd, binned: 2 } };
+    return { width: w, height: ht, channels: 3, data, linear: true, source, capturedAt: f.at, frameWidth: w, header: { imageId: h.imageId, hfd: h.hfd, binned: 2 } };
   }
   throw new Error(`frame type ${h.imgType} carries no image`);
 }
@@ -245,16 +259,46 @@ const wanted = (kind: GrabKind, t: number) => (kind === 'stacked' ? t === IMG_TY
 
 /**
  * One image socket, opened on demand and closed when idle. Events: 'frame' (Frame) for every image
- * frame (acks dropped), so a live view can follow begin_streaming.
+ * frame (acks dropped), from whichever connection it arrived on.
+ *
+ * Two ways to get a frame, after what the scope does with each command (S50 Pro, firmware 9.75):
+ *
+ *   get_stacked_img  - the stack as it stands. Fine to poll. Nothing at all comes back while the
+ *                      stack has no frame yet, so the caller checks the stack count first.
+ *   get_current_img  - the frame the firmware has CACHED. In a star view that is the one preview it
+ *                      kept when the view started (image id 65535): the same pixels come back for
+ *                      as long as the view runs, however many exposures the camera has made since.
+ *                      A night of "identical HFR every hour" and byte-identical photos came from it.
+ *   begin_streaming  - every exposure as it completes, pushed until stop_streaming. This is the
+ *                      app's own live view and the only command that yields the frame the camera is
+ *                      exposing NOW. A pushed frame is the full 16-bit sub (16.6 MB for the tele
+ *                      camera, unwrapped), so streaming is switched on for one frame and off again:
+ *                      left on through 1 s exposures it would push 16 MB/s down a tunnel.
+ *
+ * So a 'preview' grab is begin_streaming → the next pushed frame → stop_streaming, on a connection
+ * of its own that is dropped with it: exposures the scope queued behind the stop would otherwise
+ * arrive as the next grab's "fresh" frame. Callers that want a frame at the same time share the one
+ * being exposed. Stacked grabs use a separate, kept connection, so a live grab finishing never pulls
+ * the socket out from under a get_stacked_img that is waiting on it (it did: "closed before a
+ * stacked frame came" every time the video reader's grab landed).
  */
 export class SeestarImageStream extends SafeEmitter {
+  /** the kept connection, for get_stacked_img */
   private sock: net.Socket | null = null;
   private opening: Promise<net.Socket> | null = null;
   private heartbeat: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private nextId = 1;
-  private streaming = false;
+  /** the live frame being waited for, shared by everyone who asks for one meanwhile */
+  private live: Promise<Frame> | null = null;
+  private liveSock: net.Socket | null = null;
+  /** stacked grabs waiting on the kept connection */
+  private pending = 0;
   last: Frame | null = null;
+  /** continuous live streaming (the UI's video): wanted, its socket, and where to say how it goes */
+  private streamWanted = false;
+  private streamSock: net.Socket | null = null;
+  private streamNote: ((note: string | null) => void) | null = null;
 
   constructor(
     private host: string,
@@ -271,75 +315,235 @@ export class SeestarImageStream extends SafeEmitter {
     this.close();
   }
 
-  /** The next stacked (or preview) frame, requested from the scope. */
-  async grab(kind: GrabKind, timeoutMs = GRAB_TIMEOUT_MS): Promise<Frame> {
+  /**
+   * A frame from the scope: the stack as it stands, or the next exposure the camera completes
+   * (see above). A preview takes the rest of the running exposure plus the transfer, so the
+   * timeout has to cover the exposure length.
+   */
+  grab(kind: GrabKind, timeoutMs = GRAB_TIMEOUT_MS): Promise<Frame> {
+    if (kind === 'stacked') return this.stackedFrame(timeoutMs);
+    if (this.live) return this.live;
+    // while the live video streams continuously, a preview is simply the next frame it pushes
+    const live = (this.streamWanted ? this.nextStreamed(timeoutMs) : this.liveFrame(timeoutMs)).finally(() => {
+      if (this.live === live) this.live = null;
+    });
+    this.live = live;
+    return live;
+  }
+
+  private async stackedFrame(timeoutMs: number): Promise<Frame> {
     const sock = await this.connect();
+    this.pending++;
     this.touch();
+    try {
+      return await this.request(sock, 'get_stacked_img', 'stacked', timeoutMs);
+    } catch (e) {
+      // A socket that answered nothing, or died partway through a 50 MB frame, leaves its reader
+      // still waiting for the rest of that frame: every later grab on the same socket would then
+      // time out as well, which is how one hiccup turned into permanent "no frame". Drop it, so the
+      // next request dials a clean socket.
+      if (this.sock === sock) this.close();
+      throw e;
+    } finally {
+      this.pending--;
+    }
+  }
+
+  /** The next preview the live stream pushes. */
+  private nextStreamed(timeoutMs: number): Promise<Frame> {
+    return new Promise<Frame>((resolve, reject) => {
+      const done = (err: Error | null, f?: Frame) => {
+        clearTimeout(timer);
+        this.off('frame', onFrame);
+        if (err) reject(err);
+        else resolve(f!);
+      };
+      const onFrame = (f: Frame) => wanted('preview', f.header.imgType) && done(null, f);
+      const timer = setTimeout(() => done(new Error(`no preview frame from the Seestar's live stream within ${Math.round(timeoutMs / 1000)} s (is a view running, and is the exposure shorter than that?)`)), timeoutMs);
+      this.on('frame', onFrame);
+    });
+  }
+
+  /**
+   * Continuous live streaming: begin_streaming on a connection of its own, every exposure the camera
+   * completes pushed to the 'frame' event as it arrives, until stopStreaming(). The connection is
+   * dialled again whenever it closes while streaming is wanted (the scope closes it when its view
+   * ends or is still starting), with a backoff while nothing comes. One such stream per camera.
+   */
+  startStreaming(onNote: (note: string | null) => void = () => {}): void {
+    this.streamNote = onNote;
+    if (this.streamWanted) return;
+    this.streamWanted = true;
+    void this.runStreaming();
+  }
+
+  stopStreaming(): void {
+    this.streamWanted = false;
+    this.streamNote = null;
+    this.endStreamSock();
+  }
+
+  get streaming(): boolean {
+    return this.streamWanted;
+  }
+
+  private endStreamSock(): void {
+    const sock = this.streamSock;
+    this.streamSock = null;
+    if (!sock || sock.destroyed) return;
+    sock.write(`${JSON.stringify({ id: this.nextId++, method: 'stop_streaming' })}\r\n`, () => sock.end());
+    const t = setTimeout(() => sock.destroy(), 2000);
+    t.unref?.();
+    sock.once('close', () => clearTimeout(t));
+  }
+
+  private async runStreaming(): Promise<void> {
+    let quiet = 0; // connections in a row that pushed no frame
+    while (this.streamWanted) {
+      let frames = 0;
+      try {
+        const sock = await this.dial();
+        if (!this.streamWanted) {
+          sock.destroy();
+          break;
+        }
+        this.streamSock = sock;
+        let silence = setTimeout(() => sock.destroy(new Error(`nothing pushed for ${STREAM_SILENCE_MS / 1000} s`)), STREAM_SILENCE_MS);
+        silence.unref?.();
+        const onFrame = (f: Frame) => {
+          if (!wanted('preview', f.header.imgType)) return;
+          frames++;
+          quiet = 0;
+          this.streamNote?.(null);
+          clearTimeout(silence);
+          silence = setTimeout(() => sock.destroy(new Error(`nothing pushed for ${STREAM_SILENCE_MS / 1000} s`)), STREAM_SILENCE_MS);
+          silence.unref?.();
+        };
+        this.on('frame', onFrame);
+        sock.write(`${JSON.stringify({ id: this.nextId++, method: 'begin_streaming' })}\r\n`);
+        await new Promise<void>((resolve) => sock.once('close', () => resolve()));
+        clearTimeout(silence);
+        this.off('frame', onFrame);
+        if (this.streamSock === sock) this.streamSock = null;
+      } catch (e) {
+        this.streamNote?.(`no live frames: ${errMsg(e)}`);
+      }
+      if (!this.streamWanted) break;
+      if (!frames) quiet++;
+      const wait = frames ? EARLY_CLOSE_RETRY_MS : Math.min(EARLY_CLOSE_RETRY_MS * 2 ** quiet, STREAM_MAX_BACKOFF_MS);
+      log.info(`image socket ${this.port}: live streaming ended after ${frames} frame(s); dialling again in ${wait / 1000} s`);
+      if (!frames) this.streamNote?.(`the ${this.camera} camera pushed no frame on its image socket; asking again in ${wait / 1000} s`);
+      await sleep(wait);
+    }
+  }
+
+  private async liveFrame(timeoutMs: number): Promise<Frame> {
+    // The scope closes the image socket on a begin_streaming sent while its view is still starting
+    // (the seconds after iscope_start_view): that is not a dead port, so the request is dialled
+    // again a moment later, within the caller's time.
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const left = deadline - Date.now();
+      try {
+        return await this.liveFrameOnce(left);
+      } catch (e) {
+        if (!/closed before/.test(errMsg(e)) || deadline - Date.now() < EARLY_CLOSE_RETRY_MS * 3) throw e;
+        log.info(`image socket ${this.port}: closed before a frame (the view is starting?); asking again in ${EARLY_CLOSE_RETRY_MS / 1000} s`);
+        await new Promise((r) => setTimeout(r, EARLY_CLOSE_RETRY_MS));
+      }
+    }
+  }
+
+  private async liveFrameOnce(timeoutMs: number): Promise<Frame> {
+    const sock = await this.dial();
+    this.liveSock = sock;
+    try {
+      return await this.request(sock, 'begin_streaming', 'preview', timeoutMs);
+    } finally {
+      // stop, and let the connection go with its queue: the next grab dials a fresh one
+      if (this.liveSock === sock) this.liveSock = null;
+      if (!sock.destroyed) {
+        sock.write(`${JSON.stringify({ id: this.nextId++, method: 'stop_streaming' })}\r\n`, () => sock.end());
+        const t = setTimeout(() => sock.destroy(), 2000);
+        t.unref?.();
+        sock.once('close', () => clearTimeout(t));
+      }
+    }
+  }
+
+  /** `method` sent on `sock`, the next `kind` frame (from any connection) resolved. */
+  private request(sock: net.Socket, method: 'get_stacked_img' | 'begin_streaming', kind: GrabKind, timeoutMs: number): Promise<Frame> {
     return new Promise<Frame>((resolve, reject) => {
       const done = (err: Error | null, f?: Frame) => {
         clearTimeout(timer);
         this.off('frame', onFrame);
         sock.off('close', onClose);
-        if (!err) {
-          resolve(f!);
-          return;
-        }
-        // A socket that answered nothing, or died partway through a 6 MB frame, leaves its reader
-        // still waiting for the rest of that frame: every later grab on the same socket would then
-        // time out as well, which is how one hiccup turned into permanent "no preview frame". Drop
-        // it, so the next request dials a clean socket.
-        if (this.sock === sock) this.close();
-        reject(err);
+        if (err) reject(err);
+        else resolve(f!);
       };
       const onFrame = (f: Frame) => wanted(kind, f.header.imgType) && done(null, f);
       const onClose = () => done(new Error(`the image socket ${this.host}:${this.port} closed before a ${kind} frame came`));
-      const timer = setTimeout(() => done(new Error(`no ${kind} frame from the Seestar within ${Math.round(timeoutMs / 1000)} s (is it viewing or stacking?)`)), timeoutMs);
+      const timer = setTimeout(() => done(new Error(`no ${kind} frame from the Seestar within ${Math.round(timeoutMs / 1000)} s (${kind === 'stacked' ? 'is it stacking?' : 'is a view running, and is the exposure shorter than that?'})`)), timeoutMs);
       this.on('frame', onFrame);
       sock.once('close', onClose);
-      this.command(kind === 'stacked' ? 'get_stacked_img' : 'get_current_img');
+      sock.write(`${JSON.stringify({ id: this.nextId++, method })}\r\n`);
     });
   }
 
-  /** begin_streaming / stop_streaming: preview frames pushed as 'frame' events. */
-  async setStreaming(on: boolean): Promise<void> {
-    if (on) {
-      await this.connect();
-      this.streaming = true;
-      this.command('begin_streaming');
-    } else if (this.sock) {
-      this.command('stop_streaming');
-      this.streaming = false;
-      this.touch();
-    }
-  }
-
   close(): void {
-    this.streaming = false;
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.heartbeat = this.idleTimer = null;
     this.sock?.destroy();
     this.sock = null;
     this.opening = null;
+    this.liveSock?.destroy();
+    this.liveSock = null;
+    // the live stream's socket goes too; the streaming loop dials again if streaming is still wanted
+    this.streamSock?.destroy();
+    this.streamSock = null;
   }
 
-  private command(method: string): void {
-    this.sock?.write(`${JSON.stringify({ id: this.nextId++, method })}\r\n`);
-  }
-
+  /** Close the kept connection once nobody has used it for a while - never under a waiting grab
+   *  (a stacked frame takes longer than the idle time to arrive during a 60 s sub). */
   private touch(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (!this.streaming) this.close();
-      else this.touch();
+      if (this.pending) this.touch();
+      else this.close();
     }, IDLE_CLOSE_MS);
     this.idleTimer.unref?.();
   }
 
+  /** The kept connection, dialled when there is none. */
   private connect(): Promise<net.Socket> {
     if (this.sock && !this.sock.destroyed) return Promise.resolve(this.sock);
     if (this.opening) return this.opening;
-    this.opening = new Promise<net.Socket>((resolve, reject) => {
+    this.opening = this.dial().then(
+      (sock) => {
+        this.sock = sock;
+        this.opening = null;
+        const heartbeat = setInterval(() => sock.write(`${JSON.stringify({ id: this.nextId++, method: 'test_connection' })}\r\n`), HEARTBEAT_MS);
+        heartbeat.unref?.();
+        this.heartbeat = heartbeat;
+        sock.on('close', () => {
+          clearInterval(heartbeat);
+          if (this.heartbeat === heartbeat) this.heartbeat = null;
+          if (this.sock === sock) this.sock = null;
+        });
+        return sock;
+      },
+      (e) => {
+        this.opening = null;
+        throw e;
+      },
+    );
+    return this.opening;
+  }
+
+  /** A new connection to the image port, its frames fed to the 'frame' event. */
+  private dial(): Promise<net.Socket> {
+    return new Promise<net.Socket>((resolve, reject) => {
       const sock = this.connectFn(this.host, this.port);
       sock.setNoDelay?.(true);
       sock.setKeepAlive?.(true, 10_000);
@@ -348,32 +552,21 @@ export class SeestarImageStream extends SafeEmitter {
         this.last = f;
         this.emit('frame', f);
       });
+      let up = false;
       const timer = setTimeout(() => sock.destroy(new Error(`no answer from the image socket ${this.host}:${this.port}`)), CONNECT_TIMEOUT_MS);
       sock.on('data', (c: Buffer) => reader.push(c));
       sock.once('connect', () => {
         clearTimeout(timer);
-        this.sock = sock;
-        this.opening = null;
-        this.heartbeat = setInterval(() => this.command('test_connection'), HEARTBEAT_MS);
-        this.heartbeat.unref?.();
+        up = true;
         resolve(sock);
       });
       sock.on('error', (e) => {
         log.debug(`image socket ${this.port}: ${errMsg(e)}`);
-        if (this.opening) {
+        if (!up) {
           clearTimeout(timer);
-          this.opening = null;
           reject(new Error(`could not open the Seestar image socket ${this.host}:${this.port}: ${errMsg(e)}`));
         }
       });
-      sock.on('close', () => {
-        if (this.sock === sock) {
-          if (this.heartbeat) clearInterval(this.heartbeat);
-          this.heartbeat = null;
-          this.sock = null;
-        }
-      });
     });
-    return this.opening;
   }
 }

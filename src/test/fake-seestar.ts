@@ -1,7 +1,7 @@
 /**
  * A Seestar on loopback for the driver tests: the JSON-RPC control port (with the firmware 7.18+
  * handshake when a public key is given) and an image port that answers get_stacked_img /
- * get_current_img with whatever frame the test set.
+ * get_current_img / begin_streaming with whatever frame the test set.
  */
 import crypto from 'node:crypto';
 import net from 'node:net';
@@ -134,7 +134,8 @@ export class FakeSeestar {
         buf = buf.slice(nl + 1);
         this.calls.push({ method: `image:${m.method}`, params: undefined });
         s.write(`${JSON.stringify({ id: m.id, method: m.method, code: 0, result: 0 })}\r\n`);
-        const f = m.method === 'get_stacked_img' ? this.frames.stacked : m.method === 'get_current_img' ? this.frames.preview : undefined;
+        // begin_streaming pushes the exposures as they complete; here the one frame the test set
+        const f = m.method === 'get_stacked_img' ? this.frames.stacked : m.method === 'get_current_img' || m.method === 'begin_streaming' ? this.frames.preview : undefined;
         if (f) s.write(f);
       }
     });

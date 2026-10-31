@@ -19,7 +19,7 @@ import type { SeestarMedia } from './web.js';
 /** tele_visibility: what counts as stars in view (the Dwarf's thresholds) */
 const VISIBLE_MIN_STARS = 20;
 const VISIBLE_MAX_HFR_PX = 6;
-const MODES: Record<string, 'scenery' | 'star' | 'moon' | 'planet'> = { normal: 'scenery', dso: 'star', moon: 'moon', planet: 'planet' };
+const MODES: Record<string, 'star' | 'moon' | 'planet'> = { dso: 'star', moon: 'moon', planet: 'planet' };
 /** device_switches: the Dwarf's switch names and the Seestar settings they are */
 const SWITCHES: Record<string, { setting: string; on: unknown; off: unknown } | null> = {
   lens_defog: { setting: 'heater_enable', on: true, off: false },
@@ -261,11 +261,11 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'set_shooting_mode',
-    'Switch the view mode: Normal (daytime scenery: photos, video, timelapse), DSO (star mode: deep-sky stacking), Moon, Planet. Sun is refused remotely; Milky Way, Star Trail, Auto Tracking and Panorama are the Dwarf\'s.',
+    'Switch the view mode: DSO (star mode: deep-sky stacking, where every live frame and still comes from), Moon, Planet. Normal (daytime scenery) is out of scope for this astrophotography setup and Sun is refused remotely; Milky Way, Star Trail, Auto Tracking and Panorama are the Dwarf\'s.',
     { mode: z.string() },
     async ({ mode }) => {
       const m = MODES[mode.trim().toLowerCase()];
-      if (!m) throw new Error(`the Seestar has no ${mode} mode (Normal, DSO, Moon, Planet)`);
+      if (!m) throw new Error(`${mode} is not a mode this controller runs the Seestar in (DSO, Moon, Planet; the scenery view is out of scope for astrophotography)`);
       return text(await scope.setViewMode(m));
     },
   );

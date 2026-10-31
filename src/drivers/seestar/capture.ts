@@ -18,12 +18,14 @@ import type { MediaItem } from '../../library/device-library.js';
 import type { Source } from '../../media/stream/source.js';
 import { writeFileAtomic } from '../../util/fs.js';
 import type { Camera, Seestar } from './device.js';
-import { framePixels, IMG_TYPE } from './image-stream.js';
+import { autoStretch, toJpeg } from '../../media/images.js';
+import { type Frame, frameImage, framePixels, IMG_TYPE, JPEG_SOI } from './image-stream.js';
+import { SeestarCameraSource } from './video.js';
 
 const log = logger('seestar');
 
-const FRAME_TIMEOUT_MS = 20_000;
-const RAW_TIMEOUT_MS = 30_000;
+/** a live sub is the next exposure the camera completes (up to 30 s) plus its transfer */
+const RAW_TIMEOUT_MS = 45_000;
 export const BURST_MAX = 50;
 const TIMELAPSE_MIN_INTERVAL_S = 1;
 const TIMELAPSE_DEFAULT_INTERVAL_S = 5;
@@ -67,35 +69,58 @@ export class SeestarCapture {
 
   constructor(
     private readonly scope: Seestar,
+    /** the live preview of each camera: a still just taken is shown there too */
     private readonly stream: (camera: Camera) => Source,
   ) {}
+
+  /** The live preview shows the frame a still just took, so the UI follows the tools. */
+  private show(camera: Camera, jpeg: Buffer): void {
+    const live = this.stream(camera);
+    if (live instanceof SeestarCameraSource) live.offer(jpeg);
+  }
 
   private assertCanShoot(): void {
     if (!this.scope.state.connected) throw new Error('the Seestar is not connected');
     if (this.scope.state.mount.parked) throw new Error('the arm is parked: open it (Home) to take a photo');
   }
 
-  private async frame(camera: Camera): Promise<Buffer> {
-    await this.scope.ensureVideoView();
-    return (await this.stream(camera).snapshot(0, FRAME_TIMEOUT_MS)).jpeg;
+  /**
+   * A frame for a photo. In a star (astro) view it is the frame the camera is actually exposing,
+   * from the image socket: one Bayer sub at full resolution, so mono - the honest astro frame, and
+   * the night is spent in that view. It comes back raw as well, for the FITS beside the JPEG: one
+   * exposure, not two. Otherwise it is the live video's colour frame, which the wide camera serves
+   * in the Normal view only (the scope is put there and back for the shot).
+   */
+  private async frame(camera: Camera): Promise<{ jpeg: Buffer; raw?: Frame }> {
+    // Every still is the next exposure the camera completes in its star view, from its image
+    // socket: the tele's view, or the wide camera's (SecondView), which withCameraView opens for
+    // the frame and closes again. A JPEG (a stack's) goes through as it stands; the 16-bit Bayer
+    // sub is decoded and stretched the way every other frame the tools see is.
+    return this.scope.withCameraView(camera, `a ${camera} photo`, async () => {
+      if (camera === 'tele') {
+        const why = await this.scope.ensureLiveView(true);
+        if (why) throw new Error(`cannot take a tele photo: ${why}`);
+      }
+      const f = await this.scope.streams[camera].grab('preview', RAW_TIMEOUT_MS);
+      const shot = f.payload.subarray(0, 2).equals(JPEG_SOI) ? { jpeg: f.payload } : { jpeg: await toJpeg(autoStretch(await frameImage(f, camera))), raw: f };
+      this.show(camera, shot.jpeg);
+      return shot;
+    });
   }
 
   /** One photo: the colour frame, and the raw Bayer frame beside it when the image socket has one. */
   async photo(camera: Camera): Promise<MediaItem & { rawPath?: string; note?: string }> {
     this.assertCanShoot();
     const at = new Date();
-    const jpeg = await this.frame(camera);
+    const { jpeg, raw } = await this.frame(camera);
     const file = photoPath('Seestar', camera, '.jpg', at);
     writeFileAtomic(file, jpeg);
     let rawPath: string | undefined;
     let note: string | undefined;
-    // the wide camera's image socket sends no raw frames outside its own stacking (S50 Pro, fw 9.75)
-    if (camera === 'wide') note = 'colour photo only: the wide camera gives no raw frame outside its own stacking';
-    else try {
-      const f = await this.scope.streams[camera].grab('preview', RAW_TIMEOUT_MS);
-      if (f.header.imgType === IMG_TYPE.preview) {
-        const { width, height } = f.header;
-        const px = framePixels(f.payload, width * height * 2, `raw frame of ${f.payload.length} B`);
+    if (raw && raw.header.imgType === IMG_TYPE.preview) {
+      try {
+        const { width, height } = raw.header;
+        const px = framePixels(raw.payload, width * height * 2, `raw frame of ${raw.payload.length} B`);
         const st = this.scope.state;
         rawPath = file.replace(/\.jpg$/, '.fit');
         writeFileAtomic(
@@ -103,18 +128,20 @@ export class SeestarCapture {
           bayerFits(px, width, height, {
             CREATOR: `ZWO ${st.device.model ?? 'Seestar'} via Astrocontroller`,
             IMAGETYP: 'Light',
-            'DATE-OBS': new Date(f.at).toISOString().replace('Z', ''),
+            'DATE-OBS': new Date(raw.at).toISOString().replace('Z', ''),
             BAYERPAT: 'GRBG',
             WIDECAM: 0,
             ...(st.focus.position !== undefined ? { FOCUSPOS: st.focus.position } : {}),
             ...(st.view.target ? { OBJECT: st.view.target } : {}),
           }),
         );
+      } catch (e) {
+        note = `the colour photo is saved; its raw frame could not be written (${errMsg(e)})`;
+        log.info(`photo: ${note}`);
       }
-    } catch (e) {
-      note = `the colour photo is saved; no raw frame came from the image socket (${errMsg(e)})`;
-      log.info(`photo: ${note}`);
-    }
+    } else if (camera === 'wide') note = 'colour photo only: the wide camera gives no raw frame outside its own stacking';
+    else if (this.scope.state.view.mode !== 'star') note = 'colour photo only: the raw frame comes from the image socket in an astro (star) view';
+    else note = 'colour photo only: no raw frame came from the image socket';
     return { fileName: path.basename(file), filePath: file, fileSize: jpeg.length, mediaType: 1, modificationTime: Math.round(at.getTime() / 1000), rawPath, note };
   }
 
@@ -124,7 +151,7 @@ export class SeestarCapture {
     const n = Math.max(1, Math.min(BURST_MAX, Math.round(count)));
     let dir = '';
     for (let i = 0; i < n; i++) {
-      const jpeg = await this.frame(camera);
+      const { jpeg } = await this.frame(camera);
       const file = photoPath('Burst', camera, '.jpg');
       writeFileAtomic(file, jpeg);
       dir = path.dirname(file);
@@ -148,7 +175,7 @@ export class SeestarCapture {
       const l = this.lapse;
       if (!l) return;
       try {
-        const jpeg = await this.frame(camera);
+        const { jpeg } = await this.frame(camera);
         fs.writeFileSync(path.join(l.dir, `${String(l.frames).padStart(5, '0')}.jpg`), jpeg);
         l.frames++;
       } catch (e) {
@@ -160,7 +187,7 @@ export class SeestarCapture {
     timer.unref();
     this.lapse = { camera, dir, frames: 0, intervalS: every, endsAt: totalS ? Date.now() + totalS * 1000 : null, timer, startedAt: Date.now() };
     void shoot();
-    return `Timelapse started: a ${camera} frame every ${every} s${totalS ? ` for ${Math.round(totalS / 60)} min` : ' until stopped'}`;
+    return `Timelapse started: a ${camera} frame every ${every} s${totalS ? ` for ${totalS < 60 ? `${Math.round(totalS)} s` : `${Math.round(totalS / 60)} min`}` : ' until stopped'}`;
   }
 
   timelapseStatus(): { running: boolean; frames?: number; intervalS?: number; camera?: Camera } {

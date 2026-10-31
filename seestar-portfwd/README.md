@@ -193,9 +193,20 @@ waiting for Docker to restart it.
 A tunnel that dies before it ever came up is restarted on the **same** session
 (`SEESTAR_TUNNEL_CONNECT_RETRIES`, `..._RETRY_S`), and the binary asks
 `Connect_Ex` again on the spot (`TUTK_CONNECT_TRIES`, `TUTK_CONNECT_PAUSE_S`):
-the first call routinely comes back `-42` or `-60` while the rendezvous server
-and the scope sort out who held the last session, and handing the session back
-to allocate a new one is what makes the next call fail too.
+the first call routinely comes back `-42` (`IOTC_ER_FAIL_SETUP_RELAY`) or `-60`
+(`IOTC_ER_MASTER_NOT_RESPONSE`) while the rendezvous server and the scope sort
+out who held the last session, and handing the session back to allocate a new
+one is what makes the next call fail too. Before every retry the binary does
+what the app's `sanitizeBeforeConnect` does — `P2PTunnelAgent_Connect_Stop`
+and `IOTC_ReInitSocket(0)`, a fresh UDP socket for the next hole punch. A call that
+is going to work answers in 6–30 s, one that is not blocks for 60–80 s (the T
+SDK does not honour `IOTC_Setup_P2PConnection_Timeout`, so there is no knob).
+
+**The backend hears about every session** the way the official app tells it
+(`POST /v1/device-log/report`): `p2pConnectStart` once `online-link` has handed
+the session out, `p2pConnectSucceed` the moment the tunnel is up,
+`p2pConnectFailed` with the SDK's code for a session given back without coming
+up, `p2pConnectCancel` for one abandoned because a disconnect came first.
 
 The account API's `deviceStatus` is a hint, never a gate: whatever it claims — `SHOOTING`,
 `OFFLINE` — the supervisor still asks for the session and dials, because that field has been seen
@@ -231,11 +242,19 @@ path the record dies with the container and neither the conId nor the wish survi
 | `SEESTAR_TUNNEL_RETRY_MIN_S` / `_MAX_S` | `5` / `120` | the reconnect backoff |
 | `SEESTAR_TUNNEL_WATCHDOG_S` | `10` | how often the session is proven alive |
 | `SEESTAR_TUNNEL_LIVENESS_FAILS` | `3` | failed passes before a reconnect |
+| `SEESTAR_TUNNEL_STATUS_REFRESH_S` | `120` | while connected, re-read the scope's account status (ONLINE/SHOOTING/OCCUPIED) this often for `/status`; `0` = only at connect/release |
 | `SEESTAR_TUNNEL_STOP_GRACE_S` | `10` | SIGINT to SIGKILL for the tunnel |
 | `SEESTAR_TUNNEL_LOCK` | `/var/lib/seestar-portfwd/tunnel.lock` | the one-session lock |
 | `SEESTAR_TUNNEL_STATE` | `/var/lib/seestar-portfwd/session.json` | the conId until it is released |
 | `SEESTAR_TUNNEL_CONNECT_RETRIES` / `_RETRY_S` | `2` / `3` | restarts on the same session when the tunnel dies before it came up |
-| `TUTK_CONNECT_TRIES` / `TUTK_CONNECT_PAUSE_S` | `3` / `3` | the tunnel binary's own `Connect_Ex` retries |
+| `TUTK_CONNECT_TRIES` / `TUTK_CONNECT_PAUSE_S` | `1` / `3` | the tunnel binary's own `Connect_Ex` retries inside one process; every connect that worked (12/12, 2026-10-30) was a process's first try, a retry in the same process kept asking the P2P server that had not answered, so the supervisor's fresh-process redials do the retrying |
+| `TUTK_TCP_RELAY_ONLY` | `0` | asks the SDK for its TCP relay mode before init (`IOTC_TCPRelayOnly_TurnOn`); `0` leaves the default |
+| `DNSHOOK_ALL_ADDRS` | `0` | `1` hands the SDK every A record of the TUTK master instead of the first (it fared worse) |
+| `DNSHOOK_PROBE` | `1` | the TUTK master name resolves round-robin to five servers and one of them never answers from some networks (every dial that drew it was a -60 after 77 s): the shim probes them in parallel with a TCP connect to `DNSHOOK_PROBE_PORT` (80) and hands the SDK the fastest one that answered; `0` hands it whatever the resolver listed first |
+| `DNSHOOK_PROBE_MS` | `1500` | how long the probe waits for the servers to answer |
+| `DNSHOOK_PREFER` | empty | comma-separated addresses to put first among the servers that answered the probe |
+| `TUTK_LOG_DIR` | `/tmp/tutk` | where the SDK writes its own verbose log; after a refused `Connect_Ex` the tunnel prints the newest 300 lines of it (handshake chatter filtered, prefixed `[sdk]`) and keeps the full file of that try as `<name>.<try>` |
+| `TUTK_LOG_LEVEL` | `0` | passed to the SDK's `*_Set_Log_Attr` (which this SDK build refuses); the `*_Set_Log_Path` fallback logs at full verbosity regardless |
 | `TUTK_HOLD_SECONDS` | `86400` | how long the tunnel holds a session before exiting on its own |
 
 `python3 src/supervisor.py --status` (and `--health`, which the image's

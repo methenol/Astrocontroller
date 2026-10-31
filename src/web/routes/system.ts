@@ -41,7 +41,7 @@ export function systemRoutes(ctx: WebContext, onHostChanged: () => void): Router
         return { released: false };
       }
       const cancelled = library.cancelActiveJobs();
-      scope.release();
+      await scope.release();
       scope.hub.release();
       duty.event('the user released the telescope (Disconnect in the web UI): no telescope commands until they press Connect', true);
       return { released: true, cancelledTransfers: cancelled };

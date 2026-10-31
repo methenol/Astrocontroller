@@ -12,7 +12,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { deviceLibrary } from '../../library/device-library.js';
 import * as library from '../../library/transfer.js';
-import { analyze, crop as cropImage, decode, type FloatImage } from '../../media/images.js';
+import { analyze, autoStretch, crop as cropImage, decode, type FloatImage, toJpeg } from '../../media/images.js';
 import { resolveLocalPath } from '../../media/image/load.js';
 import { cropArg, capturedLine, imageResult, localTime, text, type ToolFn } from '../../mcp/tools/common.js';
 import { median } from '../../util/stats.js';
@@ -21,10 +21,12 @@ import type { Seestar } from './device.js';
 import { measureSeestar, seestarFocusSweep } from './focus.js';
 import { NOMINAL_FOV } from './mcp.js';
 import type { SeestarMedia } from './web.js';
+import { JPEG_SOI } from './image-stream.js';
+import { SeestarCameraSource } from './video.js';
 
 const DEVICE_FILE_MAX_BYTES = 64 * 1024 * 1024;
-/** a cold RTSP connection through the ZWO tunnel takes up to ~30 s to its first frame */
-const FRAME_TIMEOUT_MS = 40_000;
+/** the rest of the running exposure (up to 30 s) and a 16.6 MB raw sub through the ZWO tunnel */
+const RAW_TIMEOUT_MS = 45_000;
 const FITS_HEADER_KEYS = /EXPTIME|EXPOSURE|GAIN|DATE|OBJECT|^RA$|^DEC$|CCD-TEMP|FILTER|BAYER|TELESCOP|FOCALLEN|FOCUSPOS|WIDECAM/;
 const MEDIA_TYPES: Record<string, number> = { all: 0, photo: 1, video: 2, astro: 4 };
 const TYPE_NAMES: Record<number, string> = { 1: 'photo', 2: 'video', 4: 'astro' };
@@ -34,11 +36,22 @@ const cameraArg = z.enum(['tele', 'wide']).describe('tele = the telephoto, wide 
 /** An image from any of the sources above. `encoded` is the original JPEG when there is one. */
 export async function seestarImage(source: string, scope: Seestar, media: SeestarMedia): Promise<{ img: FloatImage; encoded?: Buffer }> {
   if (source === 'tele' || source === 'wide') {
-    await scope.ensureVideoView();
-    const f = await media.hub.get(source).snapshot(0, FRAME_TIMEOUT_MS);
-    const img = await decode(f.jpeg, `seestar:${source}.jpg`);
-    img.capturedAt = f.at;
-    return { img, encoded: f.jpeg };
+    // the next exposure the camera completes in its star view, from its image socket (the wide
+    // camera's view is opened for the frame and closed again); never a stale cached frame
+    const camera = source === 'wide' ? 'wide' : 'tele';
+    return scope.withCameraView(camera, `a ${source} frame`, async () => {
+      if (camera === 'tele') {
+        const why = await scope.ensureLiveView(true);
+        if (why) throw new Error(`no ${source} frame: ${why}`);
+      }
+      const { image, frame } = await scope.grabImage(camera, 'preview', RAW_TIMEOUT_MS);
+      const encoded = frame.payload.subarray(0, 2).equals(JPEG_SOI) ? frame.payload : await toJpeg(autoStretch(image));
+      const img = frame.payload.subarray(0, 2).equals(JPEG_SOI) ? await decode(encoded, `seestar:${source}.jpg`) : image;
+      img.capturedAt = Date.now();
+      const live = media.hub.get(source);
+      if (live instanceof SeestarCameraSource) live.offer(encoded);
+      return { img, encoded };
+    });
   }
   if (source === 'stack' || source === 'preview') return { img: (await scope.grabImage('tele', source === 'stack' ? 'stacked' : 'preview')).image };
   if (source.startsWith('device:')) {
@@ -107,7 +120,7 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
       let { img } = await seestarImage(source, scope, media);
       if (crop) img = cropImage(img, crop);
       const tele = source === 'stack' || source === 'preview' || source === 'tele' || source.startsWith('device:');
-      return text({ captured: capturedLine(img) || undefined, plateScaleArcsecPerPx: tele ? +arcsecPerPx(img).toFixed(2) : undefined, ...analyze(img) });
+      return text({ captured: capturedLine(img) || undefined, ...analyze(img, undefined, tele ? arcsecPerPx(img) : undefined) });
     },
   );
 
@@ -134,8 +147,8 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
       for (const rel of names.slice(-(count ?? 3))) {
         const name = path.posix.basename(rel);
         const img = await decode(await album.fetch(`/SEESTAR/${rel}`, DEVICE_FILE_MAX_BYTES), name);
-        const a = analyze(img);
         const scale = arcsecPerPx(img);
+        const a = analyze(img, 'tele', scale);
         subs.push({
           file: name,
           sensorC: typeof img.header?.['CCD-TEMP'] === 'number' ? +(img.header['CCD-TEMP'] as number).toFixed(1) : undefined,

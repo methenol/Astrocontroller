@@ -53,9 +53,14 @@ services:
     # The supervisor inside keeps the P2P session up itself (it reconnects a lost one); Docker only
     # has to bring the container back after a crash or a reboot.
     restart: unless-stopped
-    # docker stop → SIGTERM: the supervisor stops the tunnel (SDK abort + disconnect) and releases
-    # the ZWO session with stop_p2p before exiting, which is also what the app's Disconnect asks for.
-    stop_grace_period: 20s
+    # docker stop → SIGTERM: the supervisor stops the tunnel (SDK abort + disconnect, which is all the
+    # official app's Disconnect does), waits for the scope to report itself free and sends the backend
+    # a stop_p2p for the session only when it does not.
+    # The grace has to cover that work: up to SEESTAR_TUNNEL_STOP_GRACE_S (75 s) for a child blocked
+    # inside Connect_Ex to come back out and tear its session down, plus the release retries. Kill it
+    # before that and the session stays allocated on the backend, holding the scope against every
+    # later Connect_Ex (-42) until it times out - so this is sized above the supervisor's own budget.
+    stop_grace_period: 180s
     # The supervisor keeps its session record here: the conId to give back and the controller's wish
     # that this connection be restored. On a container-local path it dies with the container, so an
     # image rebuild or a recreate would silently leave the scope released until somebody presses
@@ -75,6 +80,27 @@ services:
       SEESTAR_TUNNEL_CONTROL_PORT: ${SEESTAR_TUNNEL_CONTROL_PORT:-4710}
       # optional: both sides then require Authorization: Bearer <token>
       SEESTAR_TUNNEL_CONTROL_TOKEN: ${SEESTAR_TUNNEL_CONTROL_TOKEN:-}
+      # the tunnel's DNS shim logs every lookup (the TUTK master/relay servers it was handed);
+      # a few lines per connect, worth having when a Connect_Ex comes back -42/-60
+      DNSHOOK_DEBUG: ${SEESTAR_DNSHOOK_DEBUG:-1}
+      # 1 = give the SDK every A record of the TUTK master; off, because with the full list
+      # Connect_Ex answered -42 for half an hour straight (2026-10-30).
+      DNSHOOK_ALL_ADDRS: ${SEESTAR_DNSHOOK_ALL_ADDRS:-0}
+      # The master name resolves round-robin to five servers and one of them never answers from
+      # here (-60 after 77 s every time it was drawn, 2026-10-30): the shim probes them with a TCP
+      # connect to :80 and hands the SDK the fastest answering one. 0 turns the probe off.
+      DNSHOOK_PROBE: ${SEESTAR_DNSHOOK_PROBE:-1}
+      DNSHOOK_PROBE_MS: ${SEESTAR_DNSHOOK_PROBE_MS:-1500}
+      # comma-separated addresses to put first among the ones that answered (optional)
+      DNSHOOK_PREFER: ${SEESTAR_DNSHOOK_PREFER:-}
+      # 1 = carry the session over TUTK's TCP relay instead of a UDP hole punch; the punch does
+      # not work from behind a symmetric NAT (Connect_Ex -42/-60 for an hour, 2026-10-30).
+      TUTK_TCP_RELAY_ONLY: ${SEESTAR_TUTK_TCP_RELAY_ONLY:-0}
+      # IOTC_Setup_P2PConnection_Timeout seconds; 0 = not called (the T SDK did not honour 20)
+      TUTK_CONNECT_TIMEOUT_S: ${SEESTAR_TUTK_CONNECT_TIMEOUT_S:-0}
+      # the SDK's own log, dumped to the tunnel log after a refused Connect_Ex (level 0 = verbose)
+      TUTK_LOG_DIR: ${SEESTAR_TUTK_LOG_DIR:-/tmp/tutk}
+      TUTK_LOG_LEVEL: ${SEESTAR_TUTK_LOG_LEVEL:-0}
     # qemu/bionic's linker calls personality(), which the default seccomp profile blocks.
     security_opt:
       - seccomp:unconfined

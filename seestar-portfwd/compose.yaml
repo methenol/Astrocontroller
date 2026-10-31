@@ -34,6 +34,9 @@ services:
       - "127.0.0.1:32323:32323"  # ASCOM Alpaca
       - "127.0.0.1:4710:4710"    # the supervisor's control API (connect / disconnect / status)
     restart: "no"
+    # The supervisor needs room to stop the tunnel (SDK abort + disconnect) and answer stop_p2p for
+    # it; a container killed while that is in flight leaves the scope holding a session of ours.
+    stop_grace_period: 180s
     # The session record (the conId to give back, and the wish that the connection be restored when
     # the container comes back) has to outlive the container, or a restart drops a live session
     # without a trace and leaves the scope holding it.

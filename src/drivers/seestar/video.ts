@@ -11,9 +11,11 @@ import { logger, errMsg } from '../../log.js';
 import { passthroughFrames } from '../../media/stream/ffmpeg.js';
 import { JpegSplitter } from '../../media/stream/jpeg.js';
 import { Source } from '../../media/stream/source.js';
+import { autoStretch, toJpeg } from '../../media/images.js';
 import { displayJpeg } from '../../mcp/tools/common.js';
 import type { VideoHub } from '../../web/telescope.js';
 import type { Camera, Seestar } from './device.js';
+import { frameImage, IMG_TYPE, JPEG_SOI, type Frame } from './image-stream.js';
 import { TERMINAL_STATES } from './state.js';
 
 const log = logger('stream');
@@ -36,6 +38,13 @@ const NEVER_BACKOFF_MS = 20_000;
 const MAX_BACKOFF_MS = 5_000;
 /** Frames per second each reader decodes while both cameras share the tunnel's one session. */
 const GATE_FPS = 5;
+/** the rest of the running exposure (up to 30 s) and the transfer, for a wide frame on demand */
+const IMAGE_GRAB_MS = 45_000;
+/** The wide camera streams only in its own view, so each wide frame pauses the tele's view for
+ *  ~15 s: while the wide stream is watched and the scope is idle one is taken this often
+ *  (SEESTAR_WIDE_REFRESH_S); a viewer opening the wide stream gets one unless the last is newer than this. */
+const WIDE_REFRESH_MS = config.seestar.wideRefreshS * 1000;
+const WIDE_OPEN_FRESH_MS = 5 * 60_000;
 /** A reader told to stop is killed after this long. */
 const KILL_AFTER_MS = 3000;
 const STACK_POLL_MS = 5000;
@@ -114,12 +123,35 @@ export class SeestarCameraSource extends Source {
       this.tickTimer.unref();
     }
     this.tick();
+    if (this.camera === 'wide') void this.refreshWide(WIDE_OPEN_FRESH_MS);
   }
 
   protected stopSource(): void {
     if (this.tickTimer) clearInterval(this.tickTimer);
     this.tickTimer = null;
     this.stopReader();
+    this.stopStreaming();
+  }
+
+  /**
+   * The wide camera streams only in its own view, which the tele's night cannot share: a viewer
+   * opening the wide stream gets one fresh frame (the tele's view pauses for it and comes back)
+   * instead of whatever old picture was showing. A wide frame on demand is view_camera wide.
+   */
+  private refreshingWide = false;
+  private async refreshWide(maxAgeMs: number): Promise<void> {
+    const st = this.scope.state;
+    if (this.refreshingWide || !this.running || !st.connected || st.released || this.scope.busy || this.scope.isStacking() || this.scope.wideViewActive) return;
+    if (this.latest && Date.now() - this.latest.at < maxAgeMs) return;
+    if (st.view.mode !== 'star' || st.view.state !== 'working') return; // no view to pause: a tele viewer starts one
+    this.refreshingWide = true;
+    try {
+      await this.scope.withCameraView('wide', 'the wide live view', () => this.scope.grabImage('wide', 'preview', IMAGE_GRAB_MS));
+    } catch (e) {
+      this.note = `no wide frame: ${errMsg(e)}`;
+    } finally {
+      this.refreshingWide = false;
+    }
   }
 
   /** Reconnect now (the address changed, or the link came back). */
@@ -135,6 +167,7 @@ export class SeestarCameraSource extends Source {
     const st = this.scope.state;
     if (!st.connected || st.released) {
       this.stopReader();
+      this.stopStreaming();
       this.note = 'telescope disconnected; live video resumes when it reconnects';
       this.nextAttemptAt = 0;
       return;
@@ -150,6 +183,27 @@ export class SeestarCameraSource extends Source {
             (why) => why && (this.note = why),
             (e) => log.warn(`${this.name}: could not get a view for live video: ${errMsg(e)}`),
           );
+        // In the star view the scope serves no RTSP at all: the live video is the image socket's
+        // continuous stream, every exposure pushed as it completes (dialling a port nobody answers
+        // only competes with the telescope's commands). Each camera streams in its own star view:
+        // the tele's, or the wide camera's (SecondView) while a wide frame is being taken.
+        if (st.view.mode === 'star' || st.view.mode === 'none' || !st.view.mode) {
+          const wide = this.scope.wideViewActive;
+          if ((this.camera === 'wide') !== wide) {
+            this.stopStreaming();
+            this.note = this.camera === 'wide'
+              ? `the wide camera streams only in its own view: a wide frame is taken ${WIDE_REFRESH_MS ? `every ${Math.round(WIDE_REFRESH_MS / 1000)} s while the scope is idle` : 'when the wide stream is opened'} and by view_camera / take_photo wide; the live view is the tele`
+              : "the wide camera's view is running for a wide frame; the tele resumes when it is done";
+            if (this.camera === 'wide' && WIDE_REFRESH_MS) void this.refreshWide(WIDE_REFRESH_MS);
+          } else if (st.view.mode === 'star' && st.view.state === 'working') {
+            this.startStreaming();
+            const since = Date.now() - this.lastFrameAt;
+            if (this.lastFrameAt && since >= STALL_NOTE_MS * 3 && !this.note) this.note = `no live frame for ${Math.round(since / 1000)} s`;
+          } else this.stopStreaming(); // between views: the one being started streams once it runs
+          return;
+        }
+        // a moon or planet view carries RTSP (a video mode); "none" above is the gap between views
+        this.stopStreaming();
         this.connect();
       }
       return;
@@ -229,6 +283,60 @@ export class SeestarCameraSource extends Source {
     proc.on('exit', (code, signal) => onEnd(`ffmpeg exited (${code ?? signal})`));
   }
 
+  private streamOn = false;
+  private decoding = false;
+  private readonly onStreamFrame = (f: Frame) => void this.showFrame(f);
+
+  /** Live frames from this camera's image socket, continuously, until stopStreaming(). */
+  private startStreaming(): void {
+    if (this.streamOn) return;
+    this.streamOn = true;
+    const stream = this.scope.streams[this.camera];
+    stream.on('frame', this.onStreamFrame);
+    stream.startStreaming((note) => {
+      if (note) this.note = note;
+    });
+    log.info(`${this.name}: live video from the image socket (every exposure as it completes)`);
+  }
+
+  private stopStreaming(): void {
+    if (!this.streamOn) return;
+    this.streamOn = false;
+    const stream = this.scope.streams[this.camera];
+    stream.off('frame', this.onStreamFrame);
+    stream.stopStreaming();
+  }
+
+  /** A pushed exposure: the 16-bit Bayer sub (ZIP-wrapped on firmware 9.75) debayered and
+   *  stretched like the tools' frames; a JPEG (a stack's) goes through as it stands. A frame that
+   *  arrives while the previous one is still being converted is skipped: the next one shows. */
+  private async showFrame(f: Frame): Promise<void> {
+    if (!this.running || !this.streamOn || f.header.imgType !== IMG_TYPE.preview || this.decoding) return;
+    this.decoding = true;
+    try {
+      const jpeg = f.payload.subarray(0, 2).equals(JPEG_SOI) ? f.payload : await toJpeg(autoStretch(await frameImage(f, this.camera)));
+      if (!this.running || !this.streamOn) return;
+      if (!this.lastFrameAt || Date.now() - this.lastFrameAt > SILENCE_MS) log.info(`${this.name}: live frames are coming from the image socket`);
+      this.attempts = 0;
+      this.lastError = '';
+      this.note = null;
+      this.lastFrameAt = Date.now();
+      this.frame(jpeg);
+    } catch (e) {
+      this.note = `a live frame could not be shown: ${errMsg(e)}`;
+    } finally {
+      this.decoding = false;
+    }
+  }
+
+  /** One astro-view preview: the newest frame from the image socket, on the same path ffmpeg feeds. */
+  /** A frame a tool just took from this camera's image socket: the live preview shows it too. */
+  offer(jpeg: Buffer): void {
+    this.lastFrameAt = Date.now();
+    this.note = null;
+    this.frame(jpeg);
+  }
+
   private stopReader(): void {
     const proc = this.proc;
     if (!proc) return;
@@ -243,7 +351,7 @@ export class SeestarCameraSource extends Source {
   }
 
   override stallHint(): string {
-    return [this.note, this.lastError && `RTSP: ${this.lastError}`, 'The Seestar serves live video while a view runs; one is started for you when the arm is open.'].filter(Boolean).join(' ');
+    return [this.note, this.lastError && `RTSP: ${this.lastError}`, 'The Seestar pushes live frames while a star view runs; one is started for you when the arm is open.'].filter(Boolean).join(' ');
   }
 }
 

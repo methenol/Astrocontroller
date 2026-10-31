@@ -43,6 +43,10 @@ export const config = {
     wideImagePort: env.port('SEESTAR_WIDE_IMAGE_PORT', 4804),
     rtspPort: env.port('SEESTAR_RTSP_PORT', 4554),
     wideRtspPort: env.port('SEESTAR_WIDE_RTSP_PORT', 4555),
+    /** While the wide live stream is watched and the scope is idle (no stack, no operation), a fresh wide frame is
+     *  taken this often: the wide camera streams only in its own view, so each one pauses the tele's view for ~15 s.
+     *  0 = only when the wide stream is opened. */
+    wideRefreshS: env.num('SEESTAR_WIDE_REFRESH_S', 60, { min: 0, max: 3600 }),
     /** seestar-portfwd publishes the device's port 80 as 8080 on the host; on the Docker network it is 80 */
     httpPort: env.port('SEESTAR_HTTP_PORT', zwo && LOOPBACK.includes(seestarHost) ? 8080 : 80),
     /** PEM private key for the firmware 7.18+ handshake (extracted by you from the official app; never shipped here) */

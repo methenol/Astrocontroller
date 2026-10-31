@@ -40,7 +40,8 @@ const TWILIGHT_SUN_ALT = -6;
 export function skyVerdict(o: { blank: boolean; background: number; stars: number; sunAltDeg?: number; altitudeDeg?: number }): string {
   if (o.blank) return 'invalid frame (blank)';
   if (o.altitudeDeg !== undefined && o.altitudeDeg < 0) return `unknown: the scope points below the horizon (altitude ${Math.round(o.altitudeDeg)}°); raise it (pitch > 150) and check again`;
-  if (o.sunAltDeg !== undefined && o.sunAltDeg > TWILIGHT_SUN_ALT && o.stars < CLEAR_STARS) return `unknown: the Sun is ${o.sunAltDeg > 0 ? 'up' : 'only just set'} (${Math.round(o.sunAltDeg)}°), too bright for stars; check after dusk`;
+  // in daylight the detector counts edges, noise and glare as "stars": no star count is a sky reading then
+  if (o.sunAltDeg !== undefined && o.sunAltDeg > TWILIGHT_SUN_ALT) return `unknown: the Sun is ${o.sunAltDeg > 0 ? 'up' : 'only just set'} (${Math.round(o.sunAltDeg)}°), too bright for stars; check after dusk`;
   if (o.background > BRIGHT_BACKGROUND) return 'too bright (twilight, Moon glow or a lit cloud deck)';
   if (o.stars >= CLEAR_STARS) return 'clear';
   if (o.stars >= PARTLY_CLEAR_STARS) return 'partly clear / thin cloud';

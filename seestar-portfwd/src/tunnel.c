@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -142,6 +143,66 @@ static int hold_seconds(void) {
     return env_int("TUTK_HOLD_SECONDS", 86400, 1, 86400);
 }
 
+// The SDK's own log (TUTK_LOG_DIR, verbose) says which step of a connect failed: master login,
+// hole punch or relay. It is dumped to stdout after a refused Connect_Ex (newest 300 lines that
+// are not handshake chatter) and the full file of that try is kept next to it.
+struct log_attr { int level; const char *path; int file_max_size; int file_max_count; };
+static char g_log_dir[256];
+// Lines the SDK repeats every 100-200 ms that say nothing about why a connect failed.
+static int sdk_line_is_noise(const char *l) {
+    static const char *noise[] = {
+        "_IOTC_Send_Search", "SCHL", "MSG_P2P_REQUEST_RECORD", "UDPQueryDeviceInfoTaskCB",
+        "iotcRecordSendMasterHandshake", "ReleaseTunnelInfo", "Send MSG_P2P_KNOCK",
+        "MSG_P2P_KNOCK_RR", "Send broadcast", "PUBLIC KEY", "hwIDAQAB",
+    };
+    for (unsigned i = 0; i < sizeof(noise) / sizeof(noise[0]); i++)
+        if (strstr(l, noise[i])) return 1;
+    return 0;
+}
+
+static int g_dump_no;
+static void dump_sdk_logs(void) {
+    static const char *names[] = { "tutk_global.log", "tutk_iotc.log", "tutk_p2pTunnel.log" };
+    enum { KEEP = 300 };
+    g_dump_no++;
+    for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); n++) {
+        char path[512], kept[512];
+        snprintf(path, sizeof(path), "%s/%s", g_log_dir, names[n]);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        // the whole file of this try is kept as <name>.<try> (docker cp it out for a full read);
+        // the dump on stdout is the newest 300 lines that are not repeated handshake chatter
+        snprintf(kept, sizeof(kept), "%s/%s.%d", g_log_dir, names[n], g_dump_no);
+        FILE *k = fopen(kept, "w");
+        char *lines[KEEP] = { 0 };
+        int count = 0, total = 0;
+        char buf[512];
+        while (fgets(buf, sizeof(buf), f)) {
+            total++;
+            if (k) fputs(buf, k);
+            if (sdk_line_is_noise(buf)) continue;
+            free(lines[count % KEEP]);
+            lines[count % KEEP] = strdup(buf);
+            count++;
+        }
+        fclose(f);
+        if (k) fclose(k);
+        printf("[sdk] ---- %s (%d lines, %d shown; full copy %s)\n", names[n], total,
+               count > KEEP ? KEEP : count, kept);
+        for (int i = count > KEEP ? count - KEEP : 0; i < count; i++) {
+            char *l = lines[i % KEEP];
+            if (!l) continue;
+            size_t len = strlen(l);
+            while (len && (l[len - 1] == '\n' || l[len - 1] == '\r')) l[--len] = 0;
+            printf("[sdk] %s\n", l);
+        }
+        for (int i = 0; i < KEEP; i++) free(lines[i]);
+        // start the next attempt's log afresh so the dump stays about one attempt
+        FILE *t = fopen(path, "w");
+        if (t) fclose(t);
+    }
+}
+
 // A signal ends the hold loop so teardown runs before the process exits.
 static volatile sig_atomic_t g_stop;
 static void on_signal(int signo) { (void)signo; g_stop = 1; }
@@ -186,15 +247,68 @@ int main(void) {
     int (*tun_abort)(int, int) = sym(h_tunnel, "P2PTunnelAgent_Abort");
     int (*tun_disconnect)(int) = sym(h_tunnel, "P2PTunnelAgent_Disconnect");
     int (*tun_deinit)(void) = sym(h_tunnel, "P2PTunnelAgentDeInitialize");
+    // The app's sanitizeBeforeConnect: cancel a connect still in flight and reset the IOTC
+    // socket before every Connect_Ex, including a retry after a refusal.
+    int (*tun_connect_stop)(const char *) = sym(h_tunnel, "P2PTunnelAgent_Connect_Stop");
+    int (*reinit_socket)(int) = sym(h_iotc, "IOTC_ReInitSocket");
+    // Relay everything over TCP instead of punching UDP holes: the only mode that works from
+    // behind a symmetric NAT (the hole punch fails with -42/-60 there). Must be set before IOTC
+    // comes up, i.e. before the tunnel agent init.
+    void (*tcp_relay_only)(void) = sym(h_iotc, "IOTC_TCPRelayOnly_TurnOn");   // returns nothing
+    void (*connect_timeout)(unsigned) = sym(h_iotc, "IOTC_Setup_P2PConnection_Timeout");   // returns nothing
+    int (*nat_type)(void) = sym(h_iotc, "IOTC_Get_Nat_Type");
     if (!set_license || !alive || !tun_init2 || !tun_connect_ex || !port_mapping)
         return 1;
+
+    const char *log_dir = getenv("TUTK_LOG_DIR");
+    if (log_dir && *log_dir) {
+        snprintf(g_log_dir, sizeof(g_log_dir), "%s", log_dir);
+        mkdir(log_dir, 0755);
+        int (*glog)(struct log_attr) = sym(h_global, "TUTK_Set_Log_Attr");
+        int (*ilog)(struct log_attr) = sym(h_iotc, "IOTC_Set_Log_Attr");
+        int (*tlog)(struct log_attr) = sym(h_tunnel, "P2PTunnel_Set_Log_Attr");
+        static char p1[512], p2[512], p3[512];
+        snprintf(p1, sizeof(p1), "%s/tutk_global.log", log_dir);
+        snprintf(p2, sizeof(p2), "%s/tutk_iotc.log", log_dir);
+        snprintf(p3, sizeof(p3), "%s/tutk_p2pTunnel.log", log_dir);
+        struct log_attr a = { env_int("TUTK_LOG_LEVEL", 0, 0, 4), p1, 4 * 1024 * 1024, 1 };
+        int rg = glog ? glog(a) : -999;
+        a.path = p2; int ri = ilog ? ilog(a) : -999;
+        a.path = p3; int rt = tlog ? tlog(a) : -999;
+        // the older entry points, in case the attribute struct is not what this build expects
+        int (*ipath)(const char *, int) = sym(h_iotc, "IOTC_Set_Log_Path");
+        int (*tpath)(const char *, int) = sym(h_tunnel, "P2PTunnelAgent_Set_Log_Path");
+        int rip = ipath ? ipath(p2, 4 * 1024 * 1024) : -999;
+        int rtp = tpath ? tpath(p3, 4 * 1024 * 1024) : -999;
+        printf("[*] SDK log in %s (level %d): attr global %d iotc %d tunnel %d; path iotc %d tunnel %d\n",
+               log_dir, a.level, rg, ri, rt, rip, rtp);
+    }
 
     // Init order mirrors the app's TutkConnectionEngine (license -> keepalive
     // -> tunnel agent); doing it differently makes the tunnel layer fail.
     if (set_license(lic) != 0) { fprintf(stderr, "[!] license rejected\n"); return 1; }
     alive(30);
+    // A Connect_Ex that is going to work answers in 6-30 s; one the rendezvous cannot complete
+    // (-42 IOTC_ER_FAIL_SETUP_RELAY, -60 IOTC_ER_MASTER_NOT_RESPONSE) otherwise blocks for
+    // 60-80 s before the retry that usually succeeds. The app leaves the SDK default; 0 keeps it.
+    // A refused rendezvous blocks 60-77 s per try: the SDK keeps asking a P2P server that does not
+    // answer from here until its own timeout. IOTC_Setup_P2PConnection_Timeout(20) did not shorten
+    // that (a refused try still took 62 s, 2026-10-30), so the default leaves it alone (0).
+    int connect_s = env_int("TUTK_CONNECT_TIMEOUT_S", 0, 0, 120);
+    if (connect_s && connect_timeout) {
+        connect_timeout((unsigned)connect_s);
+        printf("[*] P2P connect timeout asked: %d s\n", connect_s);
+    }
+    // IOTC_TCPRelayOnly_TurnOn makes the SDK mark its UDP punch "skip" as soon as the P2P server's
+    // PUNCH_TO arrives: the scope's KNOCK_R2 then comes back within a second and is thrown away
+    // ("SID status wrong", UDPP2PConnectState[-1]), and the TCP relay it waits for instead never
+    // answers from here (-42 after 62 s). The connects that still worked were the ones where the
+    // scope's own KNOCK got through first (KNOCK_RR2 path). Default off (2026-10-30 SDK logs).
+    if (env_int("TUTK_TCP_RELAY_ONLY", 0, 0, 1) && tcp_relay_only) {
+        tcp_relay_only();
+        printf("[*] asked for TCP relay (IOTC_TCPRelayOnly_TurnOn)\n");
+    }
     if (tun_init2(4, 1) != 0) { fprintf(stderr, "[!] tunnel init failed\n"); return 1; }
-
     int nchan = 1;   // one session: every port on it
     int chan_sid[2] = { -1, -1 };
 
@@ -203,14 +317,36 @@ int main(void) {
     // same call a few seconds later comes straight up in seconds. Asking again here keeps the
     // session we were given; handing it back and allocating a new one is what keeps the -42s coming.
     printf("[*] opening tunnel to %.4s... (%d sessions)\n", uid, nchan);
-    int tries = env_int("TUTK_CONNECT_TRIES", 3, 1, 6);
+    // Every connect that worked today was a process's first Connect_Ex (12 of 12, 2026-10-30); a
+    // retry inside the same process kept asking the same P2P server that had not answered. So one
+    // try per process by default, and the supervisor dials again with a fresh one.
+    int tries = env_int("TUTK_CONNECT_TRIES", 1, 1, 6);
     int pause_s = env_int("TUTK_CONNECT_PAUSE_S", 3, 0, 60);
     for (int i = 0; i < nchan; i++) {
+        int busy_retry = 0;   // the app's one quick retry on -30002 (local port in use)
         for (int try_ = 1; try_ <= tries && !g_stop; try_++) {
+            // the app sanitises before every Connect_Ex: stop a connect still in flight (a
+            // retry's predecessor), then reset the IOTC socket
+            if (try_ > 1 && tun_connect_stop) {
+                int r = tun_connect_stop(uid);
+                printf("    Connect_Stop before retry %d: %d\n", try_, r);
+            }
+            if (reinit_socket) {
+                int r = reinit_socket(0);
+                if (r != 0) printf("    IOTC_ReInitSocket: %d\n", r);
+            }
             chan_sid[i] = tun_connect_ex(uid, tunnel_auth_cb, NULL);
             if (chan_sid[i] >= 0) break;
+            if (chan_sid[i] == -30002 && !busy_retry && !g_stop) {
+                busy_retry = 1;
+                fprintf(stderr, "[!] Connect_Ex failed: -30002 (local port busy, retrying)\n");
+                usleep(250 * 1000);
+                try_--;
+                continue;
+            }
             fprintf(stderr, "[!] Connect_Ex failed: %d%s\n", chan_sid[i],
                     try_ < tries && !g_stop ? " (retrying)" : "");
+            if (g_log_dir[0]) dump_sdk_logs();
             for (int s = 0; s < pause_s && !g_stop; s++) sleep(1);
         }
         if (chan_sid[i] < 0) {
@@ -219,6 +355,7 @@ int main(void) {
             break;
         }
         if (check_ex) print_mode(check_ex, chan_sid[i]);
+        if (nat_type) printf("    our NAT type (SDK): %d\n", nat_type());
     }
 
     // Map each port onto its channel; a single failure is reported, not fatal.

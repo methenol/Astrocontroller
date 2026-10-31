@@ -202,7 +202,11 @@ export function applyEvent(st: SeestarState, e: SeestarEvent): void {
       st.mount.tracking = bool(e.tracking) ?? st.mount.tracking;
       break;
     case 'ScopeHome':
-      if (state === 'complete') st.mount.parked = bool(e.close) ?? true;
+    case 'ScopeMoveToHorizon':
+      // the arm is parked when the firmware says so (mount.close): the app takes `close` from the
+      // event when it carries one and keeps what it had otherwise; the event's name alone does
+      // not tell (a ScopeHome without `close` is not "closed", 2026-10-30 the arm was open)
+      st.mount.parked = bool(e.close) ?? st.mount.parked;
       if (bool(e.equ_mode) !== undefined) st.mount.eqMode = bool(e.equ_mode);
       break;
     case 'ScopeGoto':
@@ -229,6 +233,7 @@ export function busyWith(st: SeestarState): string | null {
   };
   if (running('AutoGoto')) return 'goto';
   if (running('ScopeHome')) return 'parking';
+  if (running('ScopeMoveToHorizon')) return 'opening the arm';
   if (running('AutoFocus')) return 'autofocus';
   if (running('3PPA')) return 'polar alignment';
   if (running('DarkLibrary')) return 'dark library';

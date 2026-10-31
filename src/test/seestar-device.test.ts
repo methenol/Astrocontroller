@@ -167,6 +167,95 @@ describe('Seestar device', () => {
     assert.equal(frame.header.imageId, 3);
     assert.deepEqual([image.width, image.height, image.channels], [2, 2, 3]);
   });
+
+  test('a view the scope already runs is left alone by the readers, even right after connecting', async () => {
+    // a controller restart during a star view started a scenery view over it: the readers asked for
+    // a view before the first state read had landed, and an unread state looks like no view at all
+    fake.on('iscope_get_app_state', () => ({ result: { View: { state: 'working', mode: 'star', stage: 'ContinuousExposure' } } }));
+    fake.on('get_device_state', () => ({ result: { device: { name: 'S50 Pro', product_model: 'Seestar S50 Pro', focal_len: 260 }, camera: { chip_size: [2160, 3840], pixel_size_um: 2.9 }, mount: { equ_mode: true, close: false }, focuser: { step: 1000, max_step: 2600 } } }));
+    scope.start();
+    await until(() => scope.state.connected);
+    const why = await scope.ensureLiveView();
+    assert.equal(why, null);
+    assert.equal(scope.state.view.mode, 'star');
+    assert.ok(!fake.methods().includes('iscope_start_view'), `a view was started over the running one: ${fake.methods().join(', ')}`);
+  });
+
+  test('a scenery view left running by an earlier session is stopped on connect: this controller never runs one', async () => {
+    let view: Record<string, unknown> = { state: 'working', mode: 'scenery', stage: 'RTSP' };
+    fake.on('iscope_get_app_state', () => ({ result: { View: view } }));
+    fake.on('iscope_stop_view', () => {
+      view = { state: 'cancel', mode: 'scenery' };
+      return { result: 0 };
+    });
+    fake.on('get_device_state', () => ({ result: { device: { name: 'S50 Pro', product_model: 'Seestar S50 Pro', focal_len: 260 }, camera: { chip_size: [2160, 3840], pixel_size_um: 2.9 }, mount: { equ_mode: true, close: false }, focuser: { step: 1000, max_step: 2600 } } }));
+    await connected();
+    await until(() => fake.methods().includes('iscope_stop_view'));
+    assert.equal(scope.state.view.state, 'cancel');
+    assert.ok(!fake.methods().includes('iscope_start_view'), `a view was started: ${fake.methods().join(', ')}`);
+    // the live view a viewer asks for is the star view, never scenery, whatever the time of day
+    await scope.startView();
+    const starts = fake.calls.filter((c) => c.method === 'iscope_start_view').map((c) => c.params as { mode: string });
+    assert.deepEqual(starts.map((p) => p.mode), ['star']);
+  });
+
+  test("a wide frame comes from the wide camera's star view (SecondView), and the tele's star view comes back", async () => {
+    let view: Record<string, unknown> = { state: 'working', mode: 'star', stage: 'ContinuousExposure' };
+    fake.on('iscope_get_app_state', () => ({ result: { View: view } }));
+    fake.on('iscope_stop_view', () => {
+      view = { state: 'cancel', mode: 'star' };
+      return { result: 0 };
+    });
+    fake.on('iscope_start_view', (params: unknown) => {
+      view = { state: 'working', mode: (params as { mode: string }).mode, stage: 'ContinuousExposure' };
+      return { result: 0 };
+    });
+    await connected(); // the star view found running is adopted (it is the live stream) and comes back after the wide frame
+    await until(() => scope.state.view.state === 'working');
+    const px = Buffer.alloc(2 * 2 * 2, 0x40);
+    fake.frames.preview = Buffer.concat([encodeHeader({ imgType: IMG_TYPE.preview, length: px.length, width: 2, height: 2, imageId: 7 }), px]);
+    assert.equal(scope.wideViewActive, false);
+    await assert.rejects(scope.grabImage('wide', 'preview', 500), /wide camera's view/);
+    const { frame } = await scope.withCameraView('wide', 'a test frame', async () => {
+      assert.equal(scope.wideViewActive, true);
+      return scope.grabImage('wide', 'preview', 2000);
+    });
+    assert.equal(frame.header.imageId, 7);
+    assert.equal(scope.wideViewActive, false);
+    const starts = fake.calls.filter((c) => c.method === 'iscope_start_view').map((c) => c.params as { mode: string; selected_cam?: string });
+    assert.deepEqual(starts, [
+      { mode: 'star', selected_cam: 'SecondView', lp_filter: false },
+      { mode: 'star', lp_filter: false },
+    ]);
+    assert.equal(scope.state.view.mode, 'star');
+  });
+  test('the readers wait for a view change in flight instead of starting a view of their own', async () => {
+    // iscope_start_view takes the scope seconds; a reader whose RTSP had just ended asked for a
+    // view meanwhile, and set_shooting_mode DSO ended with the scenery view it started on top
+    fake.on('get_device_state', () => ({ result: { device: { name: 'S50 Pro', product_model: 'Seestar S50 Pro', focal_len: 260 }, camera: { chip_size: [2160, 3840], pixel_size_um: 2.9 }, mount: { equ_mode: true, close: false }, focuser: { step: 1000, max_step: 2600 } } }));
+    let view: Record<string, unknown> = { state: 'working', mode: 'scenery', stage: 'RTSP' };
+    fake.on('iscope_get_app_state', () => ({ result: { View: view } }));
+    fake.on('iscope_stop_view', () => {
+      view = { state: 'cancel', mode: 'scenery' };
+      return { result: 0 };
+    });
+    fake.on('iscope_start_view', async (params: unknown) => {
+      await new Promise((r) => setTimeout(r, 150));
+      view = { state: 'working', mode: (params as { mode: string }).mode, stage: 'ContinuousExposure' };
+      return { result: 0 };
+    });
+    await connected();
+    await until(() => scope.state.view.mode === 'scenery');
+    const change = scope.setViewMode('star');
+    await new Promise((r) => setTimeout(r, 30)); // the stop has landed, the start is in flight
+    const why = await scope.ensureLiveView();
+    await change;
+    const starts = fake.calls.filter((c) => c.method === 'iscope_start_view');
+    assert.equal(starts.length, 1, `views started: ${JSON.stringify(starts.map((c) => c.params))}`);
+    assert.equal(scope.state.view.mode, 'star');
+    assert.equal(why, null);
+  });
+
 });
 
 describe('driver selection', () => {
@@ -179,6 +268,47 @@ describe('driver selection', () => {
     assert.equal((await loadDriver('dwarf')).id, 'dwarf');
   });
 });
+
+describe('Seestar view precedence', () => {
+  let fake: FakeSeestar;
+  let scope: Seestar;
+
+  beforeEach(async () => {
+    fake = new FakeSeestar();
+    fake.noHandshakeMethod = true;
+    await fake.listen();
+    fake.on('get_device_state', () => ({ result: { device: { name: 'S50 Pro' }, mount: { equ_mode: false, close: true } } }));
+    fake.on('iscope_get_app_state', () => ({ result: { View: { state: 'idle' } } }));
+    const connect = (_h: string, p: number) => net.connect({ host: '127.0.0.1', port: p === config.seestar.rpcPort ? fake.port : fake.imagePort });
+    scope = new Seestar({ host: '127.0.0.1', connection: 'local', connect, tunnel: null, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'seestar-view-')), link: { backoffMinMs: 50 } });
+    scope.start();
+    await until(() => scope.state.connected);
+  });
+
+  afterEach(async () => {
+    scope.stop();
+    await fake.close();
+  });
+
+  test('a wide still never stops an operation that took the scope while it was shooting', async () => {
+    // The wide camera's video runs in the Normal view only, and leaving that view is a stop_view -
+    // which stops whatever the view is doing. An agent that starts a focus run (a GoTo, a stack)
+    // while a still is being taken must not have it cancelled by the preview being put back.
+    let focus: Promise<unknown> | null = null;
+    const shot = await scope.withCameraView('wide', 'a test frame', async () => {
+      focus = scope.autofocus();
+      await new Promise((r) => setTimeout(r, 150)); // the focus command is in flight by now
+      return 'shot';
+    });
+    assert.equal(shot, 'shot');
+    assert.ok(fake.methods().includes('iscope_start_view'), 'the wide camera is served from the Normal view');
+    assert.ok(fake.methods().includes('start_auto_focuse'), 'the focus run started while the still was open');
+    fake.event({ Event: 'AutoFocus', state: 'complete', lapse_ms: 10 });
+    await focus;
+    assert.ok(!fake.methods().includes('iscope_stop_view'), `the preview stopped the operation: ${fake.methods().join(', ')}`);
+  });
+});
+
 
 describe('Seestar MCP tools', () => {
   test('register under the seestar server with their schemas', async () => {

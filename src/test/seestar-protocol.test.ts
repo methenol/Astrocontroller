@@ -195,14 +195,17 @@ describe('Seestar image stream', () => {
     assert.ok(Math.abs(img.data[1] - 1000 / 65535) < 1e-6);
   });
 
-  test('a preview sub is binned 2×2 to luminance; a JPEG stack decodes as display data', async () => {
+  test('a preview sub is debayered GRBG 2×2 to half-size colour; a JPEG stack decodes as display data', async () => {
     const w = 4;
     const h = 2;
     const px = Buffer.alloc(w * h * 2);
-    for (let i = 0; i < w * h; i++) px.writeUInt16LE(i < 2 || (i >= 4 && i < 6) ? 65535 : 0, i * 2);
+    // left cell: G=0 R=65535 / B=32768 G=16384 -> (1, 0.125, 0.5); right cell dark
+    const vals = [0, 65535, 0, 0, 32768, 16384, 0, 0];
+    vals.forEach((v, i) => px.writeUInt16LE(v, i * 2));
     const prev = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.preview, length: px.length, width: w, height: h }))!, payload: px, at: 5 }, 'tele');
-    assert.deepEqual([prev.width, prev.height, prev.channels], [2, 1, 1]);
-    assert.deepEqual([...prev.data].map((v) => +v.toFixed(3)), [1, 0]);
+    assert.deepEqual([prev.width, prev.height, prev.channels], [2, 1, 3]);
+    assert.deepEqual([...prev.data].map((v) => +v.toFixed(3)), [1, 0.125, 0.5, 0, 0, 0]);
+    assert.equal(prev.header?.binned, 2);
     const src: FloatImage = { width: 16, height: 8, channels: 1, data: new Float32Array(128).fill(0.5), linear: false, source: 't' };
     const jpeg = await toJpeg(src, 16);
     const img = await frameImage({ header: parseHeader(encodeHeader({ imgType: IMG_TYPE.jpegStack, length: jpeg.length }))!, payload: jpeg, at: 5 }, 'tele');
@@ -222,6 +225,54 @@ describe('Seestar image stream', () => {
       assert.equal(f.payload.length, payload.length);
       assert.ok(fake.methods().includes('image:get_stacked_img'));
       await assert.rejects(s.grab('preview', 200), /no preview frame/);
+    } finally {
+      s.close();
+      await fake.close();
+    }
+  });
+
+  test('a preview is the next exposure: begin_streaming, one frame, stop_streaming, and the socket let go', async () => {
+    // get_current_img answers with the frame the firmware cached when the view started - the same
+    // pixels all night; only streaming yields the exposure the camera is making now
+    const fake = new FakeSeestar();
+    await fake.listen();
+    const payload = Buffer.alloc(4 * 2 * 2, 0x20);
+    fake.frames.preview = frame(IMG_TYPE.preview, payload, 4, 2, 7);
+    const s = new SeestarImageStream('127.0.0.1', fake.imagePort, 'tele');
+    try {
+      const [a, b] = await Promise.all([s.grab('preview', 2000), s.grab('preview', 2000)]);
+      assert.equal(a.header.imageId, 7);
+      assert.equal(a, b, 'two callers waiting at once share the one exposure');
+      assert.equal(fake.methods().filter((m) => m === 'image:begin_streaming').length, 1);
+      assert.ok(!fake.methods().includes('image:get_current_img'), 'the cached frame was asked for');
+      await new Promise((r) => setTimeout(r, 100));
+      assert.ok(fake.methods().includes('image:stop_streaming'), 'streaming was left on');
+      const c = await s.grab('preview', 2000);
+      assert.equal(c.header.imageId, 7);
+      assert.equal(fake.methods().filter((m) => m === 'image:begin_streaming').length, 2, 'the next grab streams again');
+    } finally {
+      s.close();
+      await fake.close();
+    }
+  });
+
+  test('a live grab landing leaves a waiting stacked grab alone', async () => {
+    // the video reader's live grab drops its connection with the frame; a get_stacked_img that was
+    // waiting on the same socket then failed with "closed before a stacked frame came"
+    const fake = new FakeSeestar();
+    await fake.listen();
+    fake.frames.stacked = undefined; // a stack with no frame yet answers with nothing at all
+    fake.frames.preview = frame(IMG_TYPE.preview, Buffer.alloc(16, 0x20), 4, 2, 7);
+    const s = new SeestarImageStream('127.0.0.1', fake.imagePort, 'tele');
+    try {
+      let stackedError: Error | null = null;
+      const stacked = s.grab('stacked', 1200).catch((e: Error) => { stackedError = e; });
+      const live = await s.grab('preview', 2000);
+      assert.equal(live.header.imageId, 7);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(stackedError, null, 'the stacked grab was failed by the live grab finishing');
+      await stacked;
+      assert.match(String(stackedError), /no stacked frame/);
     } finally {
       s.close();
       await fake.close();

@@ -83,7 +83,7 @@ function linkView(st: SeestarState): { state: string; detail: string; health: Se
 }
 
 /** The UI's shooting modes (the Dwarf's names) and the Seestar view modes they are. */
-const MODES: Record<string, 'scenery' | 'star' | 'moon' | 'planet' | 'sun'> = { normal: 'scenery', dso: 'star', moon: 'moon', planet: 'planet', sun: 'sun' };
+const MODES: Record<string, 'star' | 'moon' | 'planet' | 'sun'> = { dso: 'star', moon: 'moon', planet: 'planet', sun: 'sun' };
 
 /** The view the scope runs, as the UI's mode name. */
 function modeName(v: SeestarState['view']): string | undefined {

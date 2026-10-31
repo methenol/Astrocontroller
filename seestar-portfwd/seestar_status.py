@@ -7,6 +7,7 @@ Standard-library only. Endpoints and payload shapes match the Seestar Android ap
   devices GET  {remote}/v1/my-device           header: Authorization: <accessToken>
   connect GET  {remote}/v1/device-p2p/online-link?deviceSn&deviceModel&srcId
   stop    POST {remote}/v1/device-p2p/stop      body: {conId}
+  report  POST {remote}/v1/device-log/report    body: {deviceSn, deviceModel, conId, event, logInfo}
 
 Credentials come from the environment: SEESTAR_USER & SEESTAR_PASSWORD.
 """
@@ -187,6 +188,32 @@ def stop_p2p(token: str, con_id: str) -> tuple[int, Any]:
         f"{DOMAIN_REMOTE}/v1/device-p2p/stop",
         headers=_auth_headers(token),
         body={"conId": con_id},
+    )
+
+
+#: the connect-result events the official app reports to the backend around every P2P session
+#: (P2pConnectResult in the app): Start right after online-link, Succeed/Failed once Connect_Ex
+#: has answered, Cancel for an attempt abandoned before that
+REPORT_START = "p2pConnectStart"
+REPORT_SUCCEED = "p2pConnectSucceed"
+REPORT_FAILED = "p2pConnectFailed"
+REPORT_CANCEL = "p2pConnectCancel"
+
+
+def report_connect_result(token: str, sn: str, model: str, con_id: str, event: str,
+                          code: int | None = None) -> tuple[int, Any]:
+    """POST /v1/device-log/report, the app's TnReportConnectResultBody. logInfo carries the SDK
+    result code as the app serialises it ({"code": N, "source": "tutk"}); the app sends it for a
+    failed connect only."""
+    body: dict[str, Any] = {"deviceSn": sn, "event": event, "deviceModel": model, "conId": con_id,
+                            "logInfo": None}
+    if code is not None:
+        body["logInfo"] = json.dumps({"code": code, "source": "tutk"}, separators=(",", ":"))
+    return _request(
+        "POST",
+        f"{DOMAIN_REMOTE}/v1/device-log/report",
+        headers=_auth_headers(token),
+        body=body,
     )
 
 
