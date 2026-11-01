@@ -10,7 +10,12 @@ export { validHost } from './config/host.js';
 
 export const REASONING_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
-const THINKING_FORMATS = ['', 'openai', 'qwen', 'qwen-chat-template', 'zai', 'openrouter'] as const;
+/**
+ * How a request asks for thinking. All but one are dialects of chat completions; `openai-responses`
+ * talks to OpenAI's Responses API (/v1/responses) instead, the only way OpenAI's reasoning models take
+ * function tools with reasoning on (their chat completions refuse tools unless reasoning_effort is "none").
+ */
+const THINKING_FORMATS = ['', 'openai', 'openai-responses', 'qwen', 'qwen-chat-template', 'zai', 'openrouter'] as const;
 const DATA_ACCESS = ['auto', 'shared', 'upload'] as const;
 
 const SEESTAR_CONNECTIONS = ['local', 'zwo'] as const;

@@ -118,5 +118,17 @@ describe('agent setup', () => {
   test('generated YAML quotes values and denies idling commands', () => {
     assert.match(modelsYml(), /baseUrl: ".*"/);
     assert.match(configYml(), /\{ match: "sleep\*", approval: deny \}/);
+    // OpenAI's own reasoning models: the Responses API, no chat-completions dialect
+    const saved = config.llm.thinkingFormat;
+    try {
+      (config.llm as { thinkingFormat: string }).thinkingFormat = 'openai-responses';
+      assert.match(modelsYml(), /api: openai-responses/);
+      assert.doesNotMatch(modelsYml(), /thinkingFormat/);
+      (config.llm as { thinkingFormat: string }).thinkingFormat = 'qwen';
+      assert.match(modelsYml(), /api: openai-completions/);
+      assert.match(modelsYml(), /thinkingFormat: "qwen"/);
+    } finally {
+      (config.llm as { thinkingFormat: string }).thinkingFormat = saved;
+    }
   });
 });

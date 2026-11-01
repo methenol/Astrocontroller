@@ -27,8 +27,11 @@ export const appendPromptPath = () => path.join(config.paths.workspace, '.omp', 
 
 export function modelsYml(): string {
   const { llm } = config;
+  // OpenAI's reasoning models take function tools with reasoning only on the Responses API: omp speaks
+  // it natively (reasoning.effort, max_output_tokens), so the provider changes API, not dialect
+  const responses = llm.thinkingFormat === 'openai-responses';
   const compat = ['          stripImageInput: false'];
-  if (llm.thinkingFormat) compat.push(`          thinkingFormat: ${yamlStr(llm.thinkingFormat)}`);
+  if (llm.thinkingFormat && !responses) compat.push(`          thinkingFormat: ${yamlStr(llm.thinkingFormat)}`);
   // 2026-10-20: with a qwen format omp sends only enable_thinking unless told the template takes an
   // effort, so REASONING_EFFORT never reached vLLM and the model thought at its own (xhigh) default.
   // This sends it both as reasoning_effort and in chat_template_kwargs.
@@ -38,7 +41,7 @@ export function modelsYml(): string {
     'providers:',
     '  astro:',
     `    baseUrl: ${yamlStr(llm.baseUrl)}`,
-    '    api: openai-completions',
+    `    api: ${responses ? 'openai-responses' : 'openai-completions'}`,
     '    apiKey: ASTRO_LLM_API_KEY',
     '    models:',
     `      - id: ${yamlStr(llm.model)}`,
