@@ -66,6 +66,8 @@ export interface DutyState {
 interface PendingEvent {
   at: number;
   text: string;
+  /** a step of a mode the owner turned on (Starfront's autonomous nights): carried out, not just noted */
+  order?: boolean;
 }
 
 type WakeKind = 'tick' | 'event' | 'event-only' | 'final';
@@ -73,6 +75,8 @@ type WakeKind = 'tick' | 'event' | 'event-only' | 'final';
 /** The telescope as the duty loop sees it, whatever the driver (each driver's adapter: drivers/<id>/duty.ts). */
 export interface DutyDevice {
   readonly state: { released?: boolean };
+  /** keep waking the agent while the telescope is released (Starfront's autonomous nights: the agent connects it again itself) */
+  wakeWhileReleased?(): boolean;
   requireLocation(): ObserverLocation;
   /** the telescope's lines in a sample's measurements */
   measure(now: number): string[];
@@ -347,7 +351,21 @@ export class DutyLoop extends SafeEmitter {
   /** Queue an event for the agent. onlyOnDuty: dropped when not on duty. */
   event(text: string, onlyOnDuty = false): void {
     if (onlyOnDuty && this.state.status !== 'active') return;
-    this.events.push({ at: this.now(), text });
+    this.push({ at: this.now(), text });
+  }
+
+  /**
+   * A step the owner's standing mode asks for now (Starfront's autonomous nights: the roof check,
+   * the roof opening before dark, closing, reopening). Delivered like an event, on duty or not, but
+   * the agent is told to carry it out: an ordinary automatic message must not start new work.
+   */
+  order(text: string): void {
+    this.push({ at: this.now(), text, order: true });
+  }
+
+  private push(e: PendingEvent): void {
+    const text = e.text;
+    this.events.push(e);
     if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
     log.info(`event for the agent: ${text}`);
     // the night's journal keeps what the agent was woken for
@@ -399,7 +417,7 @@ export class DutyLoop extends SafeEmitter {
       this.end(`end time reached (${label})`);
       return;
     }
-    if (this.scope.state.released) return; // the user has the telescope
+    if (this.scope.state.released && !this.scope.wakeWhileReleased?.()) return; // the user has the telescope
     if (st.nextWakeAt && now >= st.nextWakeAt && this.agent.ready && !this.agent.busy) void this.wake('tick');
   }
 
@@ -434,15 +452,18 @@ export class DutyLoop extends SafeEmitter {
   }
 
   private eventLines(events: PendingEvent[]): string[] {
-    return events.map((e) => `- ${clock(e.at)} ${e.text}`);
+    return events.map((e) => `- ${clock(e.at)} ${e.order ? 'ORDER (the owner\'s autonomous mode): ' : ''}${e.text}`);
   }
 
   private eventMessage(events: PendingEvent[]): string {
+    const orders = events.some((e) => e.order);
     return [
       '[Astrocontroller event: automatic, not typed by the user]',
       ...this.eventLines(events),
       '',
-      'If this belongs to a task the user gave you and that is still in progress, take its next step. Otherwise, or if unsure, end your turn: do not start anything new, and do not resume plans from earlier conversations, on an automatic message.',
+      orders
+        ? "The ORDER lines are steps of a mode the owner turned on and left running (autonomous Starfront nights): carry them out now, exactly as written, then end your turn. For anything else here: if it belongs to a task the user gave you that is still in progress, take its next step; otherwise do not start anything new."
+        : 'If this belongs to a task the user gave you and that is still in progress, take its next step. Otherwise, or if unsure, end your turn: do not start anything new, and do not resume plans from earlier conversations, on an automatic message.',
     ].join('\n');
   }
 

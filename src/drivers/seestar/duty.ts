@@ -17,8 +17,9 @@ const SUBS_BEFORE_ALARM = 5;
 const MIN_JUDGE_MS = 5 * 60_000;
 const DEFAULT_SUB_MS = 10_000;
 
-function lines(scope: Seestar): string[] {
+function lines(scope: Seestar, autonomous = false): string[] {
   const st = scope.state;
+  if (st.released && autonomous) return [`- telescope: released (disconnected)${st.mount.parked ? ', parked' : ''}: it and its ZWO session are free. seestar_connect when you need it (over ZWO it can take 5–10 min; you are woken when it is connected).`];
   if (st.released) return ['- telescope: RELEASED by the user (Disconnect in the web UI); nothing can be sent until they press Connect'];
   if (!st.connected) return [`- telescope: NOT CONNECTED${st.link?.lastError ? ` (${st.link.lastError})` : ''}`];
   const m = st.mount;
@@ -89,7 +90,7 @@ export function superviseStack(scope: Seestar, event: EventSink, o: { autoStopAf
   return () => clearInterval(timer);
 }
 
-function watch(scope: Seestar, event: EventSink): () => void {
+function watch(scope: Seestar, event: EventSink, autonomous: () => boolean = () => false): () => void {
   const stopSupervisor = superviseStack(scope, event);
   let wasStacking = isStacking(scope.state);
   let connected = scope.state.connected;
@@ -100,7 +101,8 @@ function watch(scope: Seestar, event: EventSink): () => void {
     const now = isStacking(st);
     if (wasStacking && !now) event(`live stacking ended (${st.stack.state ?? '?'}): ${st.stack.stacked ?? '?'} stacked, ${st.stack.dropped ?? '?'} dropped${st.stack.lastError ? `; ${st.stack.lastError}` : ''}`, st.stack.state !== 'fail');
     wasStacking = now;
-    if (connected !== st.connected && !st.released) event(st.connected ? 'the telescope connection is back' : 'the telescope connection was lost', true);
+    // on autonomous nights the agent connects the scope itself, on duty or not (a roof check): it is told when the connection is up
+    if (connected !== st.connected && !st.released) event(st.connected ? 'the telescope connection is back' : 'the telescope connection was lost', !(st.connected && autonomous()));
     connected = st.connected;
     const c = st.power.charging;
     if (charging !== undefined && c !== undefined && charging !== c) event(c ? `the telescope is now charging (battery ${st.power.batteryPct ?? '?'}%)` : `the telescope is no longer charging (battery ${st.power.batteryPct ?? '?'}%)`, true);
@@ -123,14 +125,16 @@ function watch(scope: Seestar, event: EventSink): () => void {
   };
 }
 
-export function seestarDuty(scope: Seestar): DutyDevice {
+export function seestarDuty(scope: Seestar, o: { autonomous?: () => boolean } = {}): DutyDevice {
   return {
     get state() {
       return scope.state;
     },
     requireLocation: () => scope.requireLocation(),
-    measure: () => lines(scope),
-    watch: (_now, event) => watch(scope, event),
-    closeOut: () => "stop stacking if it still runs (stop_stacking), park the scope (park), then transfer the night's sessions that are not in the library yet (list_device_sessions, transfer_session; processing queues itself).",
+    measure: () => lines(scope, !!o.autonomous?.()),
+    wakeWhileReleased: () => !!o.autonomous?.(),
+    watch: (_now, event) => watch(scope, event, () => !!o.autonomous?.()),
+    closeOut: () =>
+      `stop stacking if it still runs (stop_stacking), park the scope (park), then transfer the night's sessions that are not in the library yet (list_device_sessions, transfer_session; processing queues itself)${o.autonomous?.() ? ', and once those transfers have finished (their finished events), seestar_disconnect' : ''}.`,
   };
 }

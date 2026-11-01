@@ -107,15 +107,25 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
     },
   );
 
-  tool('seestar_connect', 'Connect (or reconnect) to the Seestar after a Disconnect: opens the control link and, over ZWO Telescope Network, asks the tunnel for the one remote session of the scope (its supervisor takes it from whoever holds it, the official app included).', {}, async () => {
-    scope.connectLink();
-    return text('connecting; check seestar_status in a few seconds');
-  });
+  tool(
+    'seestar_connect',
+    'Connect (or reconnect) to the Seestar after it was released: opens the control link and, over ZWO Telescope Network, asks the tunnel for the one remote session of the scope (its supervisor takes it from whoever holds it, the official app included). Over ZWO this can take 5–10 min: end your turn (on duty: duty next_check in_s=120); you are woken when the connection is up.',
+    {},
+    async () => {
+      scope.connectLink();
+      return text(scope.state.connection === 'zwo' ? 'connecting through ZWO Telescope Network: this can take 5–10 min. End your turn (on duty: duty next_check in_s=120); the connection coming up wakes you, and seestar_status shows it.' : 'connecting; check seestar_status in a few seconds');
+    },
+  );
 
-  tool('seestar_disconnect', 'Release the Seestar: stop a running view (what it stacked is kept), close every link and, over ZWO Telescope Network, hand the session back so the scope leaves OCCUPIED and the official app can take it. It stays released, across restarts, until seestar_connect.', {}, async () => {
-    await scope.release();
-    return text('released');
-  });
+  tool(
+    'seestar_disconnect',
+    'Release the Seestar: stop a running view (what it stacked is kept), close every link and, over ZWO Telescope Network, hand the session back so the scope leaves OCCUPIED and the official app can take it. It does not park (park is its own tool). It stays released, across restarts, until seestar_connect.',
+    {},
+    async () => {
+      await scope.release();
+      return text('released');
+    },
+  );
 
   tool(
     'select_camera',

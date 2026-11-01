@@ -27,14 +27,22 @@ function create({ agent }: DriverDeps): DriverRuntime {
   const scope = new Seestar();
   // the night plan's lines go into every duty sample; the plan needs the duty (it starts the nightly one), so it is bound late
   let night: NightServices | null = null;
-  const duty = new DutyLoop(withNightPlan(seestarDuty(scope), () => night), agent);
+  // on autonomous nights the agent keeps being woken while the scope is released: it connects it again itself
+  const duty: DutyLoop = new DutyLoop(withNightPlan(seestarDuty(scope, { autonomous: (): boolean => !!nights?.enabled }), () => night), agent);
   const media = seestarMedia(scope);
   setDeviceLibrary(media.storage);
   // Starfront's autonomous nights: only with STARFRONT_REMOTE_ZWO on a scope over ZWO Telescope Network
-  const nights = config.starfront.available
+  const nights: StarfrontNights | null = config.starfront.available
     ? new StarfrontNights({
         duty,
         site: () => scope.requireLocation(),
+        planStart: () => {
+          try {
+            return night?.plan.currentNight().window.start.getTime() ?? null;
+          } catch {
+            return null;
+          }
+        },
         stacking: {
           on: (e, f) => scope.on(e, f),
           off: (e, f) => scope.off(e, f),

@@ -5,14 +5,22 @@
  * - The roof: Starfront's own roof API (the one status.starfront.space reads), polled every
  *   STARFRONT_POLL_S. STARFRONT_BUILDING names the building the scope is in; without it any open
  *   roof counts, and the telescope confirms its own (below).
- * - Roof opens after sunset (and before the darkness ends): a duty starts until astronomical dawn,
- *   with the night's objective: image targets from the planner from astronomical dark, maximising
- *   integration. The duty's own END wake at dawn stops, transfers and parks (the driver's close-out).
- * - The roof closes during the night: the agent is told at once (stop stacking, park); it reopens:
- *   told again (carry on).
- * - At STARFRONT_ROOF_CHECK_TIME (19:00) a roof still reported closed is checked with the telescope:
- *   the agent is woken to look (open the arm, point up, look with the wide camera) and reports with
- *   starfront_roof; open starts the night's duty.
+ * Between its phases the scope is parked and disconnected, so nothing holds it (or its single ZWO
+ * session) while there is nothing to do; the agent connects when it needs it (5–10 min over ZWO).
+ *
+ * - Roof opens after sunset but before dark: the agent is woken to verify it (connect, raise the
+ *   arm, look with the wide camera, report with starfront_roof), then parks and disconnects.
+ * - STARFRONT_CONNECT_LEAD_MIN before the night plan's start (dark), with the roof open (or seen
+ *   open): a duty starts until astronomical dawn with the night's objective (connect, then carry out
+ *   the night plan). A roof that opens later starts it at once. The duty's END wake at dawn stops,
+ *   parks, transfers, and disconnects once the transfers have finished (the driver's close-out).
+ * - The roof closes during the night: the agent is told at once (stop stacking, park, transfer,
+ *   disconnect once the transfers have finished); it reopens: told again (connect, carry on).
+ * - At STARFRONT_ROOF_CHECK_TIME (19:00) a roof still reported closed is checked with the telescope
+ *   the same way (connect, look, report, park, disconnect); open starts the night's duty at its time.
+ *
+ * These wakes are orders (duty.order): steps of a mode the owner turned on, which the agent carries
+ * out even off duty.
  * - When the next target starts stacking, the previous target's untransferred sessions are
  *   transferred (processing queues itself after each).
  *
@@ -38,15 +46,27 @@ export interface Roof {
 
 export const NIGHT_OBJECTIVE = [
   "Autonomous Starfront night: the roof is open. Carry out tonight's night plan (the owner's program, scheduled: night_plan) until astronomical dawn, maximising integration time.",
-  '1. seestar_status; open_arm if parked. If you were woken because a roof opened and the building is not known, first confirm the sky with view_camera camera=wide pointed up and report it with starfront_roof.',
+  '1. If the scope is disconnected: seestar_connect (over ZWO Telescope Network this can take 5–10 min: end your turn with duty next_check in_s=120; you are woken when it is connected). Then seestar_status; open_arm if parked. If the roof was not verified with the telescope tonight and the building is not known, first confirm the sky with view_camera camera=wide pointed up and report it with starfront_roof.',
   "2. Before the plan starts (astronomical dark): get ready; nothing is stacked before then. Each sample's night plan line says what comes first.",
   "3. From the plan's start: be on the plan's target (goto_target, autofocus, star_focus, start_stacking) and move to the next block's target when the plan moves on. Blocked or clouded: night_plan action=obscured target=<name> cause=obstruction|cloud and take the target it gives. The previous target is transferred automatically when the next starts stacking.",
-  '4. If you are told the roof closed: stop_stacking and park at once, then wait (duty next_check 900). When it reopens, carry on from step 3 (night_plan action=now).',
-  '5. At astronomical dawn the duty ends: stop stacking, transfer the night\'s sessions not yet transferred, park.',
+  "4. If you are told the roof closed: stop_stacking and park at once; transfer tonight's sessions not yet in the library (list_device_sessions, transfer_session); when their finished events arrive, seestar_disconnect. Then wait (duty next_check 900). When it reopens: seestar_connect, open_arm, carry on from step 3 (night_plan action=now).",
+  "5. At astronomical dawn the duty ends: stop stacking, park, transfer the night's sessions not yet transferred, and when those transfers have finished, seestar_disconnect.",
 ].join('\n');
 
-export const ROOF_CHECK_PROMPT = (time: string) =>
-  `Starfront roof check (${time}): the roof status still says closed. Check the roof over the scope with the telescope: open_arm, move_motors altitude_deg=70, then view_camera camera=wide (and sky_check). Open sky (a twilight gradient, or a recognisable star field) = open; a dark ceiling, rafters, the inside of the building, or a dark frame with only noise or hot pixels (counted as "stars" under a closed roof) = closed; when in doubt, closed. Report it with starfront_roof action=report open=true|false; if closed, park again. Open starts tonight's imaging duty.`;
+/** How the agent looks at the roof: connect, raise the arm, look up with the wide camera. */
+const LOOK = 'seestar_connect if the scope is disconnected (over ZWO this can take 5–10 min: end your turn; you are woken when it is connected), then open_arm, move_motors altitude_deg=70, view_camera camera=wide (and sky_check).';
+
+/** The roof reports open before dark: look, report, then leave the scope parked and disconnected until the night's duty. */
+export const VERIFY_PROMPT = (time: string, duty: string) =>
+  `Starfront roof opened (${time}), before dark. Verify it with the telescope: ${LOOK} Report what you saw with starfront_roof action=report open=true|false. Then park, and seestar_disconnect. Tonight's duty starts at ${duty}, when you are woken to connect again.`;
+
+export const ROOF_CHECK_PROMPT = (time: string, duty?: string) =>
+  `Starfront roof check (${time}): the roof status still says closed. Check the roof over the scope with the telescope: ${LOOK.replace('then open_arm', 'then open_arm')} Open sky (a twilight gradient, or a recognisable star field) = open; a dark ceiling, rafters, the inside of the building, or a dark frame with only noise or hot pixels (counted as "stars" under a closed roof) = closed; when in doubt, closed. Report it with starfront_roof action=report open=true|false. Then park, and seestar_disconnect. Open starts tonight's imaging duty${duty ? ` (at ${duty})` : ''}, when you are woken to connect again.`;
+
+export const ROOF_CLOSING_ORDER =
+  "the Starfront roof is CLOSING: stop_stacking and park NOW. Then transfer tonight's sessions not yet in the library (list_device_sessions, transfer_session), and when their finished events arrive, seestar_disconnect. Wait for the roof to reopen (duty next_check in_s=900); its reopening wakes you.";
+export const ROOF_REOPENED_ORDER =
+  'the Starfront roof has REOPENED: seestar_connect if the scope is disconnected (5–10 min over ZWO; you are woken when it is connected), open_arm, then carry on with the night plan (night_plan action=now).';
 
 interface NightRecord {
   /** the duty was started, and why */
@@ -54,6 +74,8 @@ interface NightRecord {
   engagedBy?: string;
   /** the telescope roof check was asked for */
   checkedAt?: number;
+  /** the roof opened before dark: the agent was asked to verify it with the telescope */
+  verifyAskedAt?: number;
   checkResult?: 'open' | 'closed';
 }
 
@@ -74,12 +96,17 @@ export interface StarfrontStatus {
   roofError: string | null;
   night: string;
   window: { sunset: string | null; astroDusk: string | null; astroDawn: string | null };
+  /** when the night's duty starts (the plan's start less the connect lead) */
+  dutyAt: string | null;
   phase: string;
   tonight: NightRecord;
 }
 
 export interface StarfrontDeps {
-  duty: Pick<DutyLoop, 'start' | 'event' | 'status'>;
+  duty: Pick<DutyLoop, 'start' | 'event' | 'order' | 'status'>;
+  /** the night plan's start (dark), ms; the duty starts the connect lead before it */
+  planStart?: () => number | null;
+  connectLeadMin?: number;
   site: () => ObserverLocation;
   /** the scope's stacking, for the transfer of the previous target */
   stacking?: { on(e: 'state', f: () => void): unknown; off(e: 'state', f: () => void): unknown; current(): { stacking: boolean; target?: string } };
@@ -165,6 +192,11 @@ export class StarfrontNights extends SafeEmitter {
     this.d.stacking?.off('state', this.onScope);
   }
 
+  /** the owner has the mode on */
+  get enabled(): boolean {
+    return this.st.enabled;
+  }
+
   setEnabled(on: boolean): StarfrontStatus {
     this.st.enabled = on;
     log.info(`autonomous Starfront nights ${on ? 'enabled' : 'disabled'}`);
@@ -178,6 +210,12 @@ export class StarfrontNights extends SafeEmitter {
     const w = sky.nightWindow(this.d.site(), new Date(at));
     const ref = w.sunset ?? w.darkStart ?? new Date(at);
     return { key: sky.localDate(ref, config.observer.timezone), w };
+  }
+
+  /** When the night's duty starts: the plan's start (else astronomical dusk) less the connect lead. */
+  private dutyAt(w: ReturnType<typeof sky.nightWindow>): number | null {
+    const start = this.d.planStart?.() ?? w.astroDusk?.getTime() ?? w.darkStart?.getTime() ?? null;
+    return start === null ? null : start - (this.d.connectLeadMin ?? config.starfront.connectLeadMin) * 60_000;
   }
 
   /** Our roof as the API reports it: the building's, or (unknown building) any of the candidates'. */
@@ -214,10 +252,7 @@ export class StarfrontNights extends SafeEmitter {
 
     // the roof changed during a night already started: tell the agent at once
     if (night.engagedAt && this.wasOpen !== null && open !== null && open !== this.wasOpen && duty.status !== 'off') {
-      this.d.duty.event(
-        open ? 'the Starfront roof has REOPENED: carry on imaging from plan_targets (open_arm if parked)' : 'the Starfront roof is CLOSING: stop_stacking and park NOW, then wait for it to reopen',
-        false,
-      );
+      this.d.duty.order(open ? ROOF_REOPENED_ORDER : ROOF_CLOSING_ORDER);
     }
     if (open !== null) this.wasOpen = open;
 
@@ -225,8 +260,23 @@ export class StarfrontNights extends SafeEmitter {
       this.publish();
       return;
     }
-    if (open === true) {
-      this.engage(key, night, this.building ? `the roof of building ${this.building} opened` : 'a Starfront roof opened (building not set: the telescope confirms it)');
+    const dutyAt = this.dutyAt(w);
+    const time = now >= (dutyAt ?? 0);
+    if (open === true || night.checkResult === 'open') {
+      const why = open !== true ? 'the telescope saw the roof open' : this.building ? `the roof of building ${this.building} opened` : 'a Starfront roof opened (building not set: the telescope confirms it)';
+      if (time) {
+        this.engage(key, night, why);
+        return;
+      }
+      // open before dark: the agent verifies it now, then leaves the scope parked and disconnected until the duty
+      if (open === true && !night.verifyAskedAt && !night.checkResult) {
+        night.verifyAskedAt = now;
+        log.info(`roof open before dark: asking the agent to verify it (the duty starts at ${localHm(dutyAt!)})`);
+        this.d.duty.order(VERIFY_PROMPT(localHm(now), localHm(dutyAt!)));
+        this.save();
+        return;
+      }
+      this.publish();
       return;
     }
     // the roof still says closed (or is unknown) at the check time of this night's evening: look with the telescope, once a night
@@ -234,7 +284,7 @@ export class StarfrontNights extends SafeEmitter {
     if (!night.checkedAt && now >= sky.parseLocal(`${key}T${checkAt}`, config.observer.timezone).getTime()) {
       night.checkedAt = now;
       log.info(`roof reported ${open === null ? 'unknown' : 'closed'} at ${checkAt}: asking the agent to check it with the telescope`);
-      this.d.duty.event(ROOF_CHECK_PROMPT(localHm(now)), false);
+      this.d.duty.order(ROOF_CHECK_PROMPT(localHm(now), dutyAt && !time ? localHm(dutyAt) : undefined));
       this.save();
       return;
     }
@@ -278,7 +328,9 @@ export class StarfrontNights extends SafeEmitter {
       this.st.candidates = next.length ? next : all;
       if (next.length === 1) log.info(`the scope's roof is building ${next[0]} (learned from the telescope's roof checks)`);
     }
-    if (open && !night.engagedAt && now < (w.darkEnd?.getTime() ?? 0)) this.engage(key, night, 'the telescope saw the roof open');
+    // seen open: the duty starts at its time (the tick), or now if that has come
+    const dutyAt = this.dutyAt(w);
+    if (open && !night.engagedAt && now < (w.darkEnd?.getTime() ?? 0) && now >= (dutyAt ?? 0)) this.engage(key, night, 'the telescope saw the roof open');
     else this.save();
     return this.status();
   }
@@ -317,10 +369,15 @@ export class StarfrontNights extends SafeEmitter {
     const open = this.roofOpen();
     const night = (key && this.st.nights[key]) || {};
     const duty = this.d.duty.status();
+    const dutyAt = w ? this.dutyAt(w) : null;
     const phase = !this.st.enabled
       ? 'off'
       : night.engagedAt && duty.status !== 'off'
         ? 'imaging night on duty'
+        : night.checkResult === 'open' && dutyAt && now < dutyAt
+          ? `roof verified open: the scope is parked and disconnected until the duty at ${localHm(dutyAt)}`
+          : night.verifyAskedAt && !night.checkResult
+            ? 'roof open before dark: the agent is verifying it'
         : w?.sunset && now < w.sunset.getTime()
           ? `waiting for the night (sunset ${sky.fmtTime(w.sunset, tz)})`
           : open
@@ -336,6 +393,7 @@ export class StarfrontNights extends SafeEmitter {
       roofError: this.roofError,
       night: key,
       window: { sunset: w ? sky.fmtTime(w.sunset, tz) : null, astroDusk: w ? sky.fmtTime(w.astroDusk, tz) : null, astroDawn: w ? sky.fmtTime(w.astroDawn, tz) : null },
+      dutyAt: dutyAt ? localHm(dutyAt) : null,
       phase,
       tonight: night,
     };

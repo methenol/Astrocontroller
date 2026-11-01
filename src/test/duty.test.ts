@@ -82,6 +82,37 @@ describe('DutyLoop', () => {
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
+  test('a released telescope holds the samples, unless the device keeps waking while released (autonomous nights)', async () => {
+    duty.start({ objective: 'image the plan', until: 'none', by: 'user' });
+    dwarf.state.released = true;
+    duty.tick();
+    await flush();
+    assert.equal(agent.prompts.length, 0, 'the user has the telescope');
+    duty.dispose();
+    let autonomous = true;
+    const dev = { ...dwarfDuty(dwarf as unknown as Dwarf), wakeWhileReleased: () => autonomous };
+    Object.defineProperty(dev, 'state', { get: () => dwarf.state });
+    duty = new DutyLoop(dev, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
+    duty.start({ objective: 'image the plan', until: 'none', by: 'user' });
+    duty.tick();
+    await flush();
+    assert.equal(agent.prompts.length, 1, 'woken to connect it again');
+    autonomous = false;
+    agent.set({ busy: true });
+    agent.set({ busy: false });
+    now += 3600e3;
+    duty.tick();
+    await flush();
+    assert.equal(agent.prompts.length, 1, 'the mode off: the release holds the samples again');
+  });
+
+  test('an order is carried out, an event only noted', async () => {
+    duty.order('the Starfront roof opened: verify it');
+    await new Promise((r) => setTimeout(r, 3100));
+    assert.match(agent.prompts[0], /ORDER \(the owner's autonomous mode\): the Starfront roof opened/);
+    assert.match(agent.prompts[0], /carry them out now/);
+  });
+
   test('dispose removes every listener it added', () => {
     duty.dispose();
     assert.equal(dwarf.listenerCount('state'), 0);

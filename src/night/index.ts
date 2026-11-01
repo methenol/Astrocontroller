@@ -108,6 +108,7 @@ export function withNightPlan(device: DutyDevice, night: () => NightServices | n
       return device.state;
     },
     requireLocation: () => device.requireLocation(),
+    wakeWhileReleased: () => device.wakeWhileReleased?.() ?? false,
     measure: (now) => [...device.measure(now), ...(night()?.plan.dutyLines(now) ?? [])],
     watch: (now, event) => device.watch(now, event),
     closeOut: () => device.closeOut(),

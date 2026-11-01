@@ -95,6 +95,8 @@ export const config = {
     /** local time at which a roof still reported closed is checked with the telescope */
     roofCheckTime: env.str('STARFRONT_ROOF_CHECK_TIME', '19:00'),
     pollS: env.num('STARFRONT_POLL_S', 60, { min: 15, max: 900 }),
+    /** the night's duty starts this long before the plan's start (dark): the agent connects to the disconnected scope (5–10 min over ZWO) */
+    connectLeadMin: env.num('STARFRONT_CONNECT_LEAD_MIN', 25, { min: 5, max: 120, int: true }),
   },
   dwarf: {
     host: env.host('DWARF_HOST', '192.168.88.1'),

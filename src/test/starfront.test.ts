@@ -15,6 +15,8 @@ const AFTER_SUNSET = W.sunset!.getTime() + 10 * 60_000;
 const DARK = W.astroDusk!.getTime() + 30 * 60_000;
 const NIGHT_KEY = sky.localDate(W.sunset!, config.observer.timezone);
 const CHECK_AT = sky.parseLocal(`${NIGHT_KEY}T19:00`, config.observer.timezone).getTime();
+// the duty starts the connect lead before the plan's start (astronomical dusk without a plan)
+const DUTY_AT = W.astroDusk!.getTime() - config.starfront.connectLeadMin * 60_000;
 
 function roofs(open: Record<number, boolean>): Roof[] {
   return Array.from({ length: 16 }, (_, i) => ({ device_number: i + 1, name: `Building ${i + 1}`, is_open: !!open[i + 1] }));
@@ -37,6 +39,7 @@ function rig(o: { building?: number; dutyStatus?: 'off' | 'active' } = {}) {
         return {} as never;
       }) as never,
       event: (text: string) => void events.push(text),
+      order: (text: string) => void events.push(`ORDER ${text}`),
       status: (() => ({ status: dutyStatus, objective: 'the user\'s own' })) as never,
     },
     site: () => SITE,
@@ -76,7 +79,7 @@ describe('autonomous Starfront nights', () => {
     assert.equal(r.nights.status().phase, 'off');
   });
 
-  test('the roof of its building opening after sunset starts one duty until dawn; other roofs do not', async () => {
+  test('the roof of its building opening before dark is verified, then the duty starts before dark; other roofs do not', async () => {
     const r = rig({ building: 6 });
     r.nights.setEnabled(true);
     r.roof({ 6: true });
@@ -89,8 +92,17 @@ describe('autonomous Starfront nights', () => {
     assert.equal(r.starts.length, 0, 'another building opening is not ours');
     r.roof({ 3: true, 6: true });
     await r.nights.tick();
+    assert.equal(r.starts.length, 0, 'not before the duty time');
+    const verify = r.events.filter((e) => /^ORDER Starfront roof opened/.test(e));
+    assert.equal(verify.length, 1, r.events.join('\n'));
+    assert.match(verify[0], /seestar_connect.*open_arm.*starfront_roof action=report.*park, and seestar_disconnect/s);
+    await r.nights.tick();
+    assert.equal(r.events.filter((e) => /^ORDER Starfront roof opened/.test(e)).length, 1, 'verified once a night');
+    r.at(DUTY_AT + 1000);
+    await r.nights.tick();
     assert.equal(r.starts.length, 1);
     assert.equal(r.starts[0].until, 'dawn');
+    assert.match(r.starts[0].objective, /seestar_connect/);
     assert.equal(r.starts[0].objective, NIGHT_OBJECTIVE);
     r.at(DARK);
     await r.nights.tick();
@@ -106,13 +118,13 @@ describe('autonomous Starfront nights', () => {
     await r.nights.tick();
     r.roof({});
     await r.nights.tick();
-    assert.ok(r.events.some((e) => /CLOSING: stop_stacking and park NOW/.test(e)), r.events.join('\n'));
+    assert.ok(r.events.some((e) => /^ORDER the Starfront roof is CLOSING: stop_stacking and park NOW.*transfer.*seestar_disconnect/s.test(e)), r.events.join('\n'));
     r.roof({ 6: true });
     await r.nights.tick();
-    assert.ok(r.events.some((e) => /REOPENED/.test(e)));
+    assert.ok(r.events.some((e) => /^ORDER the Starfront roof has REOPENED: seestar_connect/.test(e)));
   });
 
-  test('a roof still closed at 19:00 is checked with the telescope once; open starts the night', async () => {
+  test('a roof still closed at 19:00 is checked with the telescope once; seen open, the night starts at its time', async () => {
     const r = rig({ building: 6 });
     r.nights.setEnabled(true);
     // in daylight nothing is checked, whatever the clock says
@@ -123,10 +135,13 @@ describe('autonomous Starfront nights', () => {
     await r.nights.tick();
     await r.nights.tick();
     assert.equal(r.events.filter((e) => /roof check/.test(e)).length, 1);
+    assert.match(r.events.find((e) => /roof check/.test(e))!, /^ORDER .*seestar_connect.*park, and seestar_disconnect/s);
     assert.equal(r.starts.length, 0);
     r.nights.report(true);
-    assert.equal(r.starts.length, 1);
     assert.equal(r.nights.status().tonight.checkResult, 'open');
+    r.at(Math.max(DUTY_AT, Math.max(CHECK_AT, AFTER_SUNSET) + 60_000) + 1000);
+    await r.nights.tick();
+    assert.equal(r.starts.length, 1);
   });
 
   test("a user's own duty is never replaced", async () => {
