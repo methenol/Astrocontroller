@@ -57,6 +57,13 @@ function verdict(bucket, reason) {
   return '';
 }
 const subLine = (subS, range, subs) => (subS == null && !Array.isArray(range) ? '' : `${Array.isArray(range) ? `${range[0]}–${range[1]}` : subS}s × ${subs ?? '–'} subs`);
+/** The acquisition planner's capture settings for a block: what to shoot with, the headroom, and why. */
+function captureLine(a) {
+  const head = `${a.filter} · gain ${a.gain} · ${a.subS}s × ${a.frames}`;
+  const room = `sky ${a.backgroundPct}% of range${a.coreClips ? ' · core clips' : ''} · stars clip from mag ${a.starSaturationMag}`;
+  return `<div class="small"><b>Capture:</b> ${esc(head)} <span class="muted">(${esc(room)}; ${esc(a.hoursToGood)} h to a clean picture)</span></div>
+      <div class="small muted">${esc(a.line)}</div>`;
+}
 const skyColour = (s) => (s == null ? '#1a2436' : s >= 60 ? '#14532d' : s >= 35 ? '#713f12' : '#7f1d1d');
 
 // ---------------------------------------------------------------- loading
@@ -234,7 +241,7 @@ function renderDetail() {
     </div>
     ${t.advice ? `<div class="np-advice"><div>${verdict(t.advice.detect, t.advice.detectReason)} <span class="small">${esc(t.advice.detectReason)}${t.advice.surfaceBrightness != null ? ` (SB ${esc(t.advice.surfaceBrightness)} mag/arcsec²)` : ''}</span></div>
       <div class="small"><b>Framing:</b> ${esc(t.advice.framing)}</div>
-      ${t.advice.sub ? `<div class="small"><b>Subs:</b> ${esc(subLine(t.advice.sub.subS, t.advice.sub.rangeS, t.advice.sub.subs))} in this block — ${esc(t.advice.sub.line)}</div>` : ''}</div>` : ''}
+      ${t.advice.acquisition ? captureLine(t.advice.acquisition) : t.advice.sub ? `<div class="small"><b>Subs:</b> ${esc(subLine(t.advice.sub.subS, t.advice.sub.rangeS, t.advice.sub.subs))} in this block — ${esc(t.advice.sub.line)}</div>` : ''}</div>` : ''}
     <p class="small">${esc(b.reason)}</p>
     ${t.notes ? `<p class="small"><b>Note:</b> ${esc(t.notes)}</p>` : ''}
     <div class="ctl-row np-actions">
@@ -461,11 +468,11 @@ async function loadSuggestions() {
               : r.usableMin
                 ? `${esc(dur(r.usableMin))} usable<small>best ${esc(hm(r.usableFrom))}–${esc(hm(r.usableUntil))} · merit ${esc(Math.round(r.merit * 100))}% · value ${esc(r.planValue)}</small>`
                 : `<span class="muted">not usable</span><small>${esc(r.notUsable ?? '')}</small>`;
-            const subs = subLine(r.subSeconds, r.subRangeSeconds, r.subs);
+            const subs = r.capture ? `${r.capture.subS}s × ${r.capture.frames} · ${r.capture.hoursToGood} h to clean` : subLine(r.subSeconds, r.subRangeSeconds, r.subs);
             return `<tr class="${r.usableMin ? '' : 'gated'}"><td><b>${esc(r.displayName)}</b> ${verdict(r.detect, r.detectReason)}${r.obstructedNow ? ` <span class="badge waiting" title="behind the site's obstructions now${r.clearsAt ? `; clear at ${esc(r.clearsAt)}` : ''}">behind obstruction now</span>` : ''}<small>${esc(r.type)} in ${esc(r.constellation)}, ${esc(r.sizeArcmin)}′${r.magnitude != null ? `, mag ${esc(r.magnitude)}` : ''}${r.surfaceBrightness != null ? `, SB ${esc(r.surfaceBrightness)}` : ''}</small>${r.gated ? `<small>${esc(r.gateReason)}</small>` : ''}${r.restReason ? `<small>memory: ${esc(r.restReason)}</small>` : ''}</td>
             <td data-label="In tonight's plan">${inPlan}<small>max ${esc(Math.round(r.maxAltitude))}°</small></td>
             <td data-label="Sky">${r.sky != null ? `<b class="sky ${skyCls(r.sky)}">${esc(r.sky)}/100</b><small>while usable</small>` : '<small>no forecast</small>'}</td>
-            <td data-label="Fit / filter / subs"><small>${esc(r.framing ?? (r.fillPercent != null ? `${r.fillPercent}% of the frame` : ''))}</small><small>${esc(r.filter)}</small>${subs ? `<small title="${esc(r.exposureAdvice ?? '')}">${esc(subs)}</small>` : ''}</td>
+            <td data-label="Fit / filter / subs"><small>${esc(r.framing ?? (r.fillPercent != null ? `${r.fillPercent}% of the frame` : ''))}</small><small>${esc(r.capture?.filter ?? r.filter)}</small>${subs ? `<small title="${esc(r.exposureAdvice ?? '')}">${esc(subs)}</small>` : ''}</td>
             <td><button class="ghost" data-add="${esc(r.gotoName)}" data-goal="${esc(r.suggestedGoalMin)}" title="Add to the program with a goal of ${esc(dur(r.suggestedGoalMin))} (edit it after)">Add ${esc(hours(r.suggestedGoalMin))}</button><button class="ghost" data-sky="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}">Sky</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Never</button></td></tr>`;
           })
           .join('')}</table>${resting}`

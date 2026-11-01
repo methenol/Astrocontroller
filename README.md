@@ -39,6 +39,8 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `PLAN_READ_NOISE_E` | Camera read noise in electrons. With it the sub length is one number; without it the plan quotes the honest range from a modern sensor to an old one. |
 | `PLAN_MOUNT` / `PLAN_GUIDED` | `alt-az` (default) or `eq`; guided or not. Sets what trails and how soon: field rotation on an alt-az head, the trails budget on an unguided equatorial, nothing when guided. |
 | `PLAN_PLATE_SCALE_ARCSEC` | Arcsec per pixel; the telescope's own plate scale is used when unset. |
+| `PLAN_DEVICE` | Force the capture planner's device spec by id (`dwarf-3`, `dwarf-mini`, `seestar-s30`, `seestar-s30-pro`, `seestar-s50`, `seestar-s50-pro`, or your own); empty = picked from what the scope reports. See [Capture settings](#capture-settings-filter-gain-sub-length-and-integration). |
+| `PLAN_SKY_SQM` | The site's zenith sky from a sky meter (mag/arcsec²). Wins over the rig's measured sky and over `PLAN_BORTLE`. |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI-compatible chat-completions endpoint (vLLM, llama.cpp, LM Studio, …). |
 | `REASONING_EFFORT` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. You can also change it live in the UI. |
 | `LLM_CONTEXT_WINDOW` / `LLM_MAX_TOKENS` | Model limits. |
@@ -121,6 +123,20 @@ The rest of the night is solved again when the forecast updates, a session ends,
 - **skip** for tonight, **pin** to a time, or a **cloud bank** in one quadrant.
 
 Every duty sample carries the plan's line: what to do now, whether the scope is on plan, alternates, holds, a refocus that is due, a stack that is rejecting. **Run tonight's plan** starts the plan's duty by hand. **Run the plan every night** (on by default) starts it at the plan's start each night, for a scope left out for weeks. Starfront's autonomous nights do this themselves: the roof opening before dark has the agent connect, raise the arm, verify the sky, then park and disconnect; the night's duty starts `STARFRONT_CONNECT_LEAD_MIN` (25) minutes before dark, and its first step is to connect again (5–10 min over ZWO). The roof closing has it stop, park, transfer and disconnect once the transfers are done, and so does dawn. While the mode is on, a released scope does not hold the agent's duty samples. The agent's tools are `night_plan`, `plan_program` and `journal`. The Stellarium tab's **night plan** option draws the scheduled targets with their times, the night's path, and the frame on the plan's target at the sky's clock.
+
+## Capture settings: filter, gain, sub length and integration
+
+For every block of the night plan (the **Capture** line in the Plan tab, `capture` in `night_plan`) and on demand (`acquisition_plan action=advise target=…`), the planner in `src/astro/acquisition/` works out the filter, gain, sub length and frame count that collect the most signal-to-noise per hour of the night on **this** telescope, and how much integration the target needs (hours to a detection, a clean and a deep picture, and what tonight adds to what is collected).
+
+It scores every filter × gain × sub length the device offers over the target's window, sampled every 15 minutes, with the CCD equation per Bayer cell: the target's electrons (its catalog surface brightness, through the filter: a line filter keeps an emission nebula's lines and cuts a galaxy as hard as the sky), the sky's (the site's zenith sky brightened by airmass and by the Moon's scattered light, Krisciunas & Schaefer 1991; extinction from the forecast's transparency), dark current and read noise, the per-sub overhead and the dither cost, and the share of subs the stacker keeps (learned from the journal per sub length). A sub length loses the samples it cannot hold:
+- **trailing**: alt-az field rotation from the actual pointing (corner trail ≤ max(3 px, the stars' FWHM)), the unguided-EQ drift budget, wind on an alt-az head;
+- **overexposure**: the sky may fill at most 25% of the range above black; a target core predicted to clip costs the candidate merit;
+- **darks**: on a Dwarf, only exposure/gain pairs that have a dark master on the scope.
+Near-ties go to the safer side (more headroom, then the shorter sub), and the answer says what bound it, with the alternatives and where every number came from. Owner-given settings are held and predicted instead (`filter`, `gain`, `sub_s`).
+
+**Devices.** One spec file per model in `devices/` (Dwarf 3, Dwarf Mini, Seestar S30, S30 Pro, S50, S50 Pro, with sources); add or correct a model by dropping a file into `<DATA_DIR>/devices/` (`devices/README.md` has the fields). What the connected scope reports overrides the spec: its model, optics, EQ mode, stack gain, filter wheel, the exposures and gains it offers (a Seestar's 90/120 s only with `more_exposure`), its dark masters. `acquisition_plan action=device` shows the rig and what is still a guess; `action=devices` lists the models.
+
+**Measurements.** `acquisition_measure` turns the rig's own raw frames into the numbers the spec can only guess, deterministically (robust statistics on one green phase of the mosaic) and stores them in `<DATA_DIR>/acquisition.json`: `sensor` (dark frames: read noise, offset, dark current), `sky` (light subs: e⁻/ADU by photon transfer, the clip level, the sky in mag/arcsec² and the zenith moonless sky it implies, the stars' FWHM, the session's cadence and dither cost), `check` (the same on a running session, with a verdict: keep, shorten, lengthen, refocus). Three trusted sky cohorts (Moon down, target above 35°, astronomical dark) replace `PLAN_BORTLE` with the measured sky. The agent's `acquisition-calibration` skill is the procedure.
 
 ## Journal tab
 
@@ -214,7 +230,7 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 | Status/system | `telescope_status`, `telescope_device_info`, `telescope_reconnect`, `sync_time_and_location`, `power`, `raw_command` |
 | Camera | `set_shooting_mode`, `get_camera_settings`, `set_camera_setting`, `take_photo`, `video_recording`, `timelapse`, `view_camera` |
 | Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `star_sharpness`, `star_focus`, `focus_step`, `focus_position` (incl. infinity) |
-| Planning | `sky_conditions`, `weather_forecast`, `sky_check`, `plan_targets`, `rest_target`, `find_target`, `search_catalog`, `map_obstructions` |
+| Planning | `sky_conditions`, `weather_forecast`, `sky_check`, `plan_targets`, `rest_target`, `find_target`, `search_catalog`, `map_obstructions`, `acquisition_plan`, `acquisition_measure` |
 | Astro | `calibrate`, `goto_target`, `stop_goto`, `astro_recover`, `live_stacking`, `stacking_status`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
 | Duty | `duty` (the unattended night loop) |

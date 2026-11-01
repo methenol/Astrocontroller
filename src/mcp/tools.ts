@@ -3,6 +3,7 @@
  * ./tools/; this only puts them together.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { registerAcquisitionTools } from './tools/acquisition.js';
 import { registerAstroTools } from './tools/astro.js';
 import { registerCameraTools } from './tools/camera.js';
 import { makeTool, type ToolContext } from './tools/common.js';
@@ -17,6 +18,7 @@ import { DEFAULT_TELE_FOV, registerPlanningTools } from './tools/planning.js';
 import { registerResearchTools } from './tools/research.js';
 import { registerStellariumTools } from './tools/stellarium.js';
 import { registerSystemTools } from './tools/system.js';
+import { dwarfFacts, dwarfSessionSubs } from '../drivers/dwarf/acquisition.js';
 
 export { toolEvents, type ToolContext } from './tools/common.js';
 
@@ -35,4 +37,5 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   if (ctx.night) registerNightTools(tool, ctx.night);
   registerStellariumTools(tool);
   registerResearchTools(tool, { fov: () => ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV });
+  registerAcquisitionTools(tool, { site: () => ctx.dwarf.requireLocation(), facts: dwarfFacts(ctx.dwarf), night: ctx.night, sessionSubs: dwarfSessionSubs });
 }

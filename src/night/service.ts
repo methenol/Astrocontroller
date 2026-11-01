@@ -33,6 +33,7 @@ import { addTarget, loadProgram, loadSettings, type PlanSettings, type ProgramTa
 import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
 import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
+import { adviseFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
 import type { Journal, JournalSession } from './journal.js';
 
 const log = logger('plan');
@@ -122,6 +123,8 @@ export interface PlanDeps {
   notify?: (text: string) => void;
   now?: () => number;
   dir?: string;
+  /** what the scope says about itself, for the capture settings of each block (acquisition planner) */
+  facts?: FactsSource;
   /** the forecast, for tests */
   conditions?: () => Promise<((t: Date) => HourConditions | undefined) | null>;
   forecastStamp?: () => Promise<{ fetchedAt: string; stale: boolean } | null>;
@@ -265,6 +268,11 @@ export class PlanService extends SafeEmitter {
   private async conditions(): Promise<((t: Date) => HourConditions | undefined) | null> {
     if (this.d.conditions) return this.d.conditions();
     return weather.conditionsAt(this.site(), config.observer.timezone);
+  }
+
+  /** What the scope says about itself (null without a driver's source or when it fails). */
+  private async facts(): Promise<(Partial<LiveFacts> & { driver: LiveFacts['driver'] }) | null> {
+    return this.d.facts ? this.d.facts().catch((e) => (log.debug(`device facts: ${errMsg(e)}`), null)) : null;
   }
 
   private async forecastStamp(): Promise<{ fetchedAt: string; stale: boolean } | null> {
@@ -413,11 +421,24 @@ export class PlanService extends SafeEmitter {
     const blocksOf = (key: string) => (plan?.blocks ?? []).filter((b) => b.target?.key === key && !b.past);
     const fov = this.d.fovArcmin();
     const goalDefault = restSettings().integrationTargetMin;
+    const facts = await this.facts();
+    const end = plan?.window.end ?? w.end.getTime();
+    const settingsFor = (c: Candidate, k: { bestFrom: number | null; bestUntil: number | null }) => {
+      if (!facts) return null;
+      try {
+        const from = k.bestFrom ?? Math.max(now, w.start.getTime());
+        const to = k.bestUntil ?? end;
+        return adviseFor({ facts, site, target: targetInfo(c.name), from: new Date(from), to: new Date(to), conditions: this.lastConditions, journal: this.d.journal }).rec;
+      } catch {
+        return null;
+      }
+    };
     const rows = candidates.map((c) => {
       const r = pool.rows.get(c.key)!;
       const k = ranks.get(c.key)!;
       const blocks = blocksOf(c.key);
       const size = Number(String(r.sizeArcmin).split('×')[0]);
+      const acq = settingsFor(c, k);
       return {
         name: r.name,
         displayName: r.displayName,
@@ -451,7 +472,9 @@ export class PlanService extends SafeEmitter {
         sky: k.sky,
         planValue: k.value,
         notUsable: k.why,
-        suggestedGoalMin: goalDefault || goalFor(findObject(r.name)?.type, r.detectBucket),
+        suggestedGoalMin: goalDefault || acq?.integration.suggestedGoalMin || goalFor(findObject(r.name)?.type, r.detectBucket),
+        /** the acquisition planner: settings for its best hours tonight, and the hours to a clean picture */
+        capture: acq ? { filter: acq.settings.filter, gain: acq.settings.gain, subS: acq.settings.subS, frames: acq.settings.frames, hoursToGood: acq.integration.hoursTo.good, backgroundPct: acq.overexposure.backgroundPct } : null,
       };
     });
     // what the plan scheduled first (in its order), then by what the plan could make of each
@@ -463,12 +486,15 @@ export class PlanService extends SafeEmitter {
    * What the Tonight tab says of a scheduled target, for its block: detectability under tonight's
    * sky through its filter, how it fits the frame, and the sub-exposure advice for the hours it has.
    */
-  private advise(t: BlockTarget, b: Block, conditions: ((t: Date) => HourConditions | undefined) | null): TargetAdvice | undefined {
+  private advise(t: BlockTarget, b: Block, conditions: ((t: Date) => HourConditions | undefined) | null, facts: Awaited<ReturnType<FactsSource>> | null, progress: ReturnType<typeof collected> | null): TargetAdvice | undefined {
     const o = findObject(t.name);
     if (!o) return undefined;
     const defaults = planDefaults();
-    const d = detectFor(o, { bortle: defaults.bortle, filter: t.filter });
     const usableMin = Math.max(0, (b.end - b.start) / 60e3 - b.overheadMin);
+    const acquisition = facts ? this.acquisition(t, b, usableMin, conditions, facts, progress?.get(t.key)?.totalMin ?? 0) : null;
+    // the capture settings' filter is the one the block is shot through (unless the owner fixed one)
+    if (acquisition) t.filter = acquisition.filter;
+    const d = detectFor(o, { bortle: defaults.bortle, filter: t.filter });
     const mid = new Date((b.start + b.end) / 2);
     const sp = subPlan({ rig: { ...defaults.rig, band: d.band }, bortle: defaults.bortle, transitAlt: b.alt?.max ?? 45, usableMin, moonUp: !!b.moon, windKmh: conditions?.(mid)?.windKmh });
     return {
@@ -477,7 +503,36 @@ export class PlanService extends SafeEmitter {
       detectReason: d.reason,
       surfaceBrightness: d.sb === null ? null : Math.round(d.sb * 100) / 100,
       sub: sp ? { subS: sp.subS, rangeS: sp.subRangeS, subs: sp.subs, integrationMin: sp.integrationMin, line: sp.line } : null,
+      acquisition: acquisition ?? undefined,
     };
+  }
+
+  /** The acquisition planner's settings for a block (null when it cannot say: no catalog row, a window below 10°). */
+  private acquisition(t: BlockTarget, b: Block, usableMin: number, conditions: ((t: Date) => HourConditions | undefined) | null, facts: Awaited<ReturnType<FactsSource>>, got: number): NonNullable<TargetAdvice['acquisition']> | null {
+    try {
+      const program = t.programId ? loadProgram().find((p) => p.id === t.programId) : undefined;
+      const owned = program?.filter && program.filter !== 'auto' ? program.filter : undefined;
+      const { rec } = adviseFor({ facts, site: this.site(), target: targetInfo(t.name), from: new Date(b.start), to: new Date(b.end), usableMin, conditions, fixed: { filter: owned }, collectedMin: Math.round(got), journal: this.d.journal });
+      return {
+        device: rec.device.name,
+        filter: rec.settings.filter,
+        gain: rec.settings.gain,
+        subS: rec.settings.subS,
+        frames: rec.settings.frames,
+        ditherEverySubs: rec.settings.ditherEverySubs,
+        backgroundPct: rec.overexposure.backgroundPct,
+        coreClips: rec.overexposure.coreClips,
+        starSaturationMag: rec.overexposure.starSaturationMag,
+        snrTonight: rec.integration.snrTonight,
+        hoursToGood: rec.integration.hoursTo.good,
+        suggestedGoalMin: rec.integration.suggestedGoalMin,
+        line: rec.why.slice(0, 2).join('; '),
+        apply: rec.apply,
+      };
+    } catch (e) {
+      log.debug(`acquisition for ${t.displayName}: ${errMsg(e)}`);
+      return null;
+    }
   }
 
   private programCandidate(t: ProgramTarget, key: string, got: number, glassFilters: string[], moonIllum: number): Candidate {
@@ -571,7 +626,10 @@ export class PlanService extends SafeEmitter {
     const t1 = Date.now();
     const solved = solveNight(input);
     const solveMs = Date.now() - t1;
-    for (const b of solved.blocks) if (b.target && !b.past && !b.target.advice) b.target.advice = this.advise(b.target, b, this.lastConditions);
+    const facts = await this.facts();
+    // what each target has collected: one look at the library for the whole night, not one per block
+    const progress = facts ? collected(this.d.journal) : null;
+    for (const b of solved.blocks) if (b.target && !b.past && !b.target.advice) b.target.advice = this.advise(b.target, b, this.lastConditions, facts, progress);
     const site = this.site();
     const moon = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2));
     const stamp = await this.forecastStamp();

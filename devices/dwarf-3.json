@@ -1,0 +1,50 @@
+{
+  "id": "dwarf-3",
+  "name": "DWARFLAB Dwarf 3",
+  "maker": "DWARFLAB",
+  "driver": "dwarf",
+  "match": ["dwarf 3", "dwarf3", "dwarf_3"],
+  "optics": { "apertureMm": 35, "focalLengthMm": 150, "design": "6-element apochromat" },
+  "sensor": {
+    "name": "Sony IMX678 Starvis 2 (1/1.8\")",
+    "widthPx": 3840,
+    "heightPx": 2160,
+    "pixelUm": 2.0,
+    "bitDepth": 12,
+    "dataMaxAdu": 4095,
+    "blackLevelAdu": 168,
+    "qe": 0.83,
+    "fullWellE": 11270,
+    "gainUnit": "linear",
+    "ePerAdu": [{ "gain": 60, "value": 0.25 }],
+    "readNoiseE": [{ "gain": 40, "value": 1.2 }, { "gain": 60, "value": 1.0 }, { "gain": 120, "value": 0.8 }, { "gain": 240, "value": 0.6 }],
+    "darkCurrentEPerS": 0.02,
+    "bayer": "RGGB"
+  },
+  "gain": { "settable": true, "default": 60, "min": 40, "max": 240, "options": [40, 60, 80, 100, 120] },
+  "exposure": {
+    "altAzS": [5, 10, 15],
+    "eqS": [15, 30, 60, 120],
+    "eqExtendedS": [],
+    "requiresMatchingDarks": true,
+    "perSubOverheadS": 0.5
+  },
+  "dither": { "everySubs": 6, "costS": 0, "costSubs": 1, "longFromS": 60, "everySubsLong": 10 },
+  "mount": { "eqCapable": true },
+  "filters": [
+    { "name": "Astro", "aliases": ["astro"], "band": "broadband", "passband": "440–690 nm (passes Hα)" },
+    { "name": "Duo-Band", "aliases": ["duo-band", "duo band", "dual-band", "duoband"], "band": "duo_wide", "passband": "OIII 500.7 + Hα 656.3 nm" },
+    { "name": "VIS", "aliases": ["vis", "uv/ir cut"], "band": "broadband", "passband": "430–650 nm (UV/IR cut, cuts Hα)", "deepSky": false }
+  ],
+  "sources": [
+    "agent/reference/dwarf3-specs.md (official product page and manual; QE 83%, read noise 0.6 e⁻ minimum, full well 11 270 e⁻, 12-bit, black ≈ 200)",
+    "dark master 120 s / gain 60 / 40 °C of this unit: median 168 ADU (2026-10-23)",
+    "conversion gain ≈ 0.25 e⁻/ADU at gain 60: single-frame noise of a 60 s M 31 sub of this unit (2026-10-21; estimate)",
+    "exposure choices: sessions on this unit at 15, 30, 60 and 120 s (EQ) and 15 s alt-az; tele astro gain range 40–240 (device schema)",
+    "dither: every 6 subs below 60 s and every 10 from 60 s, the dithered sub discarded (DWARFLAB troubleshooting guide; session gaps of this unit)"
+  ],
+  "notes": [
+    "The firmware refuses a deep-sky exposure without a dark master of that exposure and gain (-11503): the plan only recommends covered pairs when the dark list is known.",
+    "How e⁻/ADU scales with the Dwarf's gain number is assumed (inverse-proportional): measure each gain you use."
+  ]
+}

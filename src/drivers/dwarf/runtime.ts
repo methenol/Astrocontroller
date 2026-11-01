@@ -21,6 +21,7 @@ import { dwarfDuty } from './duty.js';
 import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
 import { createNight, withNightPlan, type NightServices } from '../../night/index.js';
 import { dwarfProbe } from './journal.js';
+import { dwarfFacts } from './acquisition.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const dwarf = new Dwarf();
@@ -40,6 +41,7 @@ function create({ agent }: DriverDeps): DriverRuntime {
     },
     probe: dwarfProbe(dwarf, hub),
     duty,
+    facts: dwarfFacts(dwarf),
   });
 
   return {

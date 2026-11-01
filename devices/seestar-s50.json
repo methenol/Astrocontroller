@@ -1,0 +1,47 @@
+{
+  "id": "seestar-s50",
+  "name": "ZWO Seestar S50",
+  "maker": "ZWO",
+  "driver": "seestar",
+  "match": ["s50"],
+  "optics": { "apertureMm": 50, "focalLengthMm": 250, "design": "triplet apochromat" },
+  "sensor": {
+    "name": "Sony IMX462 (1/2.8\")",
+    "widthPx": 1920,
+    "heightPx": 1080,
+    "pixelUm": 2.9,
+    "bitDepth": 16,
+    "dataMaxAdu": 65535,
+    "blackLevelAdu": 2100,
+    "qe": 0.8,
+    "fullWellE": 11200,
+    "gainUnit": "0.1dB",
+    "ePerAdu": [{ "gain": 80, "value": 0.05 }],
+    "readNoiseE": [{ "gain": 0, "value": 2.6 }, { "gain": 79, "value": 2.0 }, { "gain": 80, "value": 1.1 }, { "gain": 350, "value": 0.5 }],
+    "darkCurrentEPerS": 0.05,
+    "bayer": "GRBG"
+  },
+  "gain": { "settable": false, "default": 80, "min": 0, "max": 570 },
+  "exposure": {
+    "altAzS": [2, 5, 10, 20, 30],
+    "eqS": [2, 5, 10, 20, 30, 60],
+    "eqExtendedS": [90, 120],
+    "requiresMatchingDarks": false,
+    "perSubOverheadS": 3
+  },
+  "dither": { "everySubs": 5, "costS": 17 },
+  "mount": { "eqCapable": true },
+  "filters": [
+    { "name": "IRCUT", "aliases": ["IR-cut", "UV/IR cut", "ir cut", "none"], "band": "broadband", "passband": "400–700 nm" },
+    { "name": "LP", "aliases": ["LP Dual-Band", "dual-band", "duo-band", "light pollution", "lp_filter"], "band": "duo_wide", "skyFraction": 0.17, "passband": "OIII 30 nm + Hα 20 nm" }
+  ],
+  "sources": [
+    "optics and sensor: seestar.com S50 product page (50 mm f/5, 250 mm, IMX462 1920×1080, FOV 0.73°×1.29°)",
+    "stack gain 80 (HCG of the IMX462): ZWO forum and AAVSO forum posts",
+    "IMX462 full well 11.2 ke⁻, read noise down to 0.47 e⁻: ZWO ASI462MC specifications",
+    "exposure choices: Seestar app 3.4.1 (as for every Seestar)"
+  ],
+  "notes": [
+    "Conversion gain, black level and read noise are estimates carried over from the S50 Pro's measured pipeline: measure them (acquisition_measure action=sensor, then action=sky on a session) before trusting the background guard."
+  ]
+}

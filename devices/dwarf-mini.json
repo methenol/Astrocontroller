@@ -1,0 +1,46 @@
+{
+  "id": "dwarf-mini",
+  "name": "DWARFLAB Dwarf Mini",
+  "maker": "DWARFLAB",
+  "driver": "dwarf",
+  "match": ["dwarf mini", "dwarfmini", "dwarf_mini", "mini"],
+  "optics": { "apertureMm": 30, "focalLengthMm": 150, "design": "apochromat" },
+  "sensor": {
+    "name": "Sony IMX662 (1/2.8\")",
+    "widthPx": 1920,
+    "heightPx": 1080,
+    "pixelUm": 2.9,
+    "bitDepth": 12,
+    "dataMaxAdu": 4095,
+    "blackLevelAdu": 200,
+    "qe": 0.9,
+    "fullWellE": 38200,
+    "gainUnit": "linear",
+    "ePerAdu": [{ "gain": 60, "value": 0.5 }],
+    "readNoiseE": [{ "gain": 40, "value": 1.5 }, { "gain": 60, "value": 1.2 }, { "gain": 120, "value": 1.0 }, { "gain": 240, "value": 0.8 }],
+    "darkCurrentEPerS": 0.03,
+    "bayer": "RGGB"
+  },
+  "gain": { "settable": true, "default": 60, "min": 40, "max": 240, "options": [40, 60, 80, 100, 120] },
+  "exposure": {
+    "altAzS": [5, 10, 15],
+    "eqS": [15, 30, 60, 90],
+    "eqExtendedS": [],
+    "requiresMatchingDarks": true,
+    "perSubOverheadS": 0.5
+  },
+  "dither": { "everySubs": 6, "costS": 0, "costSubs": 1, "longFromS": 60, "everySubsLong": 10 },
+  "mount": { "eqCapable": true },
+  "filters": [
+    { "name": "Astro", "aliases": ["astro"], "band": "broadband", "passband": "broadband (passes Hα)" },
+    { "name": "Duo-Band", "aliases": ["duo-band", "duo band", "dual-band", "duoband"], "band": "duo_wide", "passband": "OIII 500.7 + Hα 656.3 nm" }
+  ],
+  "sources": [
+    "optics and sensor: digitalcameraworld.com, astrobackyard.com and skyatnightmagazine.com reviews (30 mm f/5, 150 mm, IMX662 1080p 2.9 µm; exposures up to 90 s; Astro, Duo-Band and dark filters)",
+    "IMX662: ZWO ASI662MC page (full well 38.2 ke⁻, read noise 0.8 e⁻ in HCG)",
+    "data format, gain scale, dither and dark rules: assumed the same as the Dwarf 3 (same firmware family)"
+  ],
+  "notes": [
+    "Conversion gain, black level, read noise and the exposure list are estimates: measure them, and correct the exposure list from the device (get_camera_settings)."
+  ]
+}

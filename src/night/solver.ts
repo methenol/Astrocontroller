@@ -163,6 +163,25 @@ export interface TargetAdvice {
   detectReason: string;
   surfaceBrightness: number | null;
   sub: { subS: number; rangeS: [number, number] | null; subs: number; integrationMin: number; line: string } | null;
+  /** the acquisition planner's capture settings for the block (astro/acquisition) */
+  acquisition?: {
+    device: string;
+    filter: string;
+    gain: number;
+    subS: number;
+    frames: number;
+    ditherEverySubs: number;
+    /** worst sky background over the block, % of the range above black */
+    backgroundPct: number;
+    coreClips: boolean;
+    starSaturationMag: number;
+    snrTonight: number;
+    hoursToGood: number;
+    suggestedGoalMin: number;
+    line: string;
+    /** the tool calls that apply the settings on this driver */
+    apply: string;
+  };
 }
 
 export interface BlockTarget {

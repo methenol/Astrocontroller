@@ -16,6 +16,7 @@ import { Journal } from './journal.js';
 import { JournalRecorder, type JournalProbe } from './recorder.js';
 import { PlanService } from './service.js';
 import { nightKey } from './clock.js';
+import type { FactsSource } from '../astro/acquisition/index.js';
 
 const log = logger('night');
 
@@ -35,6 +36,8 @@ export interface NightDeps {
   probe: JournalProbe;
   duty: DutyLoop;
   nightsEnabled?: () => boolean;
+  /** what the scope says about itself (the acquisition planner's capture settings per block) */
+  facts?: FactsSource;
 }
 
 export function createNight(d: NightDeps): NightServices {
@@ -53,6 +56,7 @@ export function createNight(d: NightDeps): NightServices {
     active: () => recorder.active(),
     duty: d.duty,
     nightsEnabled: d.nightsEnabled,
+    facts: d.facts,
     notify: (text) => d.duty.event(text, true),
   });
   const nightOf = (at = Date.now()) => {

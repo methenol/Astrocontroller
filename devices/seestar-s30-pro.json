@@ -1,0 +1,47 @@
+{
+  "id": "seestar-s30-pro",
+  "name": "ZWO Seestar S30 Pro",
+  "maker": "ZWO",
+  "driver": "seestar",
+  "match": ["s30 pro", "s30pro"],
+  "optics": { "apertureMm": 30, "focalLengthMm": 160, "design": "quadruplet apochromat" },
+  "sensor": {
+    "name": "Sony IMX585 (1/1.2\")",
+    "widthPx": 3840,
+    "heightPx": 2160,
+    "pixelUm": 2.9,
+    "bitDepth": 16,
+    "dataMaxAdu": 65535,
+    "blackLevelAdu": 2100,
+    "qe": 0.9,
+    "fullWellE": 40000,
+    "gainUnit": "0.1dB",
+    "ePerAdu": [{ "gain": 200, "value": 0.03 }],
+    "readNoiseE": [{ "gain": 0, "value": 3.6 }, { "gain": 199, "value": 2.5 }, { "gain": 200, "value": 0.8 }, { "gain": 600, "value": 0.7 }],
+    "darkCurrentEPerS": 0.05,
+    "bayer": "GRBG"
+  },
+  "gain": { "settable": false, "default": 200, "min": 0, "max": 600 },
+  "exposure": {
+    "altAzS": [2, 5, 10, 20, 30],
+    "eqS": [2, 5, 10, 20, 30, 60],
+    "eqExtendedS": [90, 120],
+    "requiresMatchingDarks": false,
+    "perSubOverheadS": 3
+  },
+  "dither": { "everySubs": 5, "costS": 17 },
+  "mount": { "eqCapable": true },
+  "filters": [
+    { "name": "IRCUT", "aliases": ["IR-cut", "UV/IR cut", "ir cut", "none"], "band": "broadband", "passband": "400–700 nm" },
+    { "name": "LP", "aliases": ["LP Dual-Band", "dual-band", "duo-band", "light pollution", "lp_filter"], "band": "duo_wide", "skyFraction": 0.17, "passband": "OIII 30 nm + Hα 20 nm (as the S50 Pro's; unconfirmed)" }
+  ],
+  "sources": [
+    "optics and sensor: retailer listings and astrobackyard.com review (30 mm, 160 mm, f/5.3, IMX585 3840×2160, 4.6° diagonal)",
+    "IMX585: ZWO ASI585 manual (full well 47 ke⁻, HCG at gain 252, revised to 200 in 2025), read noise ~0.7–0.8 e⁻ in HCG",
+    "stack gain 200 and the conversion gain: assumed from the S50 Pro (same firmware family)",
+    "exposure choices: Seestar app 3.4.1 (as for every Seestar)"
+  ],
+  "notes": [
+    "Conversion gain, black level and read noise are estimates: measure them before trusting the background guard."
+  ]
+}

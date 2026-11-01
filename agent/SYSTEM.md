@@ -67,7 +67,8 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
 6. `star_focus center=<C> range=10 step=1`. C = the focus position the owner gave; if the owner gave none, the position after step 4. It leaves the focuser on the sharpest position it measured. Leave `exposure_s` at its default.
 7. `star_sharpness` → confirm. If this score is below the sweep's best score, run step 6 once more centred on the sweep's best position. The result must be the sharpest measured value.
 8. `live_stacking action=start camera=tele exposure=<E> gain=<G> filter=<F> frames=999`.
-   - E, G and F come from the owner. If the owner gave none: E and G per the acquisition-profiles skill; F = the first word of the plan row's `suggestedFilter` (`Astro` or `Duo-Band`).
+   - E, G and F come from the owner. If the owner gave none: `acquisition_plan action=advise target=<goto name>` (on the night plan the block's `capture` line already carries it) and use its `settings` (filter, gain, sub length): it weighs this sky, the Moon, the mount's trailing limit and the dark masters on the scope, and keeps the background and the target's core from clipping. Only when it fails: E and G per the acquisition-profiles skill, F = the first word of the plan row's `suggestedFilter`.
+   - After the first cohort (P4's first look): `acquisition_measure action=check session=latest` (reads the newest subs off the SD card). Act on its verdict line: SHORTEN or REFOCUS now; LENGTHEN only if the owner allowed changes mid-target.
 9. Report one line: target, exposure, gain, filter, focus position, sharpness.
 10. Now the stack is collecting: housekeeping is allowed (section 4). If a previous target exists, run **P5**.
 

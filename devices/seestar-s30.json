@@ -1,0 +1,47 @@
+{
+  "id": "seestar-s30",
+  "name": "ZWO Seestar S30",
+  "maker": "ZWO",
+  "driver": "seestar",
+  "match": ["s30"],
+  "optics": { "apertureMm": 30, "focalLengthMm": 150, "design": "triplet apochromat" },
+  "sensor": {
+    "name": "Sony IMX662 (1/2.8\")",
+    "widthPx": 1920,
+    "heightPx": 1080,
+    "pixelUm": 2.9,
+    "bitDepth": 16,
+    "dataMaxAdu": 65535,
+    "blackLevelAdu": 2100,
+    "qe": 0.9,
+    "fullWellE": 38200,
+    "gainUnit": "0.1dB",
+    "ePerAdu": [{ "gain": 200, "value": 0.03 }],
+    "readNoiseE": [{ "gain": 0, "value": 3.0 }, { "gain": 199, "value": 2.0 }, { "gain": 200, "value": 1.0 }, { "gain": 600, "value": 0.8 }],
+    "darkCurrentEPerS": 0.05,
+    "bayer": "GRBG"
+  },
+  "gain": { "settable": false, "default": 200, "min": 0, "max": 600 },
+  "exposure": {
+    "altAzS": [2, 5, 10, 20, 30],
+    "eqS": [2, 5, 10, 20, 30, 60],
+    "eqExtendedS": [90, 120],
+    "requiresMatchingDarks": false,
+    "perSubOverheadS": 3
+  },
+  "dither": { "everySubs": 5, "costS": 17 },
+  "mount": { "eqCapable": true },
+  "filters": [
+    { "name": "IRCUT", "aliases": ["IR-cut", "UV/IR cut", "ir cut", "none"], "band": "broadband", "passband": "400–700 nm" },
+    { "name": "LP", "aliases": ["LP Dual-Band", "dual-band", "duo-band", "light pollution", "lp_filter"], "band": "duo_wide", "skyFraction": 0.17, "passband": "OIII 30 nm + Hα 20 nm (as the S50's; unconfirmed)" }
+  ],
+  "sources": [
+    "optics and sensor: astronomytechnologytoday.com and highpointscientific.com S30 reviews (30 mm f/5, 150 mm, IMX662 1920×1080, 2.9 µm)",
+    "IMX662: ZWO ASI662MC page (full well 38.2 ke⁻, read noise 0.8 e⁻ in HCG)",
+    "stack gain 200 (HCG): ZWO forum post",
+    "exposure choices: Seestar app 3.4.1 (as for every Seestar)"
+  ],
+  "notes": [
+    "Conversion gain, black level and read noise are estimates: measure them before trusting the background guard."
+  ]
+}

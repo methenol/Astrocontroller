@@ -1,0 +1,50 @@
+{
+  "id": "seestar-s50-pro",
+  "name": "ZWO Seestar S50 Pro",
+  "maker": "ZWO",
+  "driver": "seestar",
+  "match": ["s50 pro", "s50pro"],
+  "optics": { "apertureMm": 50, "focalLengthMm": 260, "design": "quadruplet apochromat, ED glass" },
+  "sensor": {
+    "name": "OmniVision OS08B10 (1/1.2\")",
+    "widthPx": 3840,
+    "heightPx": 2160,
+    "pixelUm": 2.9,
+    "bitDepth": 16,
+    "dataMaxAdu": 65535,
+    "blackLevelAdu": 2272,
+    "qe": 0.75,
+    "fullWellE": 20000,
+    "gainUnit": "0.1dB",
+    "ePerAdu": [{ "gain": 200, "value": 0.026 }],
+    "readNoiseE": [{ "gain": 0, "value": 3.0 }, { "gain": 190, "value": 2.5 }, { "gain": 200, "value": 1.2 }, { "gain": 600, "value": 0.8 }],
+    "darkCurrentEPerS": 0.09,
+    "bayer": "GRBG"
+  },
+  "gain": { "settable": false, "default": 200, "min": 0, "max": 600 },
+  "exposure": {
+    "altAzS": [2, 5, 10, 20, 30],
+    "eqS": [2, 5, 10, 20, 30, 60],
+    "eqExtendedS": [90, 120],
+    "requiresMatchingDarks": false,
+    "perSubOverheadS": 3
+  },
+  "dither": { "everySubs": 5, "costS": 17 },
+  "mount": { "eqCapable": true },
+  "filters": [
+    { "name": "IRCUT", "aliases": ["IR-cut", "UV/IR cut", "ir cut", "none"], "band": "broadband", "passband": "400–700 nm" },
+    { "name": "LP", "aliases": ["LP Dual-Band", "dual-band", "duo-band", "light pollution", "lp_filter"], "band": "duo_wide", "skyFraction": 0.17, "passband": "OIII 30 nm + Hα 20 nm" }
+  ],
+  "sources": [
+    "firmware 9.75 get_device_state: chip 2160×3840, 2.9 µm, focal length 260 mm (this unit, 2026-10-28)",
+    "raw subs of this unit (SN 58b0bd27): FITS 16-bit, clipped at 65535, BIAS card 2065, gain 200; dark master 60 s / gain 200 / 24 °C median 2272 ADU (2026-10-27)",
+    "conversion gain 0.026 e⁻/ADU at gain 200: single-frame noise of two sessions (M 31 IRCUT, IC 434 LP) agreeing within 8% (2026-11-01)",
+    "sub cadence: 63 s per 60 s sub, a dither every ~5 subs costing ~17 s (M 31 session, 2026-10-27)",
+    "exposure choices: Seestar app 3.4.1 StackMoreDialog (2/5/10/20/30 s; +60 s in EQ; +90/120 s when the firmware's exp_ms.more_exposure is on)",
+    "aperture, optics, OS08B10 sensor, filters: astronomics.com, scopetrader.com, galactic-hunter.com S50 Pro reviews"
+  ],
+  "notes": [
+    "The stack gain is the firmware's (200 here; the app has no gain control): the plan reads it from the scope and does not change it.",
+    "Read noise and QE are estimates: run acquisition_measure action=sensor with dark frames to replace them."
+  ]
+}

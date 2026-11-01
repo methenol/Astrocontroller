@@ -108,6 +108,10 @@ export class SeestarCapture {
         const { width, height } = raw.header;
         const px = framePixels(raw.payload, width * height * 2, `raw frame of ${raw.payload.length} B`);
         const st = this.scope.state;
+        // the live exposure and the view's gain, when known: the sensor measurements read them (acquisition_measure)
+        const settings = (st.deviceState as { setting?: { exp_ms?: { continuous?: number } } } | null)?.setting;
+        const liveMs = camera === 'tele' ? settings?.exp_ms?.continuous : undefined;
+        const gain = camera === 'tele' ? st.view.gain : st.secondView.gain;
         rawPath = file.replace(/\.jpg$/, '.fit');
         writeFileAtomic(
           rawPath,
@@ -117,6 +121,8 @@ export class SeestarCapture {
             'DATE-OBS': new Date(raw.at).toISOString().replace('Z', ''),
             BAYERPAT: 'GRBG',
             WIDECAM: camera === 'wide' ? 1 : 0,
+            ...(typeof liveMs === 'number' && liveMs > 0 ? { EXPTIME: liveMs / 1000 } : {}),
+            ...(typeof gain === 'number' ? { GAIN: gain } : {}),
             ...(st.focus.position !== undefined ? { FOCUSPOS: st.focus.position } : {}),
             ...(st.view.target ? { OBJECT: st.view.target } : {}),
           }),

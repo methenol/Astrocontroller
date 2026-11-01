@@ -26,6 +26,8 @@ import type { DutyLoop } from '../../agent/duty.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
 import type { NightServices } from '../../night/index.js';
 import { registerNightTools } from '../../mcp/tools/night.js';
+import { registerAcquisitionTools } from '../../mcp/tools/acquisition.js';
+import { seestarFacts } from './acquisition.js';
 import type { McpSpec } from '../types.js';
 import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
 import { NOMINAL_FOV } from './focus.js';
@@ -85,6 +87,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
       }
       registerStellariumTools(tool);
       registerResearchTools(tool, { fov: () => scope.state.fov ?? NOMINAL_FOV });
+      registerAcquisitionTools(tool, { site: () => scope.requireLocation(), facts: seestarFacts(scope), night, sessionSubs: media ? (folder) => media.storage.sessionSubs(folder) : undefined });
     },
   };
 }

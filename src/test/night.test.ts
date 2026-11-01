@@ -327,3 +327,32 @@ describe('night plan: Find targets and the plan agree', () => {
     for (let i = 1; i < rest.length; i++) assert.ok(rest[i - 1] >= rest[i], 'the rest by plan value');
   });
 });
+
+describe('night plan: capture settings per block', () => {
+  test("with the scope's facts every target block carries the acquisition planner's settings, in the device's own filter names", async () => {
+    const now = Date.parse('2026-11-01T18:00:00Z');
+    const svc = new PlanService({
+      site: () => SITE,
+      fovArcmin: () => ({ w: 83, h: 147 }),
+      journal: new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'acq-j-')) }),
+      now: () => now,
+      conditions: async () => null,
+      forecastStamp: async () => null,
+      facts: async () => ({ driver: 'seestar', model: 'Seestar S50 Pro', eqMode: true, gain: 200 }),
+      dir: fs.mkdtempSync(path.join(os.tmpdir(), 'acq-')),
+    });
+    const plan = await svc.plan();
+    const blocks = plan.blocks.filter((b) => b.kind === 'target' && !b.past);
+    assert.ok(blocks.length > 0);
+    for (const b of blocks) {
+      const a = b.target!.advice?.acquisition;
+      assert.ok(a, `${b.target!.displayName} has capture settings`);
+      assert.ok(['IRCUT', 'LP'].includes(a.filter) && a.filter === b.target!.filter, `${a.filter} is the block's filter`);
+      assert.ok([2, 5, 10, 20, 30, 60].includes(a.subS) && a.gain === 200);
+      assert.ok(a.backgroundPct <= 25);
+      assert.match(a.apply, /^set_camera_setting setting=exposure value=\d+; goto_target … lp_filter=(true|false)/);
+    }
+    const { targets } = await svc.suggestions({ limit: 5 });
+    assert.ok(targets.some((t) => (t.capture as { subS: number } | null)?.subS), 'Find targets carries capture settings too');
+  });
+});

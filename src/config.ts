@@ -151,6 +151,10 @@ export const config = {
   guided: env.bool('PLAN_GUIDED', false),
   /** arcsec per pixel; the app's own tele plate scale when unset */
   plateScaleArcsecPerPx: env.optNum('PLAN_PLATE_SCALE_ARCSEC', { min: 0.05, max: 60 }),
+  /** the scope's spec file (devices/<id>.json) when the scope's own report should not pick it, e.g. seestar-s30-pro */
+  device: env.str('PLAN_DEVICE', ''),
+  /** the site's zenith sky brightness from a sky meter, mag/arcsec² (wins over measured subs and PLAN_BORTLE) */
+  skySqm: env.optNum('PLAN_SKY_SQM', { min: 16, max: 22.5 }),
   },
   llm: {
     baseUrl: env.url('LLM_BASE_URL', 'http://localhost:8000/v1'),
@@ -182,6 +186,8 @@ export const config = {
     home: path.resolve(env.str('AGENT_HOME', path.join(dataDir, 'home'))),
     captures: path.join(dataDir, 'captures'),
     catalog: path.resolve(env.str('CATALOG_DIR', './catalog')),
+    /** the shipped smart-telescope spec files; the owner's own go in <data>/devices */
+    devices: path.resolve(env.str('DEVICES_DIR', './devices')),
     agentTemplate: path.resolve(env.str('AGENT_TEMPLATE_DIR', './agent')),
     public: path.resolve(env.str('PUBLIC_DIR', './public')),
   },

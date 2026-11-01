@@ -22,6 +22,7 @@ import { seestarMedia, seestarWeb } from './web.js';
 import { seestarProbe } from './journal.js';
 import { createNight, withNightPlan, type NightServices } from '../../night/index.js';
 import { NOMINAL_FOV } from './focus.js';
+import { seestarFacts } from './acquisition.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const scope = new Seestar();
@@ -64,6 +65,7 @@ function create({ agent }: DriverDeps): DriverRuntime {
     },
     probe: seestarProbe(scope),
     duty,
+    facts: seestarFacts(scope),
     nightsEnabled: () => !!nights?.status().enabled,
   });
   const web = seestarWeb(scope, media, nights);

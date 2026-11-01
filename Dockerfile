@@ -34,6 +34,7 @@ COPY package.json ./
 COPY public ./public
 COPY agent ./agent
 COPY catalog ./catalog
+COPY devices ./devices
 COPY scripts ./scripts
 
 ENV NODE_ENV=production \
