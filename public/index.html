@@ -60,11 +60,13 @@
     <nav class="tabs tabs-top" id="tabs-top" role="tablist" aria-label="Sections">
       <button class="tab active" data-tab="chat" role="tab" aria-selected="true" aria-controls="panel-chat">Agent</button>
       <button class="tab" data-tab="tonight" role="tab" aria-selected="false" aria-controls="panel-tonight">Tonight</button>
+      <button class="tab" data-tab="plan" role="tab" aria-selected="false" aria-controls="panel-plan">Plan</button>
       <button class="tab" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather">Weather</button>
       <button class="tab" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium">Stellarium</button>
       <button class="tab" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database">Database</button>
       <button class="tab" data-tab="album" role="tab" aria-selected="false" aria-controls="panel-album">Album</button>
       <button class="tab" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library">Library</button>
+      <button class="tab" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel-journal">Journal</button>
       <button class="tab" data-tab="skills" role="tab" aria-selected="false" aria-controls="panel-skills">Skills</button>
       <button class="tab" data-tab="log" role="tab" aria-selected="false" aria-controls="panel-log">Log</button>
     </nav>
@@ -234,7 +236,7 @@
         <button type="button" class="ghost" id="btn-duty-wake" hidden title="Send the next sample now">Wake now</button>
         <button type="button" class="ghost" id="btn-duty-pause" hidden>Pause</button>
         <button type="button" class="ghost" id="btn-duty" title="Put the agent on duty: it is woken with fresh measurements every few minutes and on events until the end time">Start duty…</button>
-        <button type="button" class="ghost" id="btn-auto-nights" hidden title="Autonomous Starfront nights: every night the roof opens, the agent images targets from the planner from astronomical dark to dawn, transfers them and stows the arm; it can be left on for days or weeks">Autonomous nights: off</button>
+        <button type="button" class="ghost" id="btn-auto-nights" hidden title="Autonomous Starfront nights: every night the roof opens, the agent carries out the night plan (Plan tab) from astronomical dark to dawn, transfers each target and stows the arm; it can be left on for days or weeks">Autonomous nights: off</button>
       </div>
       <div class="duty-text auto-nights-text" id="auto-nights-text" hidden></div>
       <form class="duty-form" id="duty-form" hidden>
@@ -291,6 +293,61 @@
         <select id="sel-plan-fov" aria-label="Minimum size as a percent of the tele frame width" title="Only targets that fill at least this much of the tele frame width"><option value="">any size</option><option value="10">≥10% of frame</option><option value="25">≥25% of frame</option><option value="50">≥50% of frame</option><option value="75">≥75% of frame</option><option value="100">fills the frame</option></select>
       </div>
       <div id="plan">–</div>
+    </section>
+
+    <!-- ========== Plan: tonight's schedule and the owner's program ========== -->
+    <section class="panel" id="panel-plan" role="tabpanel" aria-label="Plan">
+      <div class="card" id="np-head">plan loading…</div>
+      <div class="card np-timeline-card">
+        <div id="np-timeline" class="np-timeline"></div>
+        <div id="np-legend" class="np-legend muted small"></div>
+        <div class="muted small">Tap a block for its details, alternates and holds. Sky: forecast (green good, amber fair, red out); moon: when it is up; lines: each target's altitude, bold where it is scheduled; dashed: the minimum altitude.</div>
+      </div>
+      <div class="card" id="np-detail" hidden></div>
+      <div class="card" id="np-program-card">
+        <div class="row-head"><h3>Program</h3><span class="muted small">what you want collected, and for how long</span><span class="spacer"></span><span class="muted small" id="np-program-sum"></span></div>
+        <form id="np-add" class="duty-form-row np-add" autocomplete="off">
+          <input id="np-add-name" list="np-add-list" placeholder="Add a target: M 31, NGC 7000, Sh2-155…" aria-label="Target to add" enterkeyhint="done">
+          <datalist id="np-add-list"></datalist>
+          <label>goal <input id="np-add-goal" type="number" min="0.5" step="0.5" value="3" inputmode="decimal" aria-label="Goal in hours"> h</label>
+          <label>priority <select id="np-add-pri" aria-label="Priority"><option value="5">5 top</option><option value="4">4 high</option><option value="3" selected>3 normal</option><option value="2">2 below normal</option><option value="1">1 low</option></select></label>
+          <button class="primary" type="submit">Add</button>
+        </form>
+        <div id="np-program"></div>
+      </div>
+      <div class="card" id="np-find-card">
+        <div class="row-head"><h3>Find targets</h3><span class="muted small">this filter picks the plan's fillers and the suggestions below</span><span class="spacer"></span><label class="small"><input type="checkbox" id="np-f-fillers"> fill free time with these</label></div>
+        <div class="np-types" id="np-f-types" role="group" aria-label="Target types">
+          <label><input type="checkbox" value="galaxy"> galaxies</label>
+          <label><input type="checkbox" value="emission"> emission nebulae</label>
+          <label><input type="checkbox" value="nebula"> all nebulae</label>
+          <label><input type="checkbox" value="reflection"> reflection</label>
+          <label><input type="checkbox" value="dark"> dark</label>
+          <label><input type="checkbox" value="planetary"> planetary</label>
+          <label><input type="checkbox" value="supernova_remnant"> supernova remnants</label>
+          <label><input type="checkbox" value="cluster"> clusters</label>
+          <label><input type="checkbox" value="globular"> globulars</label>
+          <label><input type="checkbox" value="open_cluster"> open clusters</label>
+          <label><input type="checkbox" value="galaxy_cluster"> galaxy clusters</label>
+        </div>
+        <div class="duty-form-row">
+          <label title="How much of the tele frame width the target's major axis covers">frame fill <select id="np-f-fov"><option value="0">any size</option><option value="10">≥10%</option><option value="25">≥25%</option><option value="50">≥50%</option><option value="75">≥75%</option><option value="100">fills the frame</option></select></label>
+          <label>brighter than <select id="np-f-mag"><option value="">any magnitude</option><option value="7">mag 7</option><option value="8">mag 8</option><option value="9">mag 9</option><option value="10">mag 10</option><option value="11">mag 11</option><option value="12">mag 12</option><option value="13">mag 13</option></select></label>
+          <label>size <input type="number" id="np-f-min" min="0" max="600" step="1" placeholder="min" aria-label="Minimum size, arcmin" inputmode="numeric">–<input type="number" id="np-f-max" min="0" max="1200" step="5" placeholder="max" aria-label="Maximum size, arcmin" inputmode="numeric">′</label>
+        </div>
+        <div id="np-suggest" class="np-suggest">–</div>
+      </div>
+      <div class="card" id="np-holds-card">
+        <div class="row-head"><h3>Holds tonight</h3><span class="spacer"></span><span class="muted small">cloud in the</span><button type="button" class="ghost" data-skyhold="N">N</button><button type="button" class="ghost" data-skyhold="E">E</button><button type="button" class="ghost" data-skyhold="S">S</button><button type="button" class="ghost" data-skyhold="W">W</button></div>
+        <div id="np-holds"></div>
+      </div>
+      <details class="card" id="np-settings-card">
+        <summary><b>Plan settings</b> <span class="muted small">window, limits, Moon, forecast, fillers, nightly run</span></summary>
+        <form id="np-settings" class="np-settings" onsubmit="return false"></form>
+        <datalist id="np-starts"><option value="astro-dusk"><option value="nautical-dusk"><option value="sunset"></datalist>
+        <datalist id="np-ends"><option value="astro-dawn"><option value="nautical-dawn"><option value="sunrise"></datalist>
+        <datalist id="np-filters"><option value="auto"><option value="IR-cut"><option value="LP Dual-Band"><option value="Astro"><option value="Duo-Band"></datalist>
+      </details>
     </section>
 
     <!-- ========== Weather: is it safe to leave the telescope out? ========== -->
@@ -383,7 +440,8 @@
           <label><input type="checkbox" data-opt="tele"> tele frame</label>
           <label><input type="checkbox" data-opt="wide"> wide frame</label>
           <label><input type="checkbox" data-opt="scope"> telescope</label>
-          <label><input type="checkbox" data-opt="plan"> tonight's plan</label>
+          <label><input type="checkbox" data-opt="plan"> tonight's best targets</label>
+          <label title="The Plan tab's schedule: each target with its times, the night's path, and the frame on the plan's target at the sky's time"><input type="checkbox" data-opt="night"> night plan</label>
           <label><input type="checkbox" data-opt="mask"> obstructions</label>
           <label><input type="checkbox" data-opt="constellations"> constellations</label>
           <label><input type="checkbox" data-opt="atmosphere"> atmosphere</label>
@@ -475,6 +533,28 @@
       </div>
     </section>
 
+    <!-- ========== Journal: what each night was ========== -->
+    <section class="panel" id="panel-journal" role="tabpanel" aria-label="Journal">
+      <div class="card">
+        <div class="row-head">
+          <button type="button" class="ghost" id="jr-prev" aria-label="Earlier night">‹</button>
+          <select id="jr-night" aria-label="Night"></select>
+          <button type="button" class="ghost" id="jr-next" aria-label="Later night">›</button>
+        </div>
+        <div id="jr-summary">journal loading…</div>
+      </div>
+      <div id="jr-sessions" class="jr-sessions"></div>
+      <div class="card">
+        <div class="row-head"><h3>Notes</h3><span class="muted small">yours and the agent's; the agent reads them with its journal tool</span></div>
+        <form id="jr-note-form" class="jr-note-form">
+          <textarea id="jr-note" rows="2" placeholder="What happened, what to change next time…" aria-label="Note"></textarea>
+          <div class="duty-form-row"><label>about <select id="jr-note-target" aria-label="Note about"></select></label><button class="primary" id="jr-note-add" type="submit">Add note</button></div>
+        </form>
+        <div id="jr-notes"></div>
+      </div>
+      <details class="card" open><summary><b>Night events</b> <span class="muted small">duty, roof, link, plan changes, holds</span></summary><div id="jr-events"></div></details>
+    </section>
+
     <!-- ========== Log ========== -->
     <section class="panel" id="panel-log" role="tabpanel" aria-label="Log"><div id="log" class="log"></div></section>
   </main>
@@ -490,6 +570,8 @@
   <div class="sheet" id="sheet-more" hidden>
     <div class="sheet-scrim" data-close></div>
     <div class="sheet-card" role="group" aria-label="More sections">
+      <button class="tab sheet-item" data-tab="plan" role="tab" aria-selected="false" aria-controls="panel-plan"><b>Plan</b><small>tonight's schedule, your target program, holds</small></button>
+      <button class="tab sheet-item" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel-journal"><b>Journal</b><small>each night's targets, timelines, stats and notes</small></button>
       <button class="tab sheet-item" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather"><b>Weather</b><small>Rain Guard alarm, tonight's safety report, radar</small></button>
       <button class="tab sheet-item" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium"><b>Stellarium</b><small>the sky at the site: find, frame, GoTo</small></button>
       <button class="tab sheet-item" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><b>Database</b><small>search 45,000 objects, filter by what is up</small></button>

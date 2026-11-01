@@ -1,6 +1,7 @@
 /** What every web route module is given. */
 import type { AgentBridge } from '../agent/omp.js';
 import type { DutyLoop } from '../agent/duty.js';
+import type { NightServices } from '../night/index.js';
 import { config, observerLocation, telescopeHostInfo } from '../config.js';
 import { withoutCredentials } from '../util/url.js';
 import type { WebTelescope } from './telescope.js';
@@ -10,6 +11,8 @@ export interface WebContext {
   scope: WebTelescope;
   agent: AgentBridge;
   duty: DutyLoop;
+  /** the night plan, the program and the journal */
+  night?: NightServices | null;
   /** Send a message to every connected UI over the state socket. */
   broadcast(msg: unknown): void;
 }

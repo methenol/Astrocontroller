@@ -8,7 +8,7 @@ import { $, $$, store } from './dom.js';
 import { emit } from './bus.js';
 
 const WIDE_MQ = window.matchMedia('(min-width: 1000px)');
-const MORE_SCREENS = new Set(['weather', 'stellarium', 'database', 'library', 'skills', 'log']);
+const MORE_SCREENS = new Set(['plan', 'journal', 'weather', 'stellarium', 'database', 'library', 'skills', 'log']);
 const KEYBOARD_SHRINK_PX = 60;
 const COMPOSER_MAX_VH = 0.34;
 const ORIENTATION_SETTLE_MS = 250;

@@ -37,16 +37,16 @@ export interface Roof {
 }
 
 export const NIGHT_OBJECTIVE = [
-  'Autonomous Starfront night: the roof is open. Image targets from the planner until astronomical dawn, maximising integration time.',
+  "Autonomous Starfront night: the roof is open. Carry out tonight's night plan (the owner's program, scheduled: night_plan) until astronomical dawn, maximising integration time.",
   '1. seestar_status; open_arm if parked. If you were woken because a roof opened and the building is not known, first confirm the sky with view_camera camera=wide pointed up and report it with starfront_roof.',
-  '2. Before astronomical dark: plan_targets and choose the first target for its best hours; nothing is stacked before astronomical dark.',
-  '3. From astronomical dark: goto_target, autofocus, star_focus, start_stacking. Move to the next target from plan_targets when the current one leaves its best hours or is blocked (tele_visibility), so the night is spent on the targets in their optimal time, favouring those that need more integration. The previous target is transferred automatically when the next starts stacking.',
-  '4. If you are told the roof closed: stop_stacking and park at once, then wait (duty next_check 900). When it reopens, carry on from step 3.',
+  "2. Before the plan starts (astronomical dark): get ready; nothing is stacked before then. Each sample's night plan line says what comes first.",
+  "3. From the plan's start: be on the plan's target (goto_target, autofocus, star_focus, start_stacking) and move to the next block's target when the plan moves on. Blocked or clouded: night_plan action=obscured target=<name> cause=obstruction|cloud and take the target it gives. The previous target is transferred automatically when the next starts stacking.",
+  '4. If you are told the roof closed: stop_stacking and park at once, then wait (duty next_check 900). When it reopens, carry on from step 3 (night_plan action=now).',
   '5. At astronomical dawn the duty ends: stop stacking, transfer the night\'s sessions not yet transferred, park.',
 ].join('\n');
 
 export const ROOF_CHECK_PROMPT = (time: string) =>
-  `Starfront roof check (${time}): the roof status still says closed. Check the roof over the scope with the telescope: open_arm, move_motors altitude_deg=70, then view_camera camera=wide (and sky_check). Open sky (twilight or stars) = open; a dark ceiling, rafters or the inside of the building = closed. Report it with starfront_roof action=report open=true|false; if closed, park again. Open starts tonight's imaging duty.`;
+  `Starfront roof check (${time}): the roof status still says closed. Check the roof over the scope with the telescope: open_arm, move_motors altitude_deg=70, then view_camera camera=wide (and sky_check). Open sky (a twilight gradient, or a recognisable star field) = open; a dark ceiling, rafters, the inside of the building, or a dark frame with only noise or hot pixels (counted as "stars" under a closed roof) = closed; when in doubt, closed. Report it with starfront_roof action=report open=true|false; if closed, park again. Open starts tonight's imaging duty.`;
 
 interface NightRecord {
   /** the duty was started, and why */

@@ -42,7 +42,12 @@ const HANDLERS = {
     emit('config', m.config);
   },
   agentStatus: (m) => renderAgentStatus(m.status),
-  duty: (m) => renderDuty(m.duty),
+  duty: (m) => {
+    renderDuty(m.duty);
+    emit('duty', m.duty);
+  },
+  plan: (m) => emit('plan-changed', m),
+  journal: (m) => emit('journal-changed', m.night),
   agent: (m) => onAgentEvent(m.event),
   log: (m) => addLog(m.entry),
   job: (m) => {

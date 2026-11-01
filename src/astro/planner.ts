@@ -154,7 +154,7 @@ const ONLY_ON_REQUEST: readonly string[] = ['*', '**', 'Nova', 'Other', 'DrkN', 
 const BRIGHT_CLASS: Readonly<Record<number, number>> = { 1: 0.55, 2: 0.35, 3: 0.15 };
 
 /** 0–1 from the magnitude, or from the brightness class (Sharpless, Lynds…) when there is none. */
-function brightness(o: DsoObject): number {
+export function brightness(o: DsoObject): number {
   if (o.mag !== undefined) return Math.max(0, Math.min(1, (13 - o.mag) / 9));
   if (o.brightClass !== undefined) return BRIGHT_CLASS[o.brightClass] ?? 0.3;
   return 0.5;
@@ -166,7 +166,7 @@ export function suggestFilter(o: DsoObject, moonIllum: number): string {
   return 'Astro (broadband — galaxies, clusters, reflection nebulae need full spectrum)';
 }
 
-function framing(o: DsoObject, fov: { w: number; h: number }): { text: string; fit: number; mosaic: boolean } {
+export function framing(o: DsoObject, fov: { w: number; h: number }): { text: string; fit: number; mosaic: boolean } {
   const maj = o.majorArcmin ?? 0;
   if (!maj) return { text: 'size unknown', fit: 0.4, mosaic: false };
   const frac = maj / fov.w;
@@ -234,13 +234,13 @@ const MAGELLANIC_CONSTS: readonly string[] = ['Tuc', 'Dor', 'Hyi', 'Men'];
 const SEASON_TOP_N = 25;
 
 /** A forecast observability (0–100) as a weight 0–1; no (or an unusable) forecast counts as clear. */
-function clearness(c: HourConditions | undefined): number {
+export function clearness(c: HourConditions | undefined): number {
   const obs = c?.observability;
   return obs === undefined || !Number.isFinite(obs) ? 1 : Math.max(0, Math.min(1, obs / 100));
 }
 
 /** The alt-az zenith penalty: near the pole of the sky the field rotates too fast to integrate. */
-function keyholeWeight(alt: number, mount: Rig['mount']): number {
+export function keyholeWeight(alt: number, mount: Rig['mount']): number {
   if (mount === 'eq') return 1;
   if (alt < KEYHOLE_START) return 1;
   return Math.max(KEYHOLE_FLOOR, 1 - ((1 - KEYHOLE_FLOOR) * (alt - KEYHOLE_START)) / (KEYHOLE_FULL - KEYHOLE_START));
@@ -390,7 +390,7 @@ function darkMinutes(site: Site, start: Date, end: Date): number {
 }
 
 /** The glass a plan may use: one fixed filter, or the set the scope switches between itself. */
-interface Glass {
+export interface Glass {
   filters: string[];
   bortle?: number;
   moonStrength: number;
@@ -402,7 +402,7 @@ interface Glass {
  * judged through the broadband glass alone; emission targets take whichever filter brings them
  * up best, the Moon deciding between equals.
  */
-function chooseGlass(o: DsoObject, glass: Glass): { filter: string; d: Detectability } {
+export function chooseGlass(o: DsoObject, glass: Glass): { filter: string; d: Detectability } {
   const { filters, bortle, moonStrength } = glass;
   if (filters.length === 1) return { filter: filters[0], d: detectFor(o, { bortle, filter: filters[0] }) };
   const continuum = emissionOf(o) === 'broadband';

@@ -23,6 +23,8 @@ import { registerStellariumTools } from '../../mcp/tools/stellarium.js';
 import { registerMapObstructions } from '../../mcp/tools/horizon.js';
 import type { DutyLoop } from '../../agent/duty.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
+import type { NightServices } from '../../night/index.js';
+import { registerNightTools } from '../../mcp/tools/night.js';
 import type { McpSpec } from '../types.js';
 import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
 import { NOMINAL_FOV } from './focus.js';
@@ -40,7 +42,7 @@ The scope exposes one camera at a time (tele or wide): the one chosen as the mai
 Only one operation runs at a time. Over ZWO Telescope Network only one remote session exists per telescope: connecting takes it from the official app.
 Coordinates are J2000 (RA in hours, Dec in degrees). Never point at the Sun without the user confirming a solar filter.`;
 
-export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarMedia, nights?: StarfrontNights | null): McpSpec {
+export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarMedia, nights?: StarfrontNights | null, night?: NightServices | null): McpSpec {
   return {
     name: SERVER_NAME,
     instructions: INSTRUCTIONS,
@@ -65,6 +67,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
       // sessions on the Seestar, transfers, the library and processing
       registerLibraryTools(tool, { device: true });
       if (duty) registerDutyTools(tool, { duty });
+      if (night) registerNightTools(tool, night);
       if (nights) {
         tool(
           'starfront_roof',

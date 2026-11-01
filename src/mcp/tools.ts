@@ -12,6 +12,7 @@ import { registerHorizonTools } from './tools/horizon.js';
 import { registerLibraryTools } from './tools/library.js';
 import { registerMediaTools } from './tools/media.js';
 import { registerMotionTools } from './tools/motion.js';
+import { registerNightTools } from './tools/night.js';
 import { registerPlanningTools } from './tools/planning.js';
 import { registerStellariumTools } from './tools/stellarium.js';
 import { registerSystemTools } from './tools/system.js';
@@ -30,5 +31,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerLibraryTools(tool);
   registerDarkTools(tool, ctx);
   registerDutyTools(tool, ctx);
+  if (ctx.night) registerNightTools(tool, ctx.night);
   registerStellariumTools(tool);
 }

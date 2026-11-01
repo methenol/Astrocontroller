@@ -114,6 +114,7 @@ export interface HourConditions {
   transparencyIdx?: number;
   windKmh?: number;
   gustKmh?: number;
+  temperatureC?: number;
 }
 
 /**
@@ -127,7 +128,7 @@ export async function conditionsAt(site: Site, tz: string): Promise<((t: Date) =
     const byHour = new Map<number, HourConditions>(
       hours.map((h) => [
         Math.floor(new Date(h.time).getTime() / HOUR_MS),
-        { observability: h.score, seeingIdx: h.seeingIdx, transparencyIdx: h.transparencyIdx, windKmh: h.windKmh, gustKmh: h.gustKmh },
+        { observability: h.score, seeingIdx: h.seeingIdx, transparencyIdx: h.transparencyIdx, windKmh: h.windKmh, gustKmh: h.gustKmh, temperatureC: h.temperatureC },
       ]),
     );
     return (t: Date) => byHour.get(Math.floor(t.getTime() / HOUR_MS));

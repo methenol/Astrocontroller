@@ -19,10 +19,15 @@ import { Seestar } from './device.js';
 import { seestarDuty } from './duty.js';
 import { seestarMcpSpec } from './mcp.js';
 import { seestarMedia, seestarWeb } from './web.js';
+import { seestarProbe } from './journal.js';
+import { createNight, withNightPlan, type NightServices } from '../../night/index.js';
+import { NOMINAL_FOV } from './focus.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const scope = new Seestar();
-  const duty = new DutyLoop(seestarDuty(scope), agent);
+  // the night plan's lines go into every duty sample; the plan needs the duty (it starts the nightly one), so it is bound late
+  let night: NightServices | null = null;
+  const duty = new DutyLoop(withNightPlan(seestarDuty(scope), () => night), agent);
   const media = seestarMedia(scope);
   setDeviceLibrary(media.storage);
   // Starfront's autonomous nights: only with STARFRONT_REMOTE_ZWO on a scope over ZWO Telescope Network
@@ -43,18 +48,30 @@ function create({ agent }: DriverDeps): DriverRuntime {
         },
       })
     : null;
+  night = createNight({
+    site: () => scope.location(),
+    fovArcmin: () => {
+      const f = scope.state.fov ?? NOMINAL_FOV;
+      return { w: f.h * 60, h: f.v * 60 };
+    },
+    probe: seestarProbe(scope),
+    duty,
+    nightsEnabled: () => !!nights?.status().enabled,
+  });
   const web = seestarWeb(scope, media, nights);
   return {
     device: scope,
-    mcp: seestarMcpSpec(scope, duty, media, nights),
-    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: web, agent, duty }),
+    mcp: seestarMcpSpec(scope, duty, media, nights, night),
+    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: web, agent, duty, night }),
     start: () => {
       scope.start();
       nights?.start();
+      night?.start();
     },
     shutdownSteps: () => [
       ['transfers', () => void cancelActiveJobs()],
       ['starfront', () => nights?.stop()],
+      ['night plan', () => night?.stop()],
       ['timelapse', () => media.capture.stop()],
       ['survey', () => void media.survey.stop()],
       ['streams', () => media.hub.shutdown()],

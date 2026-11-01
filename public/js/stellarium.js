@@ -36,7 +36,7 @@ const DASHES = 14;
 const START_FOV_DEG = 90;
 const TARGET_FOV_FACTOR = 3;
 const OPTS_KEY = 'sky-opts';
-const DEFAULT_OPTS = { constellations: true, atmosphere: true, ground: 'zero', azGrid: false, eqGrid: false, dsos: true, dss: true, plan: true, scope: true, mask: true, tele: true, wide: false };
+const DEFAULT_OPTS = { constellations: true, atmosphere: true, ground: 'zero', azGrid: false, eqGrid: false, dsos: true, dss: true, plan: true, night: true, scope: true, mask: true, tele: true, wide: false };
 // catalog designations the server's database knows, preferred as the name sent with GoTo
 const CATALOG_NAME = /^(M|NGC|IC|C|Sh ?2-|Abell|Arp|LDN|LBN|B|vdB|Cr|Mel|Stock|Tr|UGC|PGC|PN|Ced|RCW|Gum|Hickson|HCG)\s?\d/i;
 
@@ -48,6 +48,9 @@ const COLORS = {
   minAlt: '#f87171',
   plan: [0.58, 0.77, 0.99, 0.12],
   planBorder: [0.58, 0.77, 0.99, 0.9],
+  night: [0.18, 0.83, 0.75, 0.14],
+  nightBorder: [0.18, 0.83, 0.75, 0.95],
+  nightLine: '#2dd4bf',
   pick: [0.98, 0.75, 0.14, 0.12],
   pickBorder: [0.98, 0.75, 0.14, 1],
 };
@@ -64,6 +67,8 @@ let layer = null;
 /** the plan's circles and the one dropped for a target the engine does not know: obj pointer → target */
 const markers = new Map();
 let pickMarker = null;
+/** the night plan's target blocks, in order: {start, end, display, vec} (drawn as the night's path and the frame at the sky's time) */
+let nightBlocks = [];
 /** what is selected: {name, display, raHours, decDeg, type, vmag, body, obj} */
 let sel = null;
 /** Frame mode: the frame stays in the middle of the view; frameCenter is that centre (ICRF) */
@@ -381,6 +386,7 @@ function renderOverlay() {
     const fov = wideFov();
     features.push(...rectFeatures(frameCorners(f, fov.h, fov.v), COLORS.wide, { dashed: true, width: 1 }));
   }
+  if (opts.night && nightBlocks.length) features.push(...nightFeatures());
   const s = opts.scope ? scopeVector() : null;
   if (s) {
     const fov = teleFov();
@@ -485,6 +491,64 @@ async function loadPlanMarkers() {
   } catch {
     // the plan needs the site; without it there is nothing to mark
   }
+}
+
+const hhmm = (t) => new Intl.DateTimeFormat([], { timeZone: tz(), hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(t);
+
+/**
+ * The night plan (Plan tab): each scheduled target as a circle labelled with its blocks' times,
+ * the order of the night as a path from one to the next, and (in renderOverlay) the tele frame on
+ * whichever target the plan has at the sky's time — move the clock to watch the night play out.
+ */
+let nightSeq = 0;
+export async function loadNightPlan() {
+  if (!stel || !layer) return;
+  const mine = ++nightSeq;
+  let blocks = [];
+  if (opts.night) {
+    try {
+      const r = await api('plan/tonight');
+      blocks = (r.plan?.blocks ?? []).filter((b) => b.kind === 'target' && b.target && Number.isFinite(b.target.raHours));
+    } catch {
+      // no site, or no plan: nothing to draw
+    }
+  }
+  if (mine !== nightSeq) return;
+  for (const [k, m] of [...markers]) {
+    if (m.kind !== 'night') continue;
+    layer.remove(m.obj);
+    markers.delete(k);
+  }
+  nightBlocks = blocks.map((b) => ({ start: b.start, end: b.end, display: b.target.displayName, vec: raDecVec(b.target.raHours, b.target.decDeg), past: !!b.past }));
+  const byTarget = new Map();
+  for (const b of blocks) {
+    const g = byTarget.get(b.target.key) ?? { t: b.target, times: [] };
+    g.times.push(`${hhmm(b.start)}–${hhmm(b.end)}`);
+    byTarget.set(b.target.key, g);
+  }
+  const size = Math.max(teleFov().h, teleFov().v) * stel.D2R;
+  for (const { t, times } of byTarget.values()) {
+    const obj = layer.add('circle', { pos: [...raDecVec(t.raHours, t.decDeg), 0], frame: stel.FRAME_ICRF, size: [size, size], color: COLORS.night, border_color: COLORS.nightBorder, label: `${t.displayName} · ${times.join(', ')}` });
+    markers.set(obj.v, { kind: 'night', obj, target: { name: t.gotoName, display: t.displayName, raHours: t.raHours, decDeg: t.decDeg, note: `night plan ${times.join(', ')}${t.source === 'filler' ? ' (filler)' : ''}` } });
+  }
+}
+
+function nightFeatures() {
+  const out = [];
+  const props = { stroke: COLORS.nightLine, 'stroke-width': 1.2, 'stroke-opacity': 0.7 };
+  for (let i = 1; i < nightBlocks.length; i++) {
+    const a = nightBlocks[i - 1].vec;
+    const b = nightBlocks[i].vec;
+    if (sepDeg(a, b) < 0.05) continue;
+    out.push({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: Array.from({ length: 13 }, (_, k) => lonLat(slerp(a, b, k / 12))) } });
+  }
+  const t = skyTime();
+  const now = nightBlocks.find((b) => b.start <= t && b.end > t);
+  if (now) {
+    const fov = teleFov();
+    out.push(...rectFeatures(frameCorners(now.vec, fov.h, fov.v), COLORS.nightLine, { width: 2, title: `plan ${hhmm(t)} · ${now.display}` }));
+  }
+  return out;
 }
 
 /** A marker for a target the engine's catalogs do not hold (Sh2, LDN, a bare position…). */
@@ -717,6 +781,7 @@ $('#sky-opts').addEventListener('change', (e) => {
   opts[el.dataset.opt] = el.type === 'checkbox' ? el.checked : el.value;
   saveOpts();
   if (el.dataset.opt === 'plan') loadPlanMarkers();
+  if (el.dataset.opt === 'night') loadNightPlan();
   applyOpts();
 });
 
@@ -735,8 +800,13 @@ on('tab', (name) => {
     .then(() => {
       loadMask();
       loadPlanMarkers();
+      loadNightPlan();
     })
     .catch(() => {});
+});
+// the plan was solved again: the overlay follows it
+on('plan-changed', () => {
+  if (stel && isPanelActive('stellarium')) loadNightPlan();
 });
 on('config', () => {
   applySite();

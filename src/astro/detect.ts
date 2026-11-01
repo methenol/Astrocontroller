@@ -288,6 +288,8 @@ const SEEING_SENS: Record<string, number> = {
   HII: 0.1, EmN: 0.1, RfN: 0.1, SNR: 0.1, Neb: 0.1, 'Cl+N': 0.2, DrkN: 0.2,
 };
 const SEEING_SENS_DEFAULT = 0.4;
+/** 0–1: how much a target type's result depends on the seeing (galaxies and planetaries most, emission least). */
+export const seeingSensitivity = (type: string | undefined): number => (type ? (SEEING_SENS[type] ?? SEEING_SENS_DEFAULT) : SEEING_SENS_DEFAULT);
 const SEEING_MAX_PEN = 8;
 const TRANS_MAX_PEN = 10;
 /** 7Timer scales: 1 best … 8 worst. The ramp starts at GOOD and is fully on at BAD. */

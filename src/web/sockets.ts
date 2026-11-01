@@ -19,6 +19,8 @@ import type { RainGuard } from '../astro/weather/guard.js';
 
 const log = logger('web');
 
+/** Journal changes reach the UI at most this often per night. */
+const JOURNAL_PUSH_MS = 4_000;
 const VIDEO_SOURCES = ['tele', 'wide', 'stack'] as const;
 /** A client this far behind skips frames instead of queueing them. */
 const VIDEO_BACKLOG_BYTES = 1_500_000;
@@ -190,6 +192,28 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
   on(processing.processingBus, 'item', (it: unknown) => broadcast({ type: 'processing', item: it }));
   on(toolEvents, 'image', (i: object) => broadcast({ type: 'capture', ...i }));
   on(toolEvents, 'stellarium', (t: object) => broadcast({ type: 'stellarium', ...t }));
+  // the Plan and Journal tabs reload on these (the journal changes with every frame: at most every few seconds per night)
+  const night = ctx.night;
+  if (night) {
+    on(night.plan, 'plan', (p: { night: string; generatedAt: number }) => broadcast({ type: 'plan', night: p.night, generatedAt: p.generatedAt }));
+    on(night.plan, 'holds', () => broadcast({ type: 'plan', holds: true }));
+    const sent = new Map<string, number>();
+    const pending = new Set<string>();
+    on(night.journal, 'change', (k: string) => {
+      const last = sent.get(k) ?? 0;
+      if (Date.now() - last >= JOURNAL_PUSH_MS) {
+        sent.set(k, Date.now());
+        broadcast({ type: 'journal', night: k });
+      } else if (!pending.has(k)) {
+        pending.add(k);
+        setTimeout(() => {
+          pending.delete(k);
+          sent.set(k, Date.now());
+          broadcast({ type: 'journal', night: k });
+        }, JOURNAL_PUSH_MS).unref();
+      }
+    });
+  }
   // every check is sent, changed or not: a page that stops hearing from the guard knows to worry
   if (guard) on(guard, 'state', (g: unknown) => broadcast({ type: 'guard', guard: g }));
   // Frame freshness per stream, so the UI can show a stalled view instead of a frozen-looking one.

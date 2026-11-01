@@ -350,6 +350,8 @@ export class DutyLoop extends SafeEmitter {
     this.events.push({ at: this.now(), text });
     if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
     log.info(`event for the agent: ${text}`);
+    // the night's journal keeps what the agent was woken for
+    this.emit('event', text);
     this.scheduleDelivery(EVENT_BATCH_MS);
     this.publish();
   }

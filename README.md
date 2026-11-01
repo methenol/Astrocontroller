@@ -103,6 +103,34 @@ The UI is one page, one screen at a time, sized for gloves and dark skies. Nothi
 - **Tap targets** are floored at 44 px tall on touch layouts; secondary controls (the view buttons, header chips, small chips under tiles) sit at 38-42 px, and nothing at phone widths is smaller than a gloved fingertip.
 - **Installable**: Add to Home Screen gives a standalone app (manifest + icons, `display_override` falls back to minimal-ui where window controls overlay is not implemented). It honours the notch and home indicator safe areas. Home-screen install and fullscreen need a secure context — plain HTTP on the LAN works fine in a browser tab; put a reverse proxy or Tailscale Serve in front for HTTPS.
 
+## Plan tab: the night, solved for your program
+
+The **Program** is what you want collected: targets with an integration goal and a priority (1 low … 5 top), plus an optional filter, minimum altitude, "not before" date, "keep collecting after the goal", and a note for the agent. **Find targets** filters the catalog by type, frame fill, magnitude and size: matching targets can be added with one click, and the same filter picks the plan's **fillers** for hours none of your targets can use.
+
+Every night is solved into **blocks** from astronomical dusk to dawn (`src/night/solver.ts`), a dispatch scheduler over 10-minute slots. Each target's merit in a slot is the product of:
+- **altitude** above the plan's minimum, its own, and the site's obstruction map (and tonight's blocked views), weighted by airmass;
+- **field rotation** near the zenith on an alt-az mount;
+- **the Moon**: Lorentzian avoidance (the separation required shrinks away from full Moon; wide for broadband, tight for a line filter) and what moonlight leaves of the target through its filter;
+- **the forecast**: hours below the floor are not scheduled; poor seeing costs galaxies and planetaries most, poor transparency costs broadband most.
+
+Targets are valued by priority, by how far they are from their goal, and by how fast their **season** is closing (their usable time over the next 90 nights against what they still need). The one about to set comes first, and the running target is kept unless another is clearly better. A switch costs the **overhead** (GoTo, centring, focus), and only a share of stacking time becomes integration (the **efficiency**). Both are learned from the journal. Each block lists **alternates** in other quadrants of the sky; each program target says what tonight adds and why it is or is not on the plan, with its season and the clear nights it still needs.
+
+The rest of the night is solved again when the forecast updates, a session ends, a hold is set or runs out, the program or settings change, and every half hour. The past is kept as it was. **Holds** come from the night itself:
+- **obstructed**: the view is filed for the horizon, and the target is held until its own path takes it clear (rising out of an obstruction in the east, out for the night when it sets behind one in the west);
+- **clouded**: held for a while, then tried again;
+- **skip** for tonight, **pin** to a time, or a **cloud bank** in one quadrant.
+
+Every duty sample carries the plan's line: what to do now, whether the scope is on plan, alternates, holds, a refocus that is due, a stack that is rejecting. **Run tonight's plan** starts the plan's duty by hand. **Run the plan every night** (on by default) starts it at the plan's start each night, for a scope left out for weeks. Starfront's autonomous nights do this themselves when the roof opens. The agent's tools are `night_plan`, `plan_program` and `journal`. The Stellarium tab's **night plan** option draws the scheduled targets with their times, the night's path, and the frame on the plan's target at the sky's clock.
+
+## Journal tab
+
+Each night's journal is recorded from the telescope's state, whatever starts the work (the agent, the web UI, the scope). It works for the Dwarf and the Seestar alike, through a small per-driver probe (`drivers/<id>/journal.ts`). Per target visit it records:
+- a timeline: GoTo and the time to get on target, autofocus and fine focus with the position they ended on, stack start, rejection bursts, stack end, link drops, notes;
+- statistics: frames kept and rejected, integration, efficiency, sub length, gain and filter, altitude, the Moon, the forecast sky, and the stack's stars, HFR and background;
+- a sparkline of the stack over time.
+
+The night's events (duty, roof, plan changes, holds, what the agent was woken for) and **notes**, yours and the agent's, are kept with it. The agent reads and writes them with its `journal` tool. Files: `DATA_DIR/journal/<night>.json`; the plan is in `DATA_DIR/plan/` (`program.json`, `settings.json`, `nights/<night>.json`).
+
 ## Stellarium tab
 
 A planetarium ([Stellarium Web Engine](https://github.com/Stellarium/stellarium-web-engine)) with the sky as it is at your site: the observer is `OBSERVER_LATITUDE` / `OBSERVER_LONGITUDE` / `OBSERVER_ELEVATION_M` and the clock runs live in `OBSERVER_TIMEZONE`. −1h / +1h and the date field step through the night; **Now** goes back to live.
@@ -111,7 +139,7 @@ A planetarium ([Stellarium Web Engine](https://github.com/Stellarium/stellarium-
 - **GoTo** sends the telescope there (refused below 5° or for the Sun). A planet goes through the solar-system GoTo; a catalog object keeps its catalog label, so sessions shot from the map and from the app land in the same folder. **Ask the agent to image it** drafts the request in the chat.
 - **Telescope FOV**: a dashed rectangle the size of the tele field (2.95° × 1.66°), turned the way an alt-az head frames it (north-up in EQ mode). The scope's own pointing is drawn in solid green while it is tracking or slewing, with the target's name; **Telescope** centres the view on it.
 - **Framing**: press **Frame**, then drag the sky until the dashed rectangle holds the shot you want. The card shows how far the frame centre is from the object, and **GoTo frame** points at the frame centre while keeping the object's name for the session. The rectangle's rotation is an approximation; check the first frame.
-- **Sky options**: the frame and wide-angle rectangles, your horizon obstructions and minimum altitude as a shaded mask, Tonight's targets as markers, constellations, atmosphere, deep-sky objects, DSS imagery (streaming only), azimuthal and equatorial grids, and the ground.
+- **Sky options**: the frame and wide-angle rectangles, your horizon obstructions and minimum altitude as a shaded mask, Tonight's targets as markers, the night plan (scheduled targets with their times, the night's path, and the frame on the plan's target at the shown time), constellations, atmosphere, deep-sky objects, DSS imagery (streaming only), azimuthal and equatorial grids, and the ground.
 - **Sky** buttons on Tonight's rows and **View in Stellarium** in the Database open the target here, and the agent's `show_in_stellarium` tool can show you an object (at a given time) while you chat.
 
 The engine is AGPL-3.0, vendored unmodified in `public/vendor/stellarium/` (source commit and licence there); `scripts/stellarium/build-engine.sh` rebuilds it.

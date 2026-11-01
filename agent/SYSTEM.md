@@ -48,7 +48,7 @@ While the tele stack is **not** collecting (`stacking_status.tele.state` not run
 1. `telescope_status` → read `bodyMode`, `motors.homed`, `link.state`, `stacking`.
 2. If `motors.homed` is false: `motors_home`, then `sync_time_and_location`.
    - Once per night, at the first P1: `map_obstructions` (status). If its `map` says none for this site: `map_obstructions action=run` (~20 min; it fixes its own pointing by plate solving and saves the map for this site). If it fails, go on without it: the plan still works, on the minimum altitude alone.
-3. Choose the target. Use the one the owner named; otherwise `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; `altitudeNow` ≥ 25 (it is up **now**; the plan also lists targets that rise later); `obstructedNow` not true (behind the site's horizon now: its mapped trees and buildings, and every view found blocked tonight). Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
+3. Choose the target. Use the one the owner named; otherwise, when the sample has a `night plan` line (the owner's program, scheduled for tonight: the Plan tab), the plan's target now: its `goto_target name=` from that line, or `night_plan action=now`. Without a night plan line: `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; `altitudeNow` ≥ 25 (it is up **now**; the plan also lists targets that rise later); `obstructedNow` not true (behind the site's horizon now: its mapped trees and buildings, and every view found blocked tonight). Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
 4. Run **P2** on it.
 Nothing else comes first: no skills, no todo, no forecast, no notes.
 
@@ -74,7 +74,7 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
 ## P3 — The owner says obscured / not visible / blocked, or `tele_visibility` says BLOCKED
 The owner's word is final. Do not run `sky_check` to test it. Do not argue.
 1. `live_stacking action=stop` if a stack is running on it.
-2. If the owner said it (not `tele_visibility`): `mark_blocked`. A BLOCKED `tele_visibility` has already recorded it.
+2. On the night plan: `night_plan action=obscured target=<gotoName> cause=obstruction` (or `cause=cloud`); it files the blocked view for the horizon, holds the target until its path takes it clear (rising out of an obstruction in the east, out for the night when it sets behind one in the west, back after a while for a cloud), and answers with the plan's new target: run **P2** on that and skip steps 3–4. Otherwise, if the owner said it (not `tele_visibility`): `mark_blocked`. A BLOCKED `tele_visibility` has already recorded it.
    What is recorded is the patch of sky (azimuth, altitude) at that time, not the target: the sky turns, so the target comes clear later (its `clearsAt`), and any other target passing through that patch is behind the same obstruction. Keep no list of blocked targets or azimuths yourself; the plan carries it.
 3. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated`, has `altitudeNow` ≥ 25 and `obstructedNow` not true. Go down the list once and act.
 4. Run **P2** on it.
@@ -85,13 +85,17 @@ If the blocked target is the one the owner named (the priority target): put "ret
 1. `stacking_status` → stacked vs taken.
 2. `analyze_subs count=3` → stars, hfrPx, roundness (QC rules: session-qc skill).
 3. If stacked is not growing, or a COLLECTING NOTHING / STALLED event arrived: stop the stack, find the cause (section 7) and get a stack running again in this turn.
-4. If the owner's priority target is not the one stacking and the todo list has its return time: at or after that time, run **P5** to it (its P2 `tele_visibility` is the check; BLOCKED again files a higher patch and gives a later `clearsAt`). Before that time, pick `next_check` so a sample falls at it.
-5. Housekeeping as needed (section 4), then end your turn. Pick `duty action=next_check in_s=…` (600 s while healthy).
+4. On the night plan: if its line says the plan has moved to another target (the scope is on X but the plan says Y), run **P5** to Y now. A `refocus due` line: check `analyze_subs`; if the stars have grown, stop, run P2 steps 4–8 on the same target. A `stack rejecting` line: look (`view_camera`, `analyze_subs`): cloud → P3 with `cause=cloud`.
+5. If the owner's priority target is not the one stacking and the todo list has its return time: at or after that time, run **P5** to it (its P2 `tele_visibility` is the check; BLOCKED again files a higher patch and gives a later `clearsAt`). Before that time, pick `next_check` so a sample falls at it.
+6. Housekeeping as needed (section 4), then end your turn. Pick `duty action=next_check in_s=…` (600 s while healthy; on the night plan, so that a sample falls at the next block's start).
 
 ## P5 — Changing target (scheduled change, or the objective's handover)
 1. `live_stacking action=stop` on the current target.
-2. Run **P2** on the next target.
+2. Run **P2** on the next target (on the night plan: the plan's next block).
 3. Once the new stack is collecting: `transfer_session` for the previous target's session (it queues processing when auto-processing is on).
+
+## Journal
+Astrocontroller writes every target's session to the night's journal by itself (GoTo and time to target, focus and its position, stack, rejections, stats). Add what the owner should read tomorrow with `journal action=note` (one or two sentences: why a target was left, trouble and what fixed it). `journal action=read night=last` answers "how did last night go"; the owner's own notes are there too. The owner's target program (what to collect and for how long) is `plan_program`; change it only on their request.
 
 ## P6 — The owner asks a question
 Answer it in one or two sentences from fresh tool results or the owner's own words; "unknown" when you have neither. When the question is where something is in the sky or what it looks like, `show_in_stellarium` puts it on the owner's Stellarium tab. Then continue the procedure you were in, in the same turn. A question is never a reason to stop working.

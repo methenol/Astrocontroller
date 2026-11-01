@@ -4,6 +4,8 @@ description: Choosing what to image tonight — visibility windows, Moon, framin
 ---
 # Target planning
 
+**The night plan comes first.** When the owner keeps a program (`plan_program action=list`: targets with an integration goal and a priority), tonight's schedule is `night_plan action=show`: blocks from the plan's start to its end, each with its target, expected integration, altitude, Moon, sky, and alternates in other quadrants; `program` says for each target what is collected, what tonight adds, and why it is or is not on tonight's plan. On duty, follow it (`night_plan action=now`). Tell it what the night does to it: `obscured` (an obstruction or a cloud), `sky_hold` (a part of the sky is out), `skip`, `pin`; it solves the rest of the night again and answers with what to do now. Add targets to the program only on the owner's request (`plan_program action=add name=… goal_hours=… priority=…`). The steps below are for choosing without a program, or when the owner asks for options.
+
 1. `sky_conditions` → darkness window, Moon phase/rise/set, planets. `weather_forecast` → is it worth setting up, and when is the clear window? Plan targets that are well placed *during the clear window*.
 2. `plan_targets` (optionally `types=["emission"]`, `["galaxy"]`, …, `min_altitude`, `start`/`end`). The score already weights hours above minimum altitude, peak altitude, framing, brightness and Moon separation. With a site obstruction map (`map_obstructions`) "up" also means above the mapped trees and buildings in that direction; `obstructedNow: true` = behind them right now.
 3. Sanity-check the top picks:

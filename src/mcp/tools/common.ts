@@ -16,6 +16,7 @@ import * as http from '../../drivers/dwarf/http.js';
 import { DwarfCommandError } from '../../drivers/dwarf/link.js';
 import type { StreamHub } from '../../media/streams.js';
 import { autoStretch, toJpeg, type FloatImage } from '../../media/images.js';
+import type { NightServices } from '../../night/index.js';
 import type { DutyLoop } from '../../agent/duty.js';
 import { writeFileAtomic } from '../../util/fs.js';
 import { SafeEmitter } from '../../util/events.js';
@@ -27,6 +28,7 @@ export interface ToolContext {
   dwarf: Dwarf;
   hub: StreamHub;
   duty?: DutyLoop;
+  night?: NightServices | null;
 }
 
 export type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };

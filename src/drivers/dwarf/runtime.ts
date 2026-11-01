@@ -19,31 +19,45 @@ import { cancelActiveJobs } from '../../library/transfer.js';
 import { flushWire } from './wirelog.js';
 import { dwarfDuty } from './duty.js';
 import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
+import { createNight, withNightPlan, type NightServices } from '../../night/index.js';
+import { dwarfProbe } from './journal.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const dwarf = new Dwarf();
   const hub = new StreamHub(dwarf);
   const dutyScope = dwarfDuty(dwarf);
-  const duty = new DutyLoop(dutyScope, agent);
+  let night: NightServices | null = null;
+  const duty = new DutyLoop(withNightPlan(dutyScope, () => night), agent);
   const travelGuard = new TravelGuard(dwarf, (t) => duty.event(t));
   const stackSupervisor = new StackSupervisor(dwarf, (t) => duty.event(t), { autoStopAfterMs: config.dwarf.stackAutoStopMin * 60_000, clock: (t) => clock(t) });
   dutyScope.stackSupervisor = stackSupervisor;
   let chargeWatch: ChargeWatch | null = null;
+  night = createNight({
+    site: () => dwarf.location(),
+    fovArcmin: () => {
+      const f = dwarf.state.fov.tele ?? { h: 2.95, v: 1.66 };
+      return { w: f.h * 60, h: f.v * 60 };
+    },
+    probe: dwarfProbe(dwarf, hub),
+    duty,
+  });
 
   return {
     device: dwarf,
-    mcp: dwarfMcpSpec({ dwarf, hub, duty }),
-    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: dwarfWeb(dwarf, hub), agent, duty }),
+    mcp: dwarfMcpSpec({ dwarf, hub, duty, night }),
+    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: dwarfWeb(dwarf, hub), agent, duty, night }),
     start() {
       dwarf.start();
       travelGuard.start();
       stackSupervisor.start();
+      night?.start();
       if (config.agent.enabled) chargeWatch = watchCharging(dwarf, agent);
     },
     shutdownSteps: () => [
       ['transfers', () => void cancelActiveJobs()],
       ['streams', () => hub.shutdown()],
       ['charge watch', () => chargeWatch?.stop()],
+      ['night plan', () => night?.stop()],
       ['duty', () => duty.dispose()],
       ['travel guard', () => travelGuard.stop()],
       ['stack supervisor', () => stackSupervisor.stop()],
