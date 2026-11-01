@@ -337,6 +337,14 @@
         </div>
         <div id="np-suggest" class="np-suggest">–</div>
       </div>
+      <div class="card" id="np-memory-card">
+        <div class="row-head"><h3>Target memory</h3><span class="muted small">shared with the Tonight tab</span></div>
+        <div class="duty-form-row">
+          <label title="Total integration (per camera, summed over library sessions) a target needs before a capture rests it; 0 = any capture rests it. New program targets start with this goal.">Integration goal <input type="number" id="np-rest-goal" min="0" step="5" inputmode="numeric"> min</label>
+          <label title="How long a target that reached its integration goal is held back (fillers and suggestions; a program target collecting past its goal rests this long too)">Rest for <input type="number" id="np-rest-days" min="1" step="1" inputmode="numeric"> days</label>
+        </div>
+        <div id="np-memory" class="np-memory"></div>
+      </div>
       <div class="card" id="np-holds-card">
         <div class="row-head"><h3>Holds tonight</h3><span class="spacer"></span><span class="muted small">cloud in the</span><button type="button" class="ghost" data-skyhold="N">N</button><button type="button" class="ghost" data-skyhold="E">E</button><button type="button" class="ghost" data-skyhold="S">S</button><button type="button" class="ghost" data-skyhold="W">W</button></div>
         <div id="np-holds"></div>

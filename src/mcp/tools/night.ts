@@ -53,6 +53,9 @@ const blockLine = (b: Block) =>
         pinned: b.pinned || undefined,
         reason: b.reason,
         notes: b.target!.notes,
+        detect: b.target!.advice ? `${b.target!.advice.detect}: ${b.target!.advice.detectReason}` : undefined,
+        framing: b.target!.advice?.framing,
+        subs: b.target!.advice?.sub ? `${b.target!.advice.sub.rangeS ? `${b.target!.advice.sub.rangeS[0]}–${b.target!.advice.sub.rangeS[1]}` : b.target!.advice.sub.subS}s × ${b.target!.advice.sub.subs}: ${b.target!.advice.sub.line}` : undefined,
         alternates: b.alternates.map((a) => `${a.gotoName} (${a.quadrant}, alt ${a.alt}°, ${a.source}, usable ${dur(a.usableMin)})`),
       }
     : { id: b.id, time: `${hm(b.start)}–${hm(b.end)}`, kind: b.kind, reason: b.reason, past: b.past || undefined };

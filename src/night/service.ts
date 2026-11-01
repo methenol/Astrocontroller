@@ -22,15 +22,16 @@ import { SafeEmitter } from '../util/events.js';
 import * as sky from '../astro/sky.js';
 import * as weather from '../astro/weather.js';
 import { findObject, displayName, gotoLabel } from '../astro/catalog.js';
-import { planNight, chooseGlass } from '../astro/planner.js';
+import { planNight, chooseGlass, framing } from '../astro/planner.js';
+import { subPlan } from '../astro/exposure.js';
 import { classifyFilter, moonlitKeep, detectFor, seeingSensitivity } from '../astro/detect.js';
 import { horizonFor, type Horizon } from '../astro/horizon.js';
 import { recordBlocked, clearsAt } from '../astro/sightings.js';
-import { targetKey } from '../astro/rest.js';
+import { targetKey, loadRest, restSettings, restState } from '../astro/rest.js';
 import type { HourConditions } from '../astro/weather.js';
 import { addTarget, loadProgram, loadSettings, type PlanSettings, type ProgramTarget } from './program.js';
 import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
-import { solveNight, alternatesAt, quadrantOf, SLOT_MIN, type Block, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput } from './solver.js';
+import { solveNight, alternatesAt, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
 import type { Journal, JournalSession } from './journal.js';
 
@@ -134,6 +135,11 @@ const CLUSTER_TYPES = new Set(['OCl', 'GCl', '*Ass']);
 function goalFor(type: string | undefined, bucket: string): number {
   if (type && CLUSTER_TYPES.has(type)) return GOAL_CLUSTER_MIN;
   return bucket === 'EASY' ? GOAL_EASY_MIN : bucket === 'NEEDS_INTEG' || bucket === 'SKIP_TONIGHT' ? GOAL_FAINT_MIN : GOAL_UNKNOWN_MIN;
+}
+function addDays(date: string, days: number): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 const azDiff = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
 const newId = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
@@ -279,13 +285,32 @@ export class PlanService extends SafeEmitter {
     const list: Candidate[] = [];
     const excluded: NonNullable<SolveInput['excluded']> = [];
     const program = loadProgram();
+    // the owner's own say in the target memory (Tonight / Plan: snooze, don't suggest again); a capture's rest is the program's goal here
+    const userRests = loadRest().filter((r) => r.role === 'snoozed' || r.role === 'done');
+    const restDays = restSettings().restDays;
     for (const t of program) {
       const key = targetKey(t.name);
-      const got = progress.get(key)?.totalMin ?? 0;
+      const prog = progress.get(key);
+      const got = prog?.totalMin ?? 0;
       const row = { key, programId: t.id, displayName: t.displayName, gotoName: t.gotoName, priority: t.priority, goalMin: t.goalMin, collectedMin: got };
       if (!t.enabled) {
         excluded.push({ ...row, status: 'disabled', reason: 'disabled in the program' });
         continue;
+      }
+      const rest = restState(t.name, w.night, userRests);
+      if (rest) {
+        excluded.push({ ...row, status: 'held', reason: rest.kind === 'done' ? 'marked "don\'t suggest again" (lift it in the Plan or Tonight tab)' : `snoozed until ${rest.until} (lift it in the Plan or Tonight tab)` });
+        continue;
+      }
+      // collecting on past the goal: the target rest applies, counted from the night the goal was reached
+      if (t.keepCollecting && got >= t.goalMin && prog) {
+        let sum = 0;
+        const reached = Object.keys(prog.byNight).sort().find((n) => (sum += prog.byNight[n]) >= t.goalMin);
+        const until = reached ? addDays(reached, restDays) : null;
+        if (until && w.night < until) {
+          excluded.push({ ...row, status: 'held', reason: `goal met on ${reached}: resting until ${until} (target rest: ${restDays} days) before collecting more` });
+          continue;
+        }
       }
       if (t.notBefore && t.notBefore > w.night) {
         excluded.push({ ...row, status: 'waiting', reason: `waits until ${t.notBefore}` });
@@ -352,8 +377,6 @@ export class PlanService extends SafeEmitter {
       filters: defaults.filters,
       rig: defaults.rig,
       horizon: settings.useHorizon ? horizonFor(site) : undefined,
-      // a suggestion list browses the sky; the memory of what was shown is the Tonight tab's
-      applyRest: o.filter ? false : undefined,
     });
   }
 
@@ -362,7 +385,7 @@ export class PlanService extends SafeEmitter {
    * magnitude, size): the catalog planner's ranking, without what the program already holds, with
    * a goal suggestion from the planner's integration advice.
    */
-  async suggestions(filter: TargetFilter & { limit?: number } = {}): Promise<Array<Record<string, unknown>>> {
+  async suggestions(filter: TargetFilter & { limit?: number } = {}): Promise<{ targets: Array<Record<string, unknown>>; resting: Array<{ name: string; displayName: string; penalty: number; reason: string }>; rest: ReturnType<typeof restSettings> }> {
     const site = this.site();
     const settings = loadSettings();
     const w = planWindow(site, new Date(this.now()), settings);
@@ -371,7 +394,7 @@ export class PlanService extends SafeEmitter {
     const plan = await this.plan().catch(() => null);
     const fov = this.d.fovArcmin();
     const p = this.catalogPlan(site, w, settings, conditions, { limit: Math.min(60, (filter.limit ?? 25) + inProgram.size), filter });
-    return p.targets
+    const targets = p.targets
       .filter((r) => !inProgram.has(targetKey(r.name)))
       .slice(0, filter.limit ?? 25)
       .map((r) => {
@@ -384,24 +407,63 @@ export class PlanService extends SafeEmitter {
           constellation: r.constellation,
           sizeArcmin: r.sizeArcmin,
           fillPercent: Number.isFinite(size) && fov.w ? Math.round((size / fov.w) * 100) : null,
+          framing: r.framing,
           magnitude: r.magnitude,
+          surfaceBrightness: r.surfaceBrightness,
           raHours: r.raHours,
           decDeg: r.decDeg,
           bestTime: r.bestTime,
           maxAltitude: r.maxAltitude,
           hoursUp: r.hoursAboveMin,
           usableMinutes: r.usableMinutes,
+          moonlitMinutes: r.moonlitMinutes,
+          bestClearFrom: r.bestClearFrom,
+          bestClearUntil: r.bestClearUntil,
+          bestClearMinutes: r.bestClearMinutes,
+          weatherAlignment: r.weatherAlignment,
+          skyAtBest: r.skyAtBest,
+          obstructedNow: r.obstructedNow,
+          clearsAt: r.clearsAt,
           detect: r.detectBucket,
           detectReason: r.detectReason,
           filter: String(r.suggestedFilter ?? '').split(' (')[0],
+          subSeconds: r.subSeconds,
+          subRangeSeconds: r.subRangeSeconds,
+          subs: r.subs,
+          integrationMinutes: r.integrationMinutes,
+          exposureAdvice: r.exposureAdvice,
           gated: r.gated,
           gateReason: r.gateReason,
+          restPenalty: r.restPenalty,
+          restReason: r.restReason,
           score: r.score,
-          /** a goal to start from, by how hard it is to bring up (the owner edits it after) */
-          suggestedGoalMin: goalFor(findObject(r.name)?.type, r.detectBucket),
+          /** a goal to start from: the target rest's integration goal when one is set, else by how hard it is to bring up */
+          suggestedGoalMin: restSettings().integrationTargetMin || goalFor(findObject(r.name)?.type, r.detectBucket),
           fillerTonight: !!plan?.blocks.some((b) => b.target?.key === targetKey(r.name) && !b.past),
         };
       });
+    return { targets, resting: p.resting, rest: restSettings() };
+  }
+
+  /**
+   * What the Tonight tab says of a scheduled target, for its block: detectability under tonight's
+   * sky through its filter, how it fits the frame, and the sub-exposure advice for the hours it has.
+   */
+  private advise(t: BlockTarget, b: Block, conditions: ((t: Date) => HourConditions | undefined) | null): TargetAdvice | undefined {
+    const o = findObject(t.name);
+    if (!o) return undefined;
+    const defaults = planDefaults();
+    const d = detectFor(o, { bortle: defaults.bortle, filter: t.filter });
+    const usableMin = Math.max(0, (b.end - b.start) / 60e3 - b.overheadMin);
+    const mid = new Date((b.start + b.end) / 2);
+    const sp = subPlan({ rig: { ...defaults.rig, band: d.band }, bortle: defaults.bortle, transitAlt: b.alt?.max ?? 45, usableMin, moonUp: !!b.moon, windKmh: conditions?.(mid)?.windKmh });
+    return {
+      framing: framing(o, this.d.fovArcmin()).text,
+      detect: d.bucket,
+      detectReason: d.reason,
+      surfaceBrightness: d.sb === null ? null : Math.round(d.sb * 100) / 100,
+      sub: sp ? { subS: sp.subS, rangeS: sp.subRangeS, subs: sp.subs, integrationMin: sp.integrationMin, line: sp.line } : null,
+    };
   }
 
   private programCandidate(t: ProgramTarget, key: string, got: number, glassFilters: string[], moonIllum: number): Candidate {
@@ -495,6 +557,7 @@ export class PlanService extends SafeEmitter {
     const t1 = Date.now();
     const solved = solveNight(input);
     const solveMs = Date.now() - t1;
+    for (const b of solved.blocks) if (b.target && !b.past && !b.target.advice) b.target.advice = this.advise(b.target, b, this.lastConditions);
     const site = this.site();
     const moon = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2));
     const stamp = await this.forecastStamp();

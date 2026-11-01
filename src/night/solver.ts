@@ -156,6 +156,15 @@ export interface Alternate {
   reason: string;
 }
 
+/** What the Tonight tab says of a target, for the hours of its block: can tonight's sky bring it up, does it fit, what subs. */
+export interface TargetAdvice {
+  framing: string;
+  detect: string;
+  detectReason: string;
+  surfaceBrightness: number | null;
+  sub: { subS: number; rangeS: [number, number] | null; subs: number; integrationMin: number; line: string } | null;
+}
+
 export interface BlockTarget {
   key: string;
   name: string;
@@ -167,6 +176,7 @@ export interface BlockTarget {
   programId?: string;
   filter?: string;
   notes?: string;
+  advice?: TargetAdvice;
 }
 
 export interface Block {

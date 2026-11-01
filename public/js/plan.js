@@ -49,6 +49,14 @@ function hue(key) {
   return h;
 }
 const colour = (key, source) => (source === 'filler' ? `hsl(${hue(key)} 25% 55%)` : `hsl(${hue(key)} 70% 60%)`);
+/** The Tonight tab's one-word verdict on what tonight's sky and glass make of a target. */
+function verdict(bucket, reason) {
+  if (bucket === 'EASY') return `<span class="badge done" title="${esc(reason ?? 'the sky brings this up on its own')}">easy</span>`;
+  if (bucket === 'NEEDS_INTEG') return `<span class="badge waiting" title="${esc(reason ?? '')}">needs time</span>`;
+  if (bucket === 'SKIP_TONIGHT') return `<span class="badge failed" title="${esc(reason ?? '')}">beyond tonight's sky</span>`;
+  return '';
+}
+const subLine = (subS, range, subs) => (subS == null && !Array.isArray(range) ? '' : `${Array.isArray(range) ? `${range[0]}–${range[1]}` : subS}s × ${subs ?? '–'} subs`);
 const skyColour = (s) => (s == null ? '#1a2436' : s >= 60 ? '#14532d' : s >= 35 ? '#713f12' : '#7f1d1d');
 
 // ---------------------------------------------------------------- loading
@@ -224,6 +232,9 @@ function renderDetail() {
       <div><span>Filter</span>${esc(t.filter ?? 'auto')}</div>
       <div><span>GoTo name</span>${esc(t.gotoName)}</div>
     </div>
+    ${t.advice ? `<div class="np-advice"><div>${verdict(t.advice.detect, t.advice.detectReason)} <span class="small">${esc(t.advice.detectReason)}${t.advice.surfaceBrightness != null ? ` (SB ${esc(t.advice.surfaceBrightness)} mag/arcsec²)` : ''}</span></div>
+      <div class="small"><b>Framing:</b> ${esc(t.advice.framing)}</div>
+      ${t.advice.sub ? `<div class="small"><b>Subs:</b> ${esc(subLine(t.advice.sub.subS, t.advice.sub.rangeS, t.advice.sub.subs))} in this block — ${esc(t.advice.sub.line)}</div>` : ''}</div>` : ''}
     <p class="small">${esc(b.reason)}</p>
     ${t.notes ? `<p class="small"><b>Note:</b> ${esc(t.notes)}</p>` : ''}
     <div class="ctl-row np-actions">
@@ -231,6 +242,7 @@ function renderDetail() {
       ${b.past ? '' : `<button class="ghost" data-obscured="${esc(t.gotoName)}" data-cause="obstruction" title="Blocked by a tree or building now: held until its path takes it clear (rising out of it in the east; for the night when it is setting behind it in the west)">Obstructed now</button>
       <button class="ghost" data-obscured="${esc(t.gotoName)}" data-cause="cloud" title="Clouded: held for 45 min, then tried again">Clouded</button>
       <button class="ghost" data-skip="${esc(t.gotoName)}">Skip tonight</button>
+      ${t.source === 'filler' ? `<button class="ghost" data-rest="${esc(t.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(t.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Don't suggest again</button><button class="ghost" data-add="${esc(t.gotoName)}" data-goal="" title="Make it a program target">Add to program</button>` : ''}
       <button class="ghost" data-image="${esc(t.gotoName)}">Ask the agent</button>`}
     </div>
     <h4 class="np-h4">Alternates for this block</h4>${alts}`;
@@ -434,16 +446,26 @@ async function loadSuggestions() {
   el.innerHTML = '<span class="muted small">looking…</span>';
   const mine = ++suggestSeq;
   try {
-    const rows = await api(`plan/suggestions?${p}`);
+    const r0 = await api(`plan/suggestions?${p}`);
     if (mine !== suggestSeq) return;
+    const rows = r0.targets ?? [];
+    const skyCls = (q) => (q == null ? '' : q >= 60 ? 'ok' : q >= 35 ? 'warn' : 'bad');
+    const resting = (r0.resting ?? []).length
+      ? `<p class="muted small">Held back by memory: ${r0.resting.map((x) => `<b>${esc(x.displayName ?? x.name)}</b> (${esc(x.reason)}) <button class="ghost np-mini" data-rest="${esc(x.name)}" data-role="none">lift</button>`).join(' · ')}</p>`
+      : '';
     el.innerHTML = rows.length
-      ? `<table class="plan-table"><tr><th>Target</th><th>Tonight</th><th>Fit / filter</th><th></th></tr>${rows
-          .map((r) => `<tr class="${r.gated ? 'gated' : ''}"><td><b>${esc(r.displayName)}</b>${r.fillerTonight ? ' <span class="badge">filler tonight</span>' : ''}<small>${esc(r.type)} in ${esc(r.constellation)}, ${esc(r.sizeArcmin)}′${r.magnitude != null ? `, mag ${esc(r.magnitude)}` : ''}</small>${r.gated ? `<small>${esc(r.gateReason)}</small>` : ''}</td>
-            <td data-label="Tonight">best ${esc(String(r.bestTime ?? '').split(', ').pop())}<small>max ${esc(Math.round(r.maxAltitude))}°, ${esc(r.hoursUp)} h up, ${esc(dur(r.usableMinutes))} usable</small></td>
-            <td data-label="Fit / filter">${r.fillPercent != null ? `${esc(r.fillPercent)}% of the frame` : '–'}<small>${esc(r.filter)} · ${esc(r.detect === 'EASY' ? 'easy' : r.detect === 'NEEDS_INTEG' ? 'needs time' : r.detect === 'SKIP_TONIGHT' ? "beyond tonight's sky" : '')}</small></td>
-            <td><button class="ghost" data-add="${esc(r.gotoName)}" data-goal="${esc(r.suggestedGoalMin)}" title="Add to the program with a goal of ${esc(dur(r.suggestedGoalMin))} (edit it after)">Add ${esc(hours(r.suggestedGoalMin))}</button><button class="ghost" data-sky="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}">Sky</button></td></tr>`)
-          .join('')}</table>`
-      : '<p class="muted small">Nothing up tonight matches this filter.</p>';
+      ? `<table class="plan-table"><tr><th>Target</th><th>Tonight</th><th>Weather</th><th>Fit / filter / subs</th><th></th></tr>${rows
+          .map((r) => {
+            const clear = r.bestClearMinutes >= 5 && r.bestClearFrom ? `<small title="the longest run simultaneously up, forecast-clear and moon-workable">clear ${esc(String(r.bestClearFrom).split(', ').pop())}–${esc(String(r.bestClearUntil).split(', ').pop())} (${esc(r.bestClearMinutes)} min)</small>` : '';
+            const subs = subLine(r.subSeconds, r.subRangeSeconds, r.subs);
+            return `<tr class="${r.gated ? 'gated' : ''}"><td><b>${esc(r.displayName)}</b> ${verdict(r.detect, r.detectReason)}${r.fillerTonight ? ' <span class="badge">filler tonight</span>' : ''}${r.obstructedNow ? ` <span class="badge waiting" title="behind the site's obstructions now${r.clearsAt ? `; clear at ${esc(r.clearsAt)}` : ''}">behind obstruction now</span>` : ''}<small>${esc(r.type)} in ${esc(r.constellation)}, ${esc(r.sizeArcmin)}′${r.magnitude != null ? `, mag ${esc(r.magnitude)}` : ''}${r.surfaceBrightness != null ? `, SB ${esc(r.surfaceBrightness)}` : ''}</small>${r.gated ? `<small>${esc(r.gateReason)}</small>` : ''}${r.restReason ? `<small>memory: ${esc(r.restReason)}</small>` : ''}</td>
+            <td data-label="Tonight">best ${esc(String(r.bestTime ?? '').split(', ').pop())}<small>max ${esc(Math.round(r.maxAltitude))}°, ${esc(r.hoursUp)} h up, ${esc(dur(r.usableMinutes))} usable${r.moonlitMinutes ? ` (${esc(r.moonlitMinutes)} moonlit)` : ''}</small>${clear}</td>
+            <td data-label="Weather">${r.weatherAlignment != null ? `<b class="sky ${skyCls(r.weatherAlignment)}">${esc(r.weatherAlignment)}/100</b>${r.skyAtBest != null ? `<small>sky ${esc(r.skyAtBest)} at best</small>` : ''}` : '<small>no forecast</small>'}</td>
+            <td data-label="Fit / filter / subs"><small>${esc(r.framing ?? (r.fillPercent != null ? `${r.fillPercent}% of the frame` : ''))}</small><small>${esc(r.filter)}</small>${subs ? `<small title="${esc(r.exposureAdvice ?? '')}">${esc(subs)}</small>` : ''}</td>
+            <td><button class="ghost" data-add="${esc(r.gotoName)}" data-goal="${esc(r.suggestedGoalMin)}" title="Add to the program with a goal of ${esc(dur(r.suggestedGoalMin))} (edit it after)">Add ${esc(hours(r.suggestedGoalMin))}</button><button class="ghost" data-sky="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}">Sky</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Never</button></td></tr>`;
+          })
+          .join('')}</table>${resting}`
+      : `<p class="muted small">Nothing up tonight matches this filter.</p>${resting}`;
   } catch (e) {
     if (mine === suggestSeq) el.innerHTML = `<span class="muted">${esc(e.message)}</span>`;
   }
@@ -461,6 +483,40 @@ $('#np-find-card').addEventListener('change', (e) => {
     if (await apiToast('plan/settings', filterNow())) reloadSoon();
   }, 300);
 });
+
+// ---------------------------------------------------------------- the target memory (the Tonight tab's target rest, shared)
+
+async function loadMemory() {
+  try {
+    const r = await api('rest');
+    const s = r.settings ?? (await api('rest/settings'));
+    if (document.activeElement !== $('#np-rest-goal')) $('#np-rest-goal').value = s.integrationTargetMin;
+    if (document.activeElement !== $('#np-rest-days')) $('#np-rest-days').value = s.restDays;
+    const held = r.held ?? [];
+    $('#np-memory').innerHTML = held.length
+      ? `<p class="muted small">Your own say: ${held.map((h) => `<b>${esc(h.displayName)}</b> ${h.role === 'done' ? "(don't suggest again)" : `(snoozed${h.state?.until ? ` until ${esc(h.state.until)}` : ''})`} <button class="ghost np-mini" data-rest="${esc(h.gotoName)}" data-role="none">lift</button>`).join(' · ')}</p>`
+      : '<p class="muted small">A target the library already holds rests once its sessions reach the integration goal; Snooze and Never (suggestions, filler blocks) are your own say on top, and hold program targets back too.</p>';
+  } catch (e) {
+    $('#np-memory').innerHTML = `<span class="muted">${esc(e.message)}</span>`;
+  }
+}
+
+async function saveRest(e) {
+  const goal = Number($('#np-rest-goal').value);
+  const days = Number($('#np-rest-days').value);
+  if (!Number.isFinite(goal) || goal < 0 || !Number.isInteger(days) || days < 1) {
+    toast('Integration goal must be 0 or more minutes and the rest a whole number of days (1 or more)', true);
+    return loadMemory();
+  }
+  const r = await apiToast('rest/settings', e.target.id === 'np-rest-goal' ? { integrationTargetMin: goal } : { restDays: days });
+  if (r) {
+    toast(e.target.id === 'np-rest-goal' ? `Integration goal: ${r.integrationTargetMin} min` : `Rest: ${r.restDays} days`);
+    loadSuggestions();
+    reloadSoon();
+  }
+}
+$('#np-rest-goal').onchange = saveRest;
+$('#np-rest-days').onchange = saveRest;
 
 // ---------------------------------------------------------------- adding targets
 
@@ -512,8 +568,17 @@ $('#panel-plan').addEventListener('click', async (e) => {
     renderTimeline();
     renderDetail();
   } else if (d.image) draft(imagingRequest(d.image));
-  else if (d.add) {
-    const r = await busy(b, () => apiToast('plan/program', { name: d.add, goalMin: Number(d.goal) || 180 }));
+  else if (d.rest) {
+    const role = d.role;
+    const r = await busy(b, () => apiToast('rest', { name: d.rest, role }));
+    if (r) {
+      toast(role === 'none' ? `${d.rest}: back in the pool` : role === 'done' ? `${d.rest} will not be suggested again` : `${d.rest} snoozed${r.state?.until ? ` until ${r.state.until}` : ''}`);
+      loadSuggestions();
+      loadMemory();
+      reloadSoon();
+    }
+  } else if (d.add) {
+    const r = await busy(b, () => apiToast('plan/program', d.goal ? { name: d.add, goalMin: Number(d.goal) } : { name: d.add }));
     if (r) {
       toast(`${r.displayName} added: ${dur(r.goalMin)}, priority ${r.priority}`);
       loadProgram();
@@ -592,6 +657,7 @@ on('tab', (name) => {
   if (name !== 'plan') return;
   loadPlan();
   loadSettings();
+  loadMemory();
 });
 let resizeTimer = null;
 window.addEventListener('resize', () => {

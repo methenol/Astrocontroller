@@ -24,7 +24,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerSystemTools(tool, ctx);
   registerCameraTools(tool, ctx);
   registerMotionTools(tool, ctx);
-  registerPlanningTools(tool, { site: () => ctx.dwarf.requireLocation(), teleFov: () => ctx.dwarf.state.fov.tele ?? null, dwarf: ctx.dwarf, hub: ctx.hub });
+  registerPlanningTools(tool, { site: () => ctx.dwarf.requireLocation(), teleFov: () => ctx.dwarf.state.fov.tele ?? null, dwarf: ctx.dwarf, hub: ctx.hub, restChanged: () => ctx.night?.plan.changed('the target memory changed') });
   registerHorizonTools(tool, ctx);
   registerAstroTools(tool, ctx);
   registerMediaTools(tool, ctx);

@@ -14,6 +14,7 @@ import { config } from '../config.js';
 import { errMsg, logger } from '../log.js';
 import { writeFileAtomic } from '../util/fs.js';
 import { findObject, displayName, gotoLabel } from '../astro/catalog.js';
+import { restSettings } from '../astro/rest.js';
 
 const log = logger('program');
 
@@ -221,7 +222,8 @@ export function addTarget(input: ProgramTargetInput, today: string): ProgramTarg
     gotoName: o ? gotoLabel(o) : input.name.trim(),
     raHours: input.raHours ?? o!.raHours,
     decDeg: input.decDeg ?? o!.decDeg,
-    goalMin: input.goalMin ?? DEFAULT_GOAL_MIN,
+    // without a goal of its own: the integration goal of the target rest (Tonight / Plan), else three hours
+    goalMin: input.goalMin ?? (restSettings().integrationTargetMin || DEFAULT_GOAL_MIN),
     priority: input.priority ?? DEFAULT_PRIORITY,
     enabled: input.enabled ?? true,
     keepCollecting: input.keepCollecting ?? false,

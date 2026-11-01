@@ -7,7 +7,8 @@ import { EventEmitter } from 'node:events';
 import * as sky from '../astro/sky.js';
 import { config } from '../config.js';
 import { findObject } from '../astro/catalog.js';
-import { PLAN_DEFAULTS, type PlanSettings } from '../night/program.js';
+import { PLAN_DEFAULTS, addTarget, removeTarget, type PlanSettings } from '../night/program.js';
+import { setRest, liftRest } from '../astro/rest.js';
 import { daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Candidate, type Hold } from '../night/solver.js';
 import { Journal } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
@@ -272,5 +273,41 @@ describe('night plan: obstruction holds follow the sky', () => {
     const cloud = await svc.obscured('M 31', { cause: 'cloud', by: 'agent' });
     assert.equal(cloud.hold.until, now + 45 * 60e3);
     assert.equal(svc.holds().length, 3);
+  });
+});
+
+describe('night plan: the target memory', () => {
+  const svc = (journal: Journal, now: number) =>
+    new PlanService({ site: () => SITE, fovArcmin: () => ({ w: 83, h: 147 }), journal, now: () => now, conditions: async () => null, forecastStamp: async () => null, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'plan-mem-')) });
+
+  test("a program target the owner snoozed is held, with when it comes back; lifting it puts it back", async () => {
+    const now = Date.parse('2026-11-01T18:00:00Z');
+    const today = sky.localDate(new Date(now), config.observer.timezone);
+    addTarget({ name: 'M 33', goalMin: 300, priority: 5 }, today);
+    setRest('M 33', 'snoozed', today);
+    const p = await svc(new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mem-j-')) }), now).plan();
+    const o = p.outlook.find((x) => x.displayName === 'M 33')!;
+    assert.equal(o.status, 'held');
+    assert.match(o.reason, /snoozed until \d{4}-\d{2}-\d{2}/);
+    liftRest('M 33');
+    const q = await svc(new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mem-j-')) }), now).plan();
+    assert.notEqual(q.outlook.find((x) => x.displayName === 'M 33')!.status, 'held');
+    removeTarget('M 33');
+  });
+
+  test('collecting past the goal rests for the target-rest days from the night the goal was reached', async () => {
+    const now = Date.parse('2026-11-01T18:00:00Z');
+    const night = sky.localDate(sky.nightWindow(SITE, new Date(now)).sunset!, config.observer.timezone);
+    addTarget({ name: 'M 42', goalMin: 60, priority: 3, keepCollecting: true }, night);
+    const journal = new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mem-j-')) });
+    const yesterday = new Date(Date.parse(`${night}T12:00:00Z`) - 86_400e3).toISOString().slice(0, 10);
+    const s = journal.openSession(yesterday, { target: 'M 42', at: now - 86_400e3 });
+    s.stats.integrationS = 90 * 60;
+    journal.closeSession(yesterday, s, 'done', 'test');
+    const p = await svc(journal, now).plan();
+    const o = p.outlook.find((x) => x.displayName === 'M 42')!;
+    assert.equal(o.status, 'held');
+    assert.match(o.reason, new RegExp(`goal met on ${yesterday}: resting until`));
+    removeTarget('M 42');
   });
 });

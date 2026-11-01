@@ -57,6 +57,8 @@ export interface PlanningContext {
   hub?: StreamHub;
   /** tools the driver has its own of */
   skip?: string[];
+  /** the target memory changed (rest_target): the night plan is solved again */
+  restChanged?: () => void;
 }
 
 export function registerPlanningTools(all: ToolFn, o: PlanningContext): void {
@@ -67,6 +69,7 @@ export function registerPlanningTools(all: ToolFn, o: PlanningContext): void {
   const hub = o.hub as StreamHub;
   const site = () => o.site();
   const teleFov = () => o.teleFov() ?? DEFAULT_TELE_FOV;
+  const restChanged = o.restChanged;
 
   tool(
     'sky_conditions',
@@ -255,6 +258,7 @@ export function registerPlanningTools(all: ToolFn, o: PlanningContext): void {
       if (!o) throw new Error(`"${name}" is not in the catalog`);
       const today = sky.localDate(new Date(), tz);
       const records = role === 'clear' ? rest.liftRest(name) : rest.setRest(name, role === 'done' ? 'done' : 'snoozed', today);
+      restChanged?.();
       const state = rest.restState(name, today, records);
       return text({
         action: role,

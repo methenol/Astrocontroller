@@ -7,7 +7,7 @@ import { planNight } from '../../astro/planner.js';
 import { horizonFor } from '../../astro/horizon.js';
 import * as rest from '../../astro/rest.js';
 import * as weather from '../../astro/weather.js';
-import { findObject } from '../../astro/catalog.js';
+import { findObject, displayName, gotoLabel } from '../../astro/catalog.js';
 import { queryCatalog, catalogMeta, objectDetails, type CatalogQuery } from '../../astro/catalog-search.js';
 import { notFound, queryNumber, queryString, route, body } from '../http.js';
 import { observerSite, requireSite, teleFovArcmin, type WebContext } from '../context.js';
@@ -23,7 +23,7 @@ const RestSettingsBody = z.object({
   restDays: z.number().int().min(1).max(3650).optional(),
 });
 
-export function skyRoutes({ scope }: WebContext): Router {
+export function skyRoutes({ scope, night }: WebContext): Router {
   const api = express.Router();
   const tz = () => config.observer.timezone;
 
@@ -61,7 +61,19 @@ export function skyRoutes({ scope }: WebContext): Router {
 
   api.get(
     '/rest',
-    route(async () => ({ today: sky.localDate(new Date(), tz()), records: rest.loadRest() })),
+    route(async () => {
+      const today = sky.localDate(new Date(), tz());
+      const records = rest.loadRest();
+      // the owner's own rests, readable: what is snoozed or never suggested again, and until when
+      const held = records
+        .filter((r) => r.role === 'snoozed' || r.role === 'done')
+        .map((r) => {
+          const o = findObject(r.name);
+          return { name: r.name, displayName: o ? displayName(o) : r.name, gotoName: o ? gotoLabel(o) : r.name, role: r.role, date: r.date, state: rest.restState(r.name, today, records.filter((x) => x.role === r.role)) };
+        })
+        .filter((h) => h.state);
+      return { today, records, held, settings: rest.restSettings() };
+    }),
   );
 
   api.post(
@@ -70,6 +82,8 @@ export function skyRoutes({ scope }: WebContext): Router {
       const b = body(req, RestBody);
       const today = sky.localDate(new Date(), tz());
       const records = b.role === 'none' ? rest.liftRest(b.name) : rest.setRest(b.name, b.role === 'done' ? 'done' : 'snoozed', today);
+      // the night plan holds snoozed targets back too (program targets and fillers)
+      night?.plan.changed('the target memory changed');
       return { name: b.name, today, state: rest.restState(b.name, today, records) };
     }),
   );
@@ -78,7 +92,11 @@ export function skyRoutes({ scope }: WebContext): Router {
 
   api.post(
     '/rest/settings',
-    route(async (req) => rest.saveRestSettings(body(req, RestSettingsBody))),
+    route(async (req) => {
+      const s = rest.saveRestSettings(body(req, RestSettingsBody));
+      night?.plan.changed('the target rest settings changed');
+      return s;
+    }),
   );
 
   api.get('/catalog/meta', route(async () => catalogMeta()));

@@ -581,8 +581,13 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .np-types input { min-height: 0; width: 15px; height: 15px; margin: 0; }
 #np-find-card .duty-form-row input[type=number] { width: 4.2em; }
 .np-suggest { margin-top: 6px; max-height: 520px; overflow-y: auto; }
-.np-suggest td:last-child { white-space: nowrap; }
+.np-suggest td:last-child { min-width: 128px; }
+.np-suggest td:last-child button { margin: 0 4px 4px 0; }
 .np-suggest td:last-child button { min-height: 32px; padding: 0 8px; font-size: 12px; }
+.np-advice { margin: 8px 0; display: flex; flex-direction: column; gap: 3px; }
+button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
+.np-memory { margin-top: 6px; }
+#np-memory-card input[type=number] { width: 5em; }
 #np-holds .sess button { min-height: 32px; padding: 0 10px; font-size: 12px; }
 #np-holds-card .row-head button.ghost { min-width: 38px; }
 

@@ -50,7 +50,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
       const tool = makeTool(server);
       registerSeestarTools(tool, scope);
       // the app's shared tools, the same for every driver (find_target and plan_targets are the Seestar's own above)
-      registerPlanningTools(tool, { site: () => scope.requireLocation(), teleFov: () => scope.state.fov ?? NOMINAL_FOV, skip: ['find_target', 'plan_targets'] });
+      registerPlanningTools(tool, { site: () => scope.requireLocation(), teleFov: () => scope.state.fov ?? NOMINAL_FOV, skip: ['find_target', 'plan_targets'], restChanged: () => night?.plan.changed('the target memory changed') });
       if (media) {
         registerSeestarMediaTools(tool, scope, media);
         // the Dwarf agent's other tools, under their names
