@@ -31,7 +31,7 @@ import { targetKey, loadRest, restSettings, restState } from '../astro/rest.js';
 import type { HourConditions } from '../astro/weather.js';
 import { addTarget, loadProgram, loadSettings, type PlanSettings, type ProgramTarget } from './program.js';
 import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
-import { solveNight, alternatesAt, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
+import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
 import type { Journal, JournalSession } from './journal.js';
 
@@ -55,7 +55,8 @@ const OBSTRUCTION_AZ_HALF_DEG = 3;
 const OBSTRUCTION_AZ_MAX_DEG = 12;
 /** an obstruction hold is not ended by its own clear check sooner than this (the target was just seen blocked) */
 const HOLD_MIN_MS = 10 * 60_000;
-const FILLER_LIMIT = 30;
+/** catalog targets the fillers (and Find targets) are drawn from */
+const FILLER_POOL = 40;
 /** refocus once the forecast temperature has moved this much since the last focus, or after this long */
 const REFOCUS_DELTA_C = 2;
 const REFOCUS_MAX_MIN = 120;
@@ -319,38 +320,52 @@ export class PlanService extends SafeEmitter {
       list.push(this.programCandidate(t, key, got, glassFilters, moonIllum));
     }
     if (settings.fillers) {
-      const have = new Set(list.map((c) => c.key));
       try {
-        const p = this.catalogPlan(site, w, settings, conditions, { limit: FILLER_LIMIT });
-        for (const r of p.targets) {
-          if (r.gated) continue;
-          const key = targetKey(r.name);
-          if (have.has(key)) continue;
-          have.add(key);
-          const o = findObject(r.name);
-          const filter = String(r.suggestedFilter ?? '').split(' (')[0];
-          const keep = o ? moonlitKeep(chooseGlass(o, { filters: glassFilters, bortle: defaults.bortle, moonStrength: moonIllum }).d, moonIllum) : 1 - 0.7 * moonIllum;
-          list.push({
-            key,
-            name: r.name,
-            displayName: r.displayName,
-            gotoName: r.gotoName,
-            raHours: r.raHours,
-            decDeg: r.decDeg,
-            source: 'filler',
-            fillerScore: r.score,
-            filter,
-            narrowband: classifyFilter(filter) !== 'broadband',
-            moonKeep: keep,
-            type: r.type,
-            seeingSens: seeingSensitivity(o?.type),
-          });
-        }
+        const have = new Set(list.map((c) => c.key));
+        for (const c of this.fillerPool(site, w, settings, conditions).candidates) if (!have.has(c.key)) list.push(c);
       } catch (e) {
         log.warn(`fillers: ${errMsg(e)}`);
       }
     }
     return { list, excluded };
+  }
+
+  /**
+   * The catalog targets the plan may fill free time with: the catalog planner's best for the plan's
+   * window through the target filter (Find targets), as plan candidates. The plan's fillers and the
+   * Find targets list are both this pool, ranked by the plan's own scoring, so they cannot disagree.
+   */
+  private fillerPool(site: sky.Site, w: PlanWindow, settings: PlanSettings, conditions: ((t: Date) => HourConditions | undefined) | null, filter?: TargetFilter) {
+    const defaults = planDefaults();
+    const glassFilters = defaults.filter ? [defaults.filter] : defaults.filters.length ? defaults.filters : ['none'];
+    const moonIllum = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2)).illuminationPercent / 100;
+    const p = this.catalogPlan(site, w, settings, conditions, { limit: FILLER_POOL, filter });
+    const candidates: Candidate[] = [];
+    const rows = new Map<string, (typeof p.targets)[number]>();
+    for (const r of p.targets) {
+      if (r.gated) continue;
+      const key = targetKey(r.name);
+      if (rows.has(key)) continue;
+      rows.set(key, r);
+      const o = findObject(r.name);
+      const f = String(r.suggestedFilter ?? '').split(' (')[0];
+      candidates.push({
+        key,
+        name: r.name,
+        displayName: r.displayName,
+        gotoName: r.gotoName,
+        raHours: r.raHours,
+        decDeg: r.decDeg,
+        source: 'filler',
+        fillerScore: r.score,
+        filter: f,
+        narrowband: classifyFilter(f) !== 'broadband',
+        moonKeep: o ? moonlitKeep(chooseGlass(o, { filters: glassFilters, bortle: defaults.bortle, moonStrength: moonIllum }).d, moonIllum) : 1 - 0.7 * moonIllum,
+        type: r.type,
+        seeingSens: seeingSensitivity(o?.type),
+      });
+    }
+    return { candidates, rows, resting: p.resting, gated: p.targets.filter((r) => r.gated) };
   }
 
   /** The catalog planner over the plan's window, through the plan's target filter (fillers and suggestions). */
@@ -386,63 +401,62 @@ export class PlanService extends SafeEmitter {
    * a goal suggestion from the planner's integration advice.
    */
   async suggestions(filter: TargetFilter & { limit?: number } = {}): Promise<{ targets: Array<Record<string, unknown>>; resting: Array<{ name: string; displayName: string; penalty: number; reason: string }>; rest: ReturnType<typeof restSettings> }> {
-    const site = this.site();
-    const settings = loadSettings();
-    const w = planWindow(site, new Date(this.now()), settings);
-    const conditions = settings.useForecast ? await this.conditions().catch(() => null) : null;
+    const now = this.now();
+    const { input, w, settings } = await this.inputs(now);
+    const site = input.site;
+    const pool = this.fillerPool(site, w, settings, this.lastConditions, filter);
     const inProgram = new Set(loadProgram().map((t) => targetKey(t.name)));
+    const candidates = pool.candidates.filter((c) => !inProgram.has(c.key));
+    // the plan's own scoring, from now (or the plan's start), holds included
+    const ranks = new Map(rankCandidates({ ...input, candidates }).map((r) => [r.key, r]));
     const plan = await this.plan().catch(() => null);
+    const blocksOf = (key: string) => (plan?.blocks ?? []).filter((b) => b.target?.key === key && !b.past);
     const fov = this.d.fovArcmin();
-    const p = this.catalogPlan(site, w, settings, conditions, { limit: Math.min(60, (filter.limit ?? 25) + inProgram.size), filter });
-    const targets = p.targets
-      .filter((r) => !inProgram.has(targetKey(r.name)))
-      .slice(0, filter.limit ?? 25)
-      .map((r) => {
-        const size = Number(String(r.sizeArcmin).split('×')[0]);
-        return {
-          name: r.name,
-          displayName: r.displayName,
-          gotoName: r.gotoName,
-          type: r.type,
-          constellation: r.constellation,
-          sizeArcmin: r.sizeArcmin,
-          fillPercent: Number.isFinite(size) && fov.w ? Math.round((size / fov.w) * 100) : null,
-          framing: r.framing,
-          magnitude: r.magnitude,
-          surfaceBrightness: r.surfaceBrightness,
-          raHours: r.raHours,
-          decDeg: r.decDeg,
-          bestTime: r.bestTime,
-          maxAltitude: r.maxAltitude,
-          hoursUp: r.hoursAboveMin,
-          usableMinutes: r.usableMinutes,
-          moonlitMinutes: r.moonlitMinutes,
-          bestClearFrom: r.bestClearFrom,
-          bestClearUntil: r.bestClearUntil,
-          bestClearMinutes: r.bestClearMinutes,
-          weatherAlignment: r.weatherAlignment,
-          skyAtBest: r.skyAtBest,
-          obstructedNow: r.obstructedNow,
-          clearsAt: r.clearsAt,
-          detect: r.detectBucket,
-          detectReason: r.detectReason,
-          filter: String(r.suggestedFilter ?? '').split(' (')[0],
-          subSeconds: r.subSeconds,
-          subRangeSeconds: r.subRangeSeconds,
-          subs: r.subs,
-          integrationMinutes: r.integrationMinutes,
-          exposureAdvice: r.exposureAdvice,
-          gated: r.gated,
-          gateReason: r.gateReason,
-          restPenalty: r.restPenalty,
-          restReason: r.restReason,
-          score: r.score,
-          /** a goal to start from: the target rest's integration goal when one is set, else by how hard it is to bring up */
-          suggestedGoalMin: restSettings().integrationTargetMin || goalFor(findObject(r.name)?.type, r.detectBucket),
-          fillerTonight: !!plan?.blocks.some((b) => b.target?.key === targetKey(r.name) && !b.past),
-        };
-      });
-    return { targets, resting: p.resting, rest: restSettings() };
+    const goalDefault = restSettings().integrationTargetMin;
+    const rows = candidates.map((c) => {
+      const r = pool.rows.get(c.key)!;
+      const k = ranks.get(c.key)!;
+      const blocks = blocksOf(c.key);
+      const size = Number(String(r.sizeArcmin).split('×')[0]);
+      return {
+        name: r.name,
+        displayName: r.displayName,
+        gotoName: r.gotoName,
+        type: r.type,
+        constellation: r.constellation,
+        sizeArcmin: r.sizeArcmin,
+        fillPercent: Number.isFinite(size) && fov.w ? Math.round((size / fov.w) * 100) : null,
+        framing: r.framing,
+        magnitude: r.magnitude,
+        surfaceBrightness: r.surfaceBrightness,
+        raHours: r.raHours,
+        decDeg: r.decDeg,
+        maxAltitude: r.maxAltitude,
+        detect: r.detectBucket,
+        detectReason: r.detectReason,
+        filter: c.filter,
+        subSeconds: r.subSeconds,
+        subRangeSeconds: r.subRangeSeconds,
+        subs: r.subs,
+        exposureAdvice: r.exposureAdvice,
+        restReason: r.restReason,
+        obstructedNow: r.obstructedNow,
+        clearsAt: r.clearsAt,
+        /** the plan's view: scheduled blocks, else when and how well it is usable tonight */
+        scheduled: blocks.map((b) => ({ start: b.start, end: b.end, expectedMin: b.expectedMin })),
+        usableMin: k.usableMin,
+        usableFrom: k.bestFrom,
+        usableUntil: k.bestUntil,
+        merit: k.meanMerit,
+        sky: k.sky,
+        planValue: k.value,
+        notUsable: k.why,
+        suggestedGoalMin: goalDefault || goalFor(findObject(r.name)?.type, r.detectBucket),
+      };
+    });
+    // what the plan scheduled first (in its order), then by what the plan could make of each
+    rows.sort((a, b) => (b.scheduled.length ? 1 : 0) - (a.scheduled.length ? 1 : 0) || (a.scheduled[0]?.start ?? 0) - (b.scheduled[0]?.start ?? 0) || b.planValue - a.planValue);
+    return { targets: rows.slice(0, filter.limit ?? 25), resting: pool.resting, rest: restSettings() };
   }
 
   /**

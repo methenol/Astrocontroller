@@ -394,6 +394,95 @@ function curves(input: SolveInput, slots: SlotInfo[], illum: number): Curve[] {
   });
 }
 
+/** A target's value to the plan before its hours are weighed: the owner's priority and how far it is from its goal (with its season), a filler's planner score scaled down. */
+function baseValue(cv: Curve, settings: PlanSettings): number {
+  const c = cv.c;
+  if (c.source === 'filler') return settings.fillerWeight * clamp01((c.fillerScore ?? 50) / 100);
+  const p = PRIORITY_VALUE[c.priority ?? 3] ?? 1;
+  const goal = c.goalMin ?? 0;
+  const left = Math.max(0, goal - (c.collectedMin ?? 0));
+  if (left <= 0) return c.keepCollecting ? p * KEEP_COLLECTING_VALUE : 0;
+  return p * (0.6 + 0.4 * clamp01(goal ? left / goal : 1)) * (1 + SEASON_WEIGHT * (cv.season?.urgency ?? 0));
+}
+
+/** What the plan can do with one candidate tonight, by the same scoring the scheduler uses. */
+export interface CandidateRank {
+  key: string;
+  /** minutes it is usable from `from` to the end (up, clear of obstructions and holds, the Moon allowing it, forecast above the floor) */
+  usableMin: number;
+  /** its longest usable run */
+  bestFrom: number | null;
+  bestUntil: number | null;
+  /** mean merit (0–1) over its usable slots: altitude, rotation, Moon, sky */
+  meanMerit: number;
+  /** mean forecast observability over its usable slots, null without a forecast */
+  sky: number | null;
+  /** base value × mean merit × its usable share of the night: how much the plan wants it tonight */
+  value: number;
+  /** why it is not usable at all, when it is not */
+  why: string | null;
+}
+
+/**
+ * Every candidate of a solve ranked by what the plan could do with it tonight, from `from`: the
+ * merit curves and the base value the scheduler itself uses, so a list built from this agrees with
+ * the plan (whatever it scheduled ranks among the best of it).
+ */
+export function rankCandidates(input: SolveInput): CandidateRank[] {
+  const illum = sky.moonState(input.site, new Date((input.start.getTime() + input.end.getTime()) / 2)).illuminationPercent / 100;
+  const slots = slotsOf(input);
+  const from = Math.max(input.start.getTime(), input.from?.getTime() ?? input.start.getTime());
+  const first = Math.max(0, slots.findIndex((x) => x.t + SLOT_MS > from));
+  const holds = input.holds ?? [];
+  const nightMin = Math.max(SLOT_MIN, (slots.length - first) * SLOT_MIN);
+  return curves(input, slots, illum).map((cv) => {
+    let n = 0;
+    let sum = 0;
+    let skySum = 0;
+    let skyN = 0;
+    let run = 0;
+    let runFrom = 0;
+    let best = 0;
+    let bestFrom: number | null = null;
+    let bestUntil: number | null = null;
+    for (let i = first; i < slots.length; i++) {
+      const ok = cv.merit[i] > 0 && !heldAt(holds, cv, i, slots[i].t);
+      if (!ok) {
+        run = 0;
+        continue;
+      }
+      n++;
+      sum += cv.merit[i];
+      if (slots[i].sky !== null) {
+        skySum += slots[i].sky!;
+        skyN++;
+      }
+      if (!run) runFrom = slots[i].t;
+      run++;
+      if (run > best) {
+        best = run;
+        bestFrom = runFrom;
+        bestUntil = Math.min(slots[i].t + SLOT_MS, input.end.getTime());
+      }
+    }
+    const usableMin = n * SLOT_MIN;
+    const meanMerit = n ? sum / n : 0;
+    const geom = cv.geom.slice(first).some(Boolean);
+    const moon = cv.geomMoon.slice(first).some(Boolean);
+    const why = n ? null : !geom ? 'not above the limits (minimum altitude, obstructions) in the plan window' : !moon ? 'the Moon is too close whenever it is up' : 'up only while the forecast is below the floor, or held';
+    return {
+      key: cv.c.key,
+      usableMin,
+      bestFrom,
+      bestUntil,
+      meanMerit: Math.round(meanMerit * 100) / 100,
+      sky: skyN ? Math.round(skySum / skyN) : null,
+      value: Math.round(baseValue(cv, input.settings) * meanMerit * Math.min(1, usableMin / Math.min(nightMin, Math.max(input.settings.minBlockMin, 1) * 3)) * 1000) / 1000,
+      why,
+    };
+  });
+}
+
 /** Whether a hold takes a target (or the patch of sky it is in) out of a slot. */
 function heldAt(holds: Hold[], cv: Curve, i: number, t: number): Hold | null {
   for (const h of holds) {
@@ -450,15 +539,7 @@ export function solveNight(input: SolveInput): Solved {
     for (let j = i; j < n; j++) if (usable(cv, j)) k++;
     return k * slotYield;
   };
-  const base = (cv: Curve) => {
-    const c = cv.c;
-    if (c.source === 'filler') return settings.fillerWeight * clamp01((c.fillerScore ?? 50) / 100);
-    const p = PRIORITY_VALUE[c.priority ?? 3] ?? 1;
-    const goal = c.goalMin ?? 0;
-    const left = Math.max(0, goal - (c.collectedMin ?? 0));
-    if (left <= 0) return c.keepCollecting ? p * KEEP_COLLECTING_VALUE : 0;
-    return p * (0.6 + 0.4 * clamp01(goal ? left / goal : 1)) * (1 + SEASON_WEIGHT * (cv.season?.urgency ?? 0));
-  };
+  const base = (cv: Curve) => baseValue(cv, settings);
 
   // pinned blocks first: they are the owner's (or the agent's) word
   const pins: Run[] = [];

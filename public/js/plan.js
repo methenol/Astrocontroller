@@ -454,13 +454,17 @@ async function loadSuggestions() {
       ? `<p class="muted small">Held back by memory: ${r0.resting.map((x) => `<b>${esc(x.displayName ?? x.name)}</b> (${esc(x.reason)}) <button class="ghost np-mini" data-rest="${esc(x.name)}" data-role="none">lift</button>`).join(' · ')}</p>`
       : '';
     el.innerHTML = rows.length
-      ? `<table class="plan-table"><tr><th>Target</th><th>Tonight</th><th>Weather</th><th>Fit / filter / subs</th><th></th></tr>${rows
+      ? `<table class="plan-table"><tr><th>Target</th><th title="what tonight's plan makes of it, by the same scoring it schedules with">In tonight's plan</th><th>Sky</th><th>Fit / filter / subs</th><th></th></tr>${rows
           .map((r) => {
-            const clear = r.bestClearMinutes >= 5 && r.bestClearFrom ? `<small title="the longest run simultaneously up, forecast-clear and moon-workable">clear ${esc(String(r.bestClearFrom).split(', ').pop())}–${esc(String(r.bestClearUntil).split(', ').pop())} (${esc(r.bestClearMinutes)} min)</small>` : '';
+            const inPlan = r.scheduled?.length
+              ? `<span class="badge done">scheduled</span><small>${r.scheduled.map((b) => `${esc(hm(b.start))}–${esc(hm(b.end))} (~${esc(dur(b.expectedMin))})`).join(', ')}</small>`
+              : r.usableMin
+                ? `${esc(dur(r.usableMin))} usable<small>best ${esc(hm(r.usableFrom))}–${esc(hm(r.usableUntil))} · merit ${esc(Math.round(r.merit * 100))}% · value ${esc(r.planValue)}</small>`
+                : `<span class="muted">not usable</span><small>${esc(r.notUsable ?? '')}</small>`;
             const subs = subLine(r.subSeconds, r.subRangeSeconds, r.subs);
-            return `<tr class="${r.gated ? 'gated' : ''}"><td><b>${esc(r.displayName)}</b> ${verdict(r.detect, r.detectReason)}${r.fillerTonight ? ' <span class="badge">filler tonight</span>' : ''}${r.obstructedNow ? ` <span class="badge waiting" title="behind the site's obstructions now${r.clearsAt ? `; clear at ${esc(r.clearsAt)}` : ''}">behind obstruction now</span>` : ''}<small>${esc(r.type)} in ${esc(r.constellation)}, ${esc(r.sizeArcmin)}′${r.magnitude != null ? `, mag ${esc(r.magnitude)}` : ''}${r.surfaceBrightness != null ? `, SB ${esc(r.surfaceBrightness)}` : ''}</small>${r.gated ? `<small>${esc(r.gateReason)}</small>` : ''}${r.restReason ? `<small>memory: ${esc(r.restReason)}</small>` : ''}</td>
-            <td data-label="Tonight">best ${esc(String(r.bestTime ?? '').split(', ').pop())}<small>max ${esc(Math.round(r.maxAltitude))}°, ${esc(r.hoursUp)} h up, ${esc(dur(r.usableMinutes))} usable${r.moonlitMinutes ? ` (${esc(r.moonlitMinutes)} moonlit)` : ''}</small>${clear}</td>
-            <td data-label="Weather">${r.weatherAlignment != null ? `<b class="sky ${skyCls(r.weatherAlignment)}">${esc(r.weatherAlignment)}/100</b>${r.skyAtBest != null ? `<small>sky ${esc(r.skyAtBest)} at best</small>` : ''}` : '<small>no forecast</small>'}</td>
+            return `<tr class="${r.usableMin ? '' : 'gated'}"><td><b>${esc(r.displayName)}</b> ${verdict(r.detect, r.detectReason)}${r.obstructedNow ? ` <span class="badge waiting" title="behind the site's obstructions now${r.clearsAt ? `; clear at ${esc(r.clearsAt)}` : ''}">behind obstruction now</span>` : ''}<small>${esc(r.type)} in ${esc(r.constellation)}, ${esc(r.sizeArcmin)}′${r.magnitude != null ? `, mag ${esc(r.magnitude)}` : ''}${r.surfaceBrightness != null ? `, SB ${esc(r.surfaceBrightness)}` : ''}</small>${r.gated ? `<small>${esc(r.gateReason)}</small>` : ''}${r.restReason ? `<small>memory: ${esc(r.restReason)}</small>` : ''}</td>
+            <td data-label="In tonight's plan">${inPlan}<small>max ${esc(Math.round(r.maxAltitude))}°</small></td>
+            <td data-label="Sky">${r.sky != null ? `<b class="sky ${skyCls(r.sky)}">${esc(r.sky)}/100</b><small>while usable</small>` : '<small>no forecast</small>'}</td>
             <td data-label="Fit / filter / subs"><small>${esc(r.framing ?? (r.fillPercent != null ? `${r.fillPercent}% of the frame` : ''))}</small><small>${esc(r.filter)}</small>${subs ? `<small title="${esc(r.exposureAdvice ?? '')}">${esc(subs)}</small>` : ''}</td>
             <td><button class="ghost" data-add="${esc(r.gotoName)}" data-goal="${esc(r.suggestedGoalMin)}" title="Add to the program with a goal of ${esc(dur(r.suggestedGoalMin))} (edit it after)">Add ${esc(hours(r.suggestedGoalMin))}</button><button class="ghost" data-sky="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}">Sky</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Never</button></td></tr>`;
           })
@@ -479,8 +483,9 @@ $('#np-find-card').addEventListener('change', (e) => {
   }
   clearTimeout(filterTimer);
   filterTimer = setTimeout(async () => {
-    loadSuggestions();
+    // the filter is the fillers' too: saved first, so the list and the plan are drawn from one pool
     if (await apiToast('plan/settings', filterNow())) reloadSoon();
+    loadSuggestions();
   }, 300);
 });
 

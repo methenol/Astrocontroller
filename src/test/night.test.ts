@@ -311,3 +311,19 @@ describe('night plan: the target memory', () => {
     removeTarget('M 42');
   });
 });
+
+describe('night plan: Find targets and the plan agree', () => {
+  test("every filler the plan scheduled is in Find targets, first, with its block; the rest are ranked by the plan's own scoring", async () => {
+    const now = Date.parse('2026-11-01T18:00:00Z');
+    const svc = new PlanService({ site: () => SITE, fovArcmin: () => ({ w: 83, h: 147 }), journal: new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'find-j-')) }), now: () => now, conditions: async () => null, forecastStamp: async () => null, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'find-')) });
+    const plan = await svc.plan();
+    const fillers = [...new Set(plan.blocks.filter((b) => b.target?.source === 'filler').map((b) => b.target!.key))];
+    assert.ok(fillers.length > 0, 'the empty program is filled from the catalog');
+    const { targets } = await svc.suggestions({ limit: 40 });
+    const keys = targets.map((t) => String(t.name).toLowerCase());
+    fillers.forEach((k, i) => assert.equal(keys[i], k, `scheduled filler ${k} at the top of Find targets`));
+    for (const t of targets.slice(0, fillers.length)) assert.ok((t.scheduled as unknown[]).length > 0);
+    const rest = targets.slice(fillers.length).map((t) => t.planValue as number);
+    for (let i = 1; i < rest.length; i++) assert.ok(rest[i - 1] >= rest[i], 'the rest by plan value');
+  });
+});
