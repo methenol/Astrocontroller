@@ -16,7 +16,7 @@ import type { StreamHub } from '../../media/streams.js';
 import { capturedLine, except, localTime, saveCapture, text, withImage, type ToolFn } from './common.js';
 
 const PLANETS = ['Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune'] as const;
-const DEFAULT_TELE_FOV = { h: 2.95, v: 1.66 };
+export const DEFAULT_TELE_FOV = { h: 2.95, v: 1.66 };
 /** Astronomical darkness: the Sun this far below the horizon. */
 const DARK_SUN_ALT = -18;
 /** sky_check's still: night settings on the wide camera. */

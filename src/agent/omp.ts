@@ -34,7 +34,8 @@ const MAX_LINE_CHARS = 64 * 1024 * 1024;
 const STDERR_TAIL_CHARS = 2000;
 /** Live tool output goes to the UI at most this often per tool. */
 const TOOL_UPDATE_EMIT_MS = 500;
-const AGENT_TOOLS = 'read,write,edit,grep,glob,bash,todo';
+// web_search needs no key: omp's default chain ends in credential-free engines (Startpage, DuckDuckGo, ...)
+const AGENT_TOOLS = 'read,write,edit,grep,glob,bash,todo,web_search';
 
 /** What the agent is doing right now (for the status line). */
 export type Activity = { kind: 'idle' | 'thinking' | 'writing' | 'tool' | 'compacting' | 'retrying'; tool?: string; since: number };

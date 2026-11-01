@@ -19,6 +19,7 @@ import { imageResult, localTime, makeTool, text, type ToolFn } from '../../mcp/t
 import { registerDutyTools } from '../../mcp/tools/duty.js';
 import { registerLibraryTools } from '../../mcp/tools/library.js';
 import { registerPlanningTools } from '../../mcp/tools/planning.js';
+import { registerResearchTools } from '../../mcp/tools/research.js';
 import { registerStellariumTools } from '../../mcp/tools/stellarium.js';
 import { registerMapObstructions } from '../../mcp/tools/horizon.js';
 import type { DutyLoop } from '../../agent/duty.js';
@@ -83,6 +84,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
         );
       }
       registerStellariumTools(tool);
+      registerResearchTools(tool, { fov: () => scope.state.fov ?? NOMINAL_FOV });
     },
   };
 }
