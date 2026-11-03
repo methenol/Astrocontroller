@@ -124,9 +124,12 @@ describe('agent setup', () => {
       (config.llm as { thinkingFormat: string }).thinkingFormat = 'openai-responses';
       assert.match(modelsYml(), /api: openai-responses/);
       assert.doesNotMatch(modelsYml(), /thinkingFormat/);
+      // SYSTEM.md rides omp's system prompt (Responses `instructions`), never a user turn: don't override the role
+      assert.doesNotMatch(modelsYml(), /supportsDeveloperRole/);
       (config.llm as { thinkingFormat: string }).thinkingFormat = 'qwen';
       assert.match(modelsYml(), /api: openai-completions/);
       assert.match(modelsYml(), /thinkingFormat: "qwen"/);
+      assert.doesNotMatch(modelsYml(), /supportsDeveloperRole/);
     } finally {
       (config.llm as { thinkingFormat: string }).thinkingFormat = saved;
     }

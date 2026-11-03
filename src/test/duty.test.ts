@@ -106,7 +106,30 @@ describe('DutyLoop', () => {
     assert.equal(agent.prompts.length, 1, 'the mode off: the release holds the samples again');
   });
 
+  test('with no duty and autonomous mode off, nothing wakes the agent; events are dropped', async () => {
+    duty.event('the night plan moved on: Now: M31');
+    duty.event('transfer job 1 done');
+    duty.order('the Starfront roof opened');
+    await new Promise((r) => setTimeout(r, 3100));
+    assert.equal(agent.prompts.length, 0);
+    assert.equal(duty.status().pendingEvents, 0);
+  });
+
+  test('autonomous mode on, no duty: orders and events wake the agent', async () => {
+    duty.dispose();
+    const dev = { ...dwarfDuty(dwarf as unknown as Dwarf), autonomous: () => true };
+    Object.defineProperty(dev, 'state', { get: () => dwarf.state });
+    duty = new DutyLoop(dev, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
+    duty.event('dark master saved');
+    await new Promise((r) => setTimeout(r, 3100));
+    assert.equal(agent.prompts.length, 1);
+  });
+
   test('an order is carried out, an event only noted', async () => {
+    duty.dispose();
+    const dev = { ...dwarfDuty(dwarf as unknown as Dwarf), autonomous: () => true };
+    Object.defineProperty(dev, 'state', { get: () => dwarf.state });
+    duty = new DutyLoop(dev, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
     duty.order('the Starfront roof opened: verify it');
     await new Promise((r) => setTimeout(r, 3100));
     assert.match(agent.prompts[0], /ORDER \(the owner's autonomous mode\): the Starfront roof opened/);

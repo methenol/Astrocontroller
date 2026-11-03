@@ -122,7 +122,7 @@ export const PLAN_DEFAULTS: PlanSettings = {
   fillerMinSizeArcmin: null,
   fillerMaxSizeArcmin: null,
   fillerWeight: 0.5,
-  autoRun: true,
+  autoRun: false,
 };
 
 export const ProgramTargetInput = z.object({

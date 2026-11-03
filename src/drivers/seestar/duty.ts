@@ -17,10 +17,9 @@ const SUBS_BEFORE_ALARM = 5;
 const MIN_JUDGE_MS = 5 * 60_000;
 const DEFAULT_SUB_MS = 10_000;
 
-function lines(scope: Seestar, autonomous = false): string[] {
+function lines(scope: Seestar): string[] {
   const st = scope.state;
-  if (st.released && autonomous) return [`- telescope: released (disconnected)${st.mount.parked ? ', parked' : ''}: it and its ZWO session are free. seestar_connect when you need it (over ZWO it can take 5–10 min; you are woken when it is connected).`];
-  if (st.released) return ['- telescope: RELEASED by the user (Disconnect in the web UI); nothing can be sent until they press Connect'];
+  if (st.released) return [`- telescope: released (disconnected)${st.mount.parked ? ', parked' : ''}: it and its ZWO session are free. seestar_connect when you need it (over ZWO it can take 5–10 min; you are woken when it is connected); seestar_disconnect releases it again.`];
   if (!st.connected) return [`- telescope: NOT CONNECTED${st.link?.lastError ? ` (${st.link.lastError})` : ''}`];
   const m = st.mount;
   const busy = scope.isBusy();
@@ -131,8 +130,9 @@ export function seestarDuty(scope: Seestar, o: { autonomous?: () => boolean } = 
       return scope.state;
     },
     requireLocation: () => scope.requireLocation(),
-    measure: () => lines(scope, !!o.autonomous?.()),
-    wakeWhileReleased: () => !!o.autonomous?.(),
+    measure: () => lines(scope),
+    wakeWhileReleased: () => true,
+    autonomous: () => !!o.autonomous?.(),
     watch: (_now, event) => watch(scope, event, () => !!o.autonomous?.()),
     closeOut: () =>
       `stop stacking if it still runs (stop_stacking), park the scope (park), then transfer the night's sessions that are not in the library yet (list_device_sessions, transfer_session; processing queues itself)${o.autonomous?.() ? ', and once those transfers have finished (their finished events), seestar_disconnect' : ''}.`,

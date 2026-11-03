@@ -75,8 +75,10 @@ type WakeKind = 'tick' | 'event' | 'event-only' | 'final';
 /** The telescope as the duty loop sees it, whatever the driver (each driver's adapter: drivers/<id>/duty.ts). */
 export interface DutyDevice {
   readonly state: { released?: boolean };
-  /** keep waking the agent while the telescope is released (Starfront's autonomous nights: the agent connects it again itself) */
+  /** keep waking the agent while the telescope is released (the agent connects it again itself with its connect tool) */
   wakeWhileReleased?(): boolean;
+  /** the owner's autonomous mode is on (Starfront's nights): the only thing besides an active duty that may wake the agent unprompted */
+  autonomous?(): boolean;
   requireLocation(): ObserverLocation;
   /** the telescope's lines in a sample's measurements */
   measure(now: number): string[];
@@ -348,8 +350,13 @@ export class DutyLoop extends SafeEmitter {
   }
 
   // ---------------------------------------------------------------- events
-  /** Queue an event for the agent. onlyOnDuty: dropped when not on duty. */
+  /**
+   * Queue an event for the agent. Dropped unless a duty is active or the autonomous mode is on:
+   * with both off the agent only ever runs on a message from the user. onlyOnDuty: dropped when not
+   * on duty even in autonomous mode.
+   */
   event(text: string, onlyOnDuty = false): void {
+    if (this.state.status !== 'active' && !this.scope.autonomous?.()) return;
     if (onlyOnDuty && this.state.status !== 'active') return;
     this.push({ at: this.now(), text });
   }
@@ -360,6 +367,7 @@ export class DutyLoop extends SafeEmitter {
    * the agent is told to carry it out: an ordinary automatic message must not start new work.
    */
   order(text: string): void {
+    if (!this.scope.autonomous?.()) return;
     this.push({ at: this.now(), text, order: true });
   }
 

@@ -43,7 +43,7 @@ export function systemRoutes(ctx: WebContext, onHostChanged: () => void): Router
       const cancelled = library.cancelActiveJobs();
       await scope.release();
       scope.hub.release();
-      duty.event('the user released the telescope (Disconnect in the web UI): no telescope commands until they press Connect', true);
+      duty.event(scope.driver === 'seestar' ? 'the user released the telescope (Disconnect in the web UI); seestar_connect takes it again when you need it' : 'the user released the telescope (Disconnect in the web UI): no telescope commands until they press Connect', true);
       return { released: true, cancelledTransfers: cancelled };
     }),
   );

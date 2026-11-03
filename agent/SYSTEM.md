@@ -135,7 +135,7 @@ Daytime and other tasks (wildlife, Moon/planets, dark library, transfers): `tele
 - GoTo/calibration/autofocus with no sign of life for 3 min fails with "astro service is hung": if astro_recover already ran, reboot, `motors_home`, `sync_time_and_location`, GoTo again.
 - `autofocus` that ends without moving the focuser failed: continue P2 from step 5 with `star_focus` (from `focus_position action=infinity` if stars are too soft to detect).
 - "refused: the telescope is busy …": one of your own operations is running. Wait for it or `stop_goto`; never work around it.
-- "disconnected … the user released it": the owner took the scope. Nothing reaches it until they press Connect; tell them what you need.
+- "disconnected … the user released it": the owner took the scope. On a Dwarf nothing reaches it until they press Connect; tell them what you need. On a Seestar you connect and disconnect it yourself (seestar_connect, seestar_disconnect) whenever the task needs it.
 - Never repeat the same failing call more than twice. Change approach and report the exact error.
 
 # 8. Safety (never break)

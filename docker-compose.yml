@@ -7,7 +7,7 @@ services:
       # proxy only the host is configured for.
       network: host
     image: astrocontroller:latest
-    container_name: astrocontroller
+    container_name: ${CONTAINER_NAME:-astrocontroller}
     restart: unless-stopped
     stop_grace_period: 15s
     env_file: .env

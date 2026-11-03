@@ -61,6 +61,7 @@ function rig(o: { building?: number; dutyStatus?: 'off' | 'active' } = {}) {
     transfers,
     at: (ms: number) => (t = ms),
     roof: (open: Record<number, boolean>) => (roof = roofs(open)),
+    noRoofStatus: () => (roof = []),
     stackOn: (target: string | undefined, stacking = true) => {
       stack = { stacking, target };
       for (const f of listeners) f();
@@ -124,9 +125,23 @@ describe('autonomous Starfront nights', () => {
     assert.ok(r.events.some((e) => /^ORDER the Starfront roof has REOPENED: seestar_connect/.test(e)));
   });
 
-  test('a roof still closed at 19:00 is checked with the telescope once; seen open, the night starts at its time', async () => {
+  test('a roof reported closed is never checked with the telescope: the status is authoritative', async () => {
     const r = rig({ building: 6 });
     r.nights.setEnabled(true);
+    r.roof({});
+    r.at(Math.max(CHECK_AT, AFTER_SUNSET) + 60_000);
+    await r.nights.tick();
+    await r.nights.tick();
+    r.at(DARK);
+    await r.nights.tick();
+    assert.deepEqual(r.events, []);
+    assert.deepEqual(r.starts, []);
+  });
+
+  test('with no roof status at all, the telescope checks it at 19:00 once; seen open, the night starts at its time', async () => {
+    const r = rig({ building: 6 });
+    r.nights.setEnabled(true);
+    r.noRoofStatus();
     // in daylight nothing is checked, whatever the clock says
     r.at(W.sunset!.getTime() - 60_000);
     await r.nights.tick();

@@ -16,8 +16,9 @@
  *   parks, transfers, and disconnects once the transfers have finished (the driver's close-out).
  * - The roof closes during the night: the agent is told at once (stop stacking, park, transfer,
  *   disconnect once the transfers have finished); it reopens: told again (connect, carry on).
- * - At STARFRONT_ROOF_CHECK_TIME (19:00) a roof still reported closed is checked with the telescope
- *   the same way (connect, look, report, park, disconnect); open starts the night's duty at its time.
+ * - The roof status is authoritative: a roof reported closed is never checked with the telescope.
+ *   Only at STARFRONT_ROOF_CHECK_TIME (19:00) with no status at all (roof API unreachable) is it
+ *   checked the same way (connect, look, report, park, disconnect); open starts the night's duty at its time.
  *
  * These wakes are orders (duty.order): steps of a mode the owner turned on, which the agent carries
  * out even off duty.
@@ -61,7 +62,7 @@ export const VERIFY_PROMPT = (time: string, duty: string) =>
   `Starfront roof opened (${time}), before dark. Verify it with the telescope: ${LOOK} Report what you saw with starfront_roof action=report open=true|false. Then park, and seestar_disconnect. Tonight's duty starts at ${duty}, when you are woken to connect again.`;
 
 export const ROOF_CHECK_PROMPT = (time: string, duty?: string) =>
-  `Starfront roof check (${time}): the roof status still says closed. Check the roof over the scope with the telescope: ${LOOK.replace('then open_arm', 'then open_arm')} Open sky (a twilight gradient, or a recognisable star field) = open; a dark ceiling, rafters, the inside of the building, or a dark frame with only noise or hot pixels (counted as "stars" under a closed roof) = closed; when in doubt, closed. Report it with starfront_roof action=report open=true|false. Then park, and seestar_disconnect. Open starts tonight's imaging duty${duty ? ` (at ${duty})` : ''}, when you are woken to connect again.`;
+  `Starfront roof check (${time}): there is no roof status. Check the roof over the scope with the telescope: ${LOOK.replace('then open_arm', 'then open_arm')} Open sky (a twilight gradient, or a recognisable star field) = open; a dark ceiling, rafters, the inside of the building, or a dark frame with only noise or hot pixels (counted as "stars" under a closed roof) = closed; when in doubt, closed. Report it with starfront_roof action=report open=true|false. Then park, and seestar_disconnect. Open starts tonight's imaging duty${duty ? ` (at ${duty})` : ''}, when you are woken to connect again.`;
 
 export const ROOF_CLOSING_ORDER =
   "the Starfront roof is CLOSING: stop_stacking and park NOW. Then transfer tonight's sessions not yet in the library (list_device_sessions, transfer_session), and when their finished events arrive, seestar_disconnect. Wait for the roof to reopen (duty next_check in_s=900); its reopening wakes you.";
@@ -279,11 +280,12 @@ export class StarfrontNights extends SafeEmitter {
       this.publish();
       return;
     }
-    // the roof still says closed (or is unknown) at the check time of this night's evening: look with the telescope, once a night
+    // The roof status is authoritative: closed means closed, and the scope is never raised to look.
+    // Only with no status at all (the roof API unreachable, or no roof matching) is the telescope asked, at the check time, once a night.
     const checkAt = this.d.checkTime ?? config.starfront.roofCheckTime;
-    if (!night.checkedAt && now >= sky.parseLocal(`${key}T${checkAt}`, config.observer.timezone).getTime()) {
+    if (open === null && !night.checkedAt && now >= sky.parseLocal(`${key}T${checkAt}`, config.observer.timezone).getTime()) {
       night.checkedAt = now;
-      log.info(`roof reported ${open === null ? 'unknown' : 'closed'} at ${checkAt}: asking the agent to check it with the telescope`);
+      log.info(`roof status unknown at ${checkAt}: asking the agent to check it with the telescope`);
       this.d.duty.order(ROOF_CHECK_PROMPT(localHm(now), dutyAt && !time ? localHm(dutyAt) : undefined));
       this.save();
       return;
