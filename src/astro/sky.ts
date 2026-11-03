@@ -138,7 +138,10 @@ function windowFrom(site: Site, from: Date) {
  * yet (evening twilight included, so the sunset reported is today's), else the next one.
  */
 export function nightWindow(site: Site, when = new Date()) {
-  const sunAlt = bodyAlt(site, 'Sun', when);
+  // geometric, like the sunset search: with refraction the Sun still reads above the sunset altitude for
+  // a minute or so after the search's sunset, and the window would pair tomorrow's sunset (and so its
+  // night key) with tonight's dusk
+  const sunAlt = sunAltGeometric(site, when);
   if (sunAlt < SUNSET_ALT) {
     const began = lastSunset(site, SUNSET_ALT, when);
     // a polar night without a sunset in the lookback: search the whole lookback
@@ -150,6 +153,12 @@ export function nightWindow(site: Site, when = new Date()) {
     }
   }
   return windowFrom(site, when);
+}
+
+function sunAltGeometric(site: Site, when: Date): number {
+  const t = A.MakeTime(when);
+  const eq = A.Equator(A.Body.Sun, t, observer(site), true, true);
+  return A.Horizon(t, observer(site), eq.ra, eq.dec).altitude;
 }
 
 export function bodyAlt(site: Site, body: BodyName, when = new Date()): number {

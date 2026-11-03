@@ -90,6 +90,15 @@ describe('ephemeris', () => {
     assert.ok(m.darkStart && m.darkStart > morning, 'the window is the coming night');
   });
 
+  test('the minute after sunset reports today’s sunset, not tomorrow’s (refraction does not split the night)', () => {
+    // 31.5°N 99.4°W on 2026-11-02: sunset (the search's, geometric) 23:47:18Z; with refraction the Sun still reads above it at 23:47:45Z
+    const site = { lat: 31.5475, lon: -99.3817, elev: 454 };
+    const when = new Date('2026-11-02T23:47:45Z');
+    const w = nightWindow(site, when);
+    assert.ok(w.sunset && w.sunset < when, `sunset ${w.sunset?.toISOString()} is today's`);
+    assert.ok(w.darkStart && w.sunrise && w.darkStart > w.sunset && w.darkStart < w.sunrise, 'dusk and sunset are the same night');
+  });
+
   test('the night after the season without astronomical darkness is not paired with the next night\'s darkness', () => {
     // 52.5°N on 2026-07-24: no -18° dusk that night (the first comes the next night, at 23:05Z)
     const site = { lat: 52.5, lon: 13.4, elev: 50 };

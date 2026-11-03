@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { findObject } from '../astro/catalog.js';
 import { PLAN_DEFAULTS, addTarget, removeTarget, type PlanSettings } from '../night/program.js';
 import { setRest, liftRest } from '../astro/rest.js';
-import { daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Candidate, type Hold } from '../night/solver.js';
+import { daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
 import { Journal } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
 import { learn } from '../night/progress.js';
@@ -141,6 +141,14 @@ describe('night plan: the solver', () => {
     assert.ok(!again.blocks.some((b) => !b.past && b.target?.key === running.key));
     assert.ok(again.blocks.filter((b) => b.past).every((b) => b.end <= from.getTime()));
     assert.equal(again.blocks[0].start, W.start.getTime());
+  });
+
+  test('blocks of another night are not kept as history', () => {
+    const shift = (b: Block, ms: number): Block => ({ ...b, start: b.start - ms, end: b.end - ms });
+    const lastNight = solve([cand('M 31'), cand('M 42')], { idPrefix: 'y' }).blocks.map((b) => shift(b, 86400e3));
+    const r = solve([cand('M 31'), cand('M 42')], { history: lastNight, idPrefix: 'z' });
+    assert.ok(!r.blocks.some((b) => b.past));
+    assert.ok(r.blocks.every((b) => b.start >= W.start.getTime()));
   });
 });
 

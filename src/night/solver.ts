@@ -850,8 +850,9 @@ export function solveNight(input: SolveInput): Solved {
   for (const x of input.excluded ?? []) outlook.push({ source: 'program', plannedMin: 0, remainingMin: x.goalMin !== undefined ? Math.max(0, x.goalMin - x.collectedMin) : null, usableMin: 0, bestFrom: null, bestUntil: null, ...x });
 
   // ---- history: the night so far, from the plan that was in force
+  // only this window's: a block of another night (a plan filed under the wrong night) is not history
   const kept = (input.history ?? [])
-    .filter((b) => b.start < from)
+    .filter((b) => b.end > input.start.getTime() && b.start < from)
     .map((b) => {
       const end = Math.min(b.end, from);
       // a block cut short by the re-plan yields its share of what it was planned for

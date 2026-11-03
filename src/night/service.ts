@@ -202,7 +202,10 @@ export class PlanService extends SafeEmitter {
     let f: NightFile = { plan: null, holds: [] };
     try {
       const raw = JSON.parse(fs.readFileSync(this.file(night), 'utf8')) as Partial<NightFile>;
-      f = { plan: raw.plan ?? null, holds: Array.isArray(raw.holds) ? raw.holds : [], autoRunAt: raw.autoRunAt };
+      const plan = raw.plan ?? null;
+      // blocks outside the plan's own window (another night's, filed here by mistake) are dropped
+      if (plan) plan.blocks = plan.blocks.filter((b) => b.end > plan.window.start && b.start < plan.window.end);
+      f = { plan, holds: Array.isArray(raw.holds) ? raw.holds : [], autoRunAt: raw.autoRunAt };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`ignoring unreadable ${this.file(night)}: ${errMsg(e)}`);
     }
@@ -897,7 +900,7 @@ export class PlanService extends SafeEmitter {
     const go = (b: Block) => `goto_target name=${b.target!.gotoName}${b.target!.filter ? ` (filter ${b.target!.filter})` : ''}, autofocus, star_focus, start_stacking`;
     let instruction: string;
     if (phase === 'before') {
-      const first = blocks.find((b) => b.kind === 'target');
+      const first = blocks.find((b) => b.kind === 'target' && !b.past && b.end > at);
       instruction = `The plan starts at ${hm(plan.window.start)} with ${first?.target ? `${first.target.displayName} (${hm(first.start)}–${hm(first.end)})` : 'no target'}. Nothing is stacked before then; get ready (connect, open the arm).`;
     } else if (phase === 'after') instruction = "The plan's night has ended.";
     else if (!block || block.kind !== 'target') {
