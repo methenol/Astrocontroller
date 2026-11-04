@@ -125,6 +125,13 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   /** an operation or a tool is borrowing a camera: the selection is applied when it is done */
   private borrowed: Camera | null = null;
   private borrowDepth = 0;
+  /**
+   * The target the last GoTo centred on. A camera switch restarts the view without a target, so
+   * the scope forgets the name: the stack's group (its MyWorks folder) is named from this instead.
+   */
+  private stackTarget: string | null = null;
+  /** the pointing changed since the last stack started: the next one starts fresh, not on top of it */
+  private pointingChanged = false;
   /** the operation in flight (its label), one at a time */
   operation: string | null = null;
   /** an operation reserved through its camera switch (withTele), before follow() takes it */
@@ -717,6 +724,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
           () =>
             this.serial(async () => {
               if (this.viewRunning() && this.exposing !== 'tele') await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+              this.stackTarget = g.name;
+              this.pointingChanged = true;
               const res = await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF.tele, target_ra_dec: [g.raHours, g.decDeg], target_name: g.name, lp_filter: !!g.lpFilter }, { timeoutMs: VIEW_TIMEOUT_MS });
               this.st.camera = 'tele';
               this.st.view.state = 'working';
@@ -733,7 +742,11 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     if (!g.stack) return { goto: r, stacking: 'not requested' };
     await sleep(3000);
     await this.refreshState().catch(() => undefined);
-    if (this.isStacking()) return { goto: r, stacking: 'started by the scope (stack_after_goto)' };
+    if (this.isStacking()) {
+      // the scope's own stack after a GoTo is new and carries the GoTo's name
+      this.pointingChanged = false;
+      return { goto: r, stacking: 'started by the scope (stack_after_goto)' };
+    }
     await this.startStack();
     return { goto: r, stacking: 'started' };
   }
@@ -747,6 +760,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     const sep = separationDeg(raHours, decDeg, sun.raHours, sun.decDeg);
     if (bodyAlt(site, 'Sun') > -1 && sep < SUN_SLEW_MIN_DEG) throw new Error(`refusing to slew ${sep.toFixed(0)}° from the Sun (the limit is ${SUN_SLEW_MIN_DEG}°)`);
     if (this.st.mount.parked) await this.openArm();
+    this.stackTarget = null;
+    this.pointingChanged = true;
     return Seestar.ok('slew', await this.follow('slew', ['ScopeGoto'], () => this.call('scope_goto', [raHours, decDeg]), GOTO_TIMEOUT_MS, () => true));
   }
 
@@ -759,11 +774,24 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.call('iscope_stop_view', { stage: 'AutoGoto' }, { timeoutMs: VIEW_TIMEOUT_MS });
   }
 
-  /** Stack on the tele's view (restart = drop what is stacked so far). */
+  /**
+   * Stack on the tele's view (restart = drop what is stacked so far). The stack is named after the
+   * GoTo's target, and starts fresh after the scope moved: a stack continued across targets files
+   * every target under one name ("Unknown" once a camera switch dropped it) and registers the new
+   * target's subs against the old one's, so they all fail.
+   */
   async startStack(restart = false): Promise<RpcResponse> {
     if (!this.viewRunning()) await this.ensureLiveView();
     if (this.exposing !== 'tele') await this.serial(() => this.restartView('tele', this.st.view.lpFilter ?? false));
-    const r = await this.call('iscope_start_stack', { restart });
+    const name = this.stackTarget ?? this.st.view.target;
+    if (name) {
+      const g = await this.call('set_sequence_setting', [{ group_name: name }], { allowError: true }).catch((e: unknown) => ({ code: -1, error: errMsg(e) }) as RpcResponse);
+      if (g.code) log.warn(`the stack could not be named ${name}: ${g.error ?? `code ${g.code}`}`);
+    }
+    const fresh = restart || this.pointingChanged;
+    if (fresh && !restart) log.info(`stacking ${name ?? 'the new pointing'} from scratch: the scope moved since the last stack`);
+    const r = await this.call('iscope_start_stack', { restart: fresh });
+    this.pointingChanged = false;
     this.st.stack.state = 'working';
     this.st.stack.at = Date.now();
     this.changed();

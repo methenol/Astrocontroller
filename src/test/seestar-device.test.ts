@@ -411,6 +411,43 @@ describe('Seestar camera selection', () => {
     assert.equal(scope.selected, 'wide');
   });
 
+  test("each target's stack is named after it and starts fresh, even after the view lost the name", async () => {
+    await scope.selectCamera('wide', 'test');
+    const starts = fake.handlers.get('iscope_start_view')!;
+    fake.on('iscope_start_view', async (p, f) => {
+      const r = await starts(p, f);
+      if ((p as { target_name?: string }).target_name) setTimeout(() => f.event({ Event: 'AutoGoto', state: 'complete', lapse_ms: 100, route: [] }), 60);
+      return r;
+    });
+    fake.on('set_sequence_setting', () => ({ result: 0 }));
+    const gotoStarts = fake.handlers.get('iscope_start_view')!;
+    fake.on('iscope_start_view', (p, f) => {
+      // a GoTo takes the running tele view over
+      if ((p as { target_name?: string }).target_name) f.session.running = false;
+      return gotoStarts(p, f);
+    });
+    fake.on('iscope_start_stack', () => ({ result: 0 }));
+    const stackCalls = () => fake.calls.filter((c) => c.method === 'set_sequence_setting' || c.method === 'iscope_start_stack').map((c) => [c.method, c.params]);
+    for (const name of ['M 31', 'M 33']) {
+      await scope.gotoTarget({ raHours: 0.71, decDeg: 41.27, name });
+      await until(() => scope.exposing === 'wide', 4000);
+      await scope.startStack();
+      assert.equal(fake.session.target, undefined, 'the camera switch started the view without a name');
+      // the plan stops the stack before it moves on (the view goes on exposing)
+      fake.event({ Event: 'Stack', state: 'cancel', lapse_ms: 10, route: [] });
+      await until(() => !scope.isStacking());
+    }
+    await scope.startStack(); // the same target again: continues
+    assert.deepEqual(stackCalls(), [
+      ['set_sequence_setting', [{ group_name: 'M 31' }]],
+      ['iscope_start_stack', { restart: true }],
+      ['set_sequence_setting', [{ group_name: 'M 33' }]],
+      ['iscope_start_stack', { restart: true }],
+      ['set_sequence_setting', [{ group_name: 'M 33' }]],
+      ['iscope_start_stack', { restart: false }],
+    ]);
+  });
+
   test('a stack owns the view: it runs on the tele and the wide is not selected under it', async () => {
     fake.on('iscope_start_stack', (_p, f) => {
       f.session.stage = 'Stack';
