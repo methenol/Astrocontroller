@@ -203,7 +203,7 @@ export const config = {
     params: env.json('ASTROPHOTO_PARAMS'),
     /** Queue processing automatically after every session transfer. */
     autoProcess: env.bool('ASTROPHOTO_AUTO_PROCESS', true),
-    /** Auto-processing pools the new session with every earlier library session of the same target (multi-night stack). */
+    /** Auto-processing pools the new session with every earlier library session of the same target, camera, scope and filter (multi-night stack). */
     poolSessions: env.bool('ASTROPHOTO_POOL_SESSIONS', false),
     /** auto: use the server's own copy of the library when it has the session, else upload. shared | upload force one. */
     dataAccess: env.oneOf('ASTROPHOTO_DATA_ACCESS', DATA_ACCESS, 'auto'),

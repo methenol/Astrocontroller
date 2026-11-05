@@ -6,6 +6,12 @@
  * A night not transferred yet is only in the journal; a night shot before the journal existed is
  * only in the library; a night in both is counted once, from whichever saw more of it.
  *
+ * With a filter wanted for a target, only what was shot through it counts: a target asked for in
+ * Duo-Band has collected nothing towards it from an Astro night. The library knows every session's
+ * filter (sessions.ts sessionFilter); the journal knows the Seestar's but not the Dwarf's, so a
+ * journal session with no filter counts towards it only on a night the library has nothing of the
+ * target from (not transferred yet), where it is the only record there is.
+ *
  * The learned numbers close the loop: a GoTo plus focus that takes 9 minutes at this site, or a
  * stacker that keeps 70 % of the wall time, makes the plan's blocks honest about what they yield.
  */
@@ -13,6 +19,7 @@ import { captureLog } from '../library/sessions.js';
 import { targetKey } from '../astro/rest.js';
 import type { Journal } from './journal.js';
 import { nightOfStamp } from './clock.js';
+import { sameFilter } from '../astro/acquisition/devices.js';
 
 export interface Collected {
   /** minutes of integration, all nights */
@@ -46,13 +53,30 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-/** Per target key (rest.targetKey), minutes collected per night from both records. */
-export function collected(journal: Pick<Journal, 'recentSessions'> | null, opts: { nights?: number } = {}): Map<string, Collected> {
+export interface CollectedOptions {
+  nights?: number;
+  /** the filter wanted for a target key ("auto" or none: every filter counts) */
+  filterOf?: (key: string) => string | undefined;
+}
+
+/** Per target key (rest.targetKey), minutes collected per night from both records, through the filter wanted for it. */
+export function collected(journal: Pick<Journal, 'recentSessions'> | null, opts: CollectedOptions = {}): Map<string, Collected> {
+  const wanted = (key: string) => {
+    const f = opts.filterOf?.(key);
+    return f && f !== 'auto' ? f : undefined;
+  };
   const lib = new Map<string, Map<string, number>>();
+  // the nights the library has the target from, whatever the filter: there it is the record
+  const libNights = new Map<string, Set<string>>();
   for (const c of captureLog()) {
     const night = c.startedAt ? nightOfStamp(c.startedAt) : null;
     if (!night) continue;
     const key = targetKey(c.target);
+    const seen = libNights.get(key) ?? new Set<string>();
+    seen.add(night);
+    libNights.set(key, seen);
+    const want = wanted(key);
+    if (want && !sameFilter(c.filter, want)) continue;
     const m = lib.get(key) ?? new Map<string, number>();
     m.set(night, (m.get(night) ?? 0) + c.integrationS / 60);
     lib.set(key, m);
@@ -62,6 +86,8 @@ export function collected(journal: Pick<Journal, 'recentSessions'> | null, opts:
     const night = s.night;
     if (!night || !s.stats.integrationS) continue;
     const key = targetKey(s.target);
+    const want = wanted(key);
+    if (want && (s.stats.filter ? !sameFilter(s.stats.filter, want) : libNights.get(key)?.has(night))) continue;
     const m = jour.get(key) ?? new Map<string, number>();
     m.set(night, (m.get(night) ?? 0) + s.stats.integrationS / 60);
     jour.set(key, m);

@@ -6,7 +6,7 @@ import { errMsg } from '../log.js';
 import { enqueueProcessing } from '../processing/queue.js';
 import { deviceLibrary } from './device-library.js';
 import { startJob, type FailedFile, type Job } from './jobs.js';
-import { isTransferred, sessionLocalDir, librarySessionsFor, SESSION_META, type DeviceSession } from './sessions.js';
+import { isTransferred, sessionLocalDir, librarySessionsLike, filterFromNames, sessionDevice, SESSION_META, type DeviceSession } from './sessions.js';
 import { writeFileAtomic } from '../util/fs.js';
 
 export { jobBus, listJobs, getJob, cancelJob, cancelActiveJobs, type Job } from './jobs.js';
@@ -46,8 +46,9 @@ function queueProcessing(s: DeviceSession, failed: FailedFile[], opts: TransferO
   if (!opts.includeSubframes || !(opts.process ?? config.studio.autoProcess) || !config.studio.url) return undefined;
   const lightsMissing = missingLights(s, failed);
   if (lightsMissing.length) return `not queued: ${lightsMissing.length} light frame(s) are still missing; run the transfer again`;
-  // pool: this night together with every earlier session of the target in the library
-  const pooled = (opts.pool ?? config.studio.poolSessions) ? librarySessionsFor(s.target, s.camera) : [];
+  // pool: this night together with every earlier library session of the target that stacks with it
+  // (the same camera, the same maker's scope, the same filter: a Duo-Band night and an Astro night are two images)
+  const pooled = (opts.pool ?? config.studio.poolSessions) ? librarySessionsLike(s.folder) : [];
   const sessions = pooled.includes(s.folder) ? pooled : [...pooled, s.folder];
   // the files are here whatever happens next: a refusal to queue is reported, it does not fail the transfer
   try {
@@ -67,11 +68,15 @@ export async function transferSession(folderOrLatest: string, opts: TransferOpti
     async (job) => {
       fs.mkdirSync(dest, { recursive: true });
       const { calibrationDir, ...res } = await deviceLibrary().copySession(s, opts, (p) => job.progress(p), job.signal);
+      // what the session was shot through and with, for pooling and the plan's per-filter progress
+      const filter = filterFromNames(s.folder) ?? (readJson(path.join(dest, SESSION_META)) as { filter?: string } | null)?.filter;
       writeFileAtomic(
         path.join(dest, SESSION_META),
         JSON.stringify(
           {
             ...s,
+            device: sessionDevice(s.folder),
+            filter,
             shotsInfo: readJson(path.join(dest, 'shotsInfo.json')),
             transferredAt: new Date().toISOString(),
             // files that could not be copied: a session with any is not complete in the library

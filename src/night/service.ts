@@ -87,6 +87,20 @@ interface NightFile {
   autoRunAt?: number;
 }
 
+/**
+ * What each target has collected towards its goal: through the filter the owner set for it in the
+ * program (an Astro night does not count towards a Duo-Band goal); a target on "auto", and a
+ * filler, counts every filter.
+ */
+function programProgress(journal: Journal | null): ReturnType<typeof collected> {
+  const filters = new Map<string, string>();
+  for (const t of loadProgram()) {
+    const key = targetKey(t.name);
+    if (t.filter && t.filter !== 'auto' && !filters.has(key)) filters.set(key, t.filter);
+  }
+  return collected(journal, { filterOf: (key) => filters.get(key) });
+}
+
 /** The catalog filter of fillers and suggestions (unset fields: the plan settings'). */
 export interface TargetFilter {
   types?: string[];
@@ -293,7 +307,7 @@ export class PlanService extends SafeEmitter {
     const defaults = planDefaults();
     const moonIllum = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2)).illuminationPercent / 100;
     const glassFilters = defaults.filter ? [defaults.filter] : defaults.filters.length ? defaults.filters : ['none'];
-    const progress = collected(this.d.journal);
+    const progress = programProgress(this.d.journal);
     const list: Candidate[] = [];
     const excluded: NonNullable<SolveInput['excluded']> = [];
     const program = loadProgram();
@@ -631,7 +645,7 @@ export class PlanService extends SafeEmitter {
     const solveMs = Date.now() - t1;
     const facts = await this.facts();
     // what each target has collected: one look at the library for the whole night, not one per block
-    const progress = facts ? collected(this.d.journal) : null;
+    const progress = facts ? programProgress(this.d.journal) : null;
     for (const b of solved.blocks) if (b.target && !b.past && !b.target.advice) b.target.advice = this.advise(b.target, b, this.lastConditions, facts, progress);
     const site = this.site();
     const moon = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2));
@@ -998,7 +1012,7 @@ export class PlanService extends SafeEmitter {
 
   /** The program with what each target has collected and what tonight's plan gives it. */
   async programView(): Promise<Array<ProgramTarget & { key: string; collectedMin: number; journalOnlyMin: number; nights: number; lastNight: string | null; tonight: PlannedNight['outlook'][number] | null }>> {
-    const progress = collected(this.d.journal);
+    const progress = programProgress(this.d.journal);
     let plan: PlannedNight | null = null;
     try {
       plan = await this.plan();

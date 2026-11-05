@@ -206,7 +206,8 @@ export function registerAcquisitionTools(tool: ToolFn, ctx: AcquisitionContext):
       const target = targetInfo(a.target, a.ra_hours !== undefined && a.dec_deg !== undefined ? { raHours: a.ra_hours, decDeg: a.dec_deg, emission: a.emission } : undefined);
       const win = await windowFor(ctx, a.target, a.from, a.until);
       const site = ctx.site();
-      const got = ctx.night ? collected(ctx.night.journal).get(targetKey(a.target))?.totalMin : undefined;
+      // with a filter held, what was collected through it (an Astro night does not shorten a Duo-Band goal)
+      const got = ctx.night ? collected(ctx.night.journal, { filterOf: () => a.filter }).get(targetKey(a.target))?.totalMin : undefined;
       const { rec } = adviseFor({
         facts,
         site,

@@ -19,6 +19,7 @@ import { config } from '../config.js';
 import { logger, errMsg } from '../log.js';
 import { deviceLibrary, setDefaultDeviceLibrary } from './device-library.js';
 import { dwarfLibrary } from '../drivers/dwarf/library.js';
+import { sameFilter } from '../astro/acquisition/devices.js';
 
 setDefaultDeviceLibrary(() => dwarfLibrary);
 
@@ -115,19 +116,83 @@ export function librarySessionsFor(target: string, camera?: 'tele' | 'wide'): st
     .map((s) => s.folder);
 }
 
+/** Which maker's scope shot a session: the folder's DWARF_/SEESTAR_ prefix. */
+export function sessionDevice(folder: string): 'dwarf' | 'seestar' | undefined {
+  const m = folder.match(/^(DWARF|SEESTAR)_RAW_/);
+  return m ? (m[1] === 'DWARF' ? 'dwarf' : 'seestar') : undefined;
+}
+
+/** A Dwarf sub's filter: <target>_<exp>s<gain>_<filter>_<time>_<temp>C.fits */
+const DWARF_SUB_FILTER = /_\d+(?:\.\d+)?s\d+_([A-Za-z][A-Za-z0-9-]*)_/;
+
 /**
- * Every library capture as (target, camera, start time, integration): the integration is the
+ * The filter a library session was shot through: what session.json recorded, else the Seestar
+ * folder's suffix (…_21-53-45_IRCUT), else the one most of the Dwarf subs are named with. Undefined
+ * when nothing says (a Dwarf session transferred without its subs, the wide camera).
+ */
+export function sessionFilter(folder: string, files?: string[]): string | undefined {
+  try {
+    const f = (JSON.parse(fs.readFileSync(path.join(config.paths.library, folder, SESSION_META), 'utf8')) as { filter?: unknown } | null)?.filter;
+    if (typeof f === 'string' && f) return f;
+  } catch {
+    // not transferred yet, or no metadata: the names say it
+  }
+  return filterFromNames(folder, files);
+}
+
+/** The filter from the folder's and the subs' names alone (sessionFilter without the metadata). */
+export function filterFromNames(folder: string, files?: string[]): string | undefined {
+  const m = folder.match(SESSION_FOLDER);
+  if (!m) return undefined;
+  const suffix = folder.slice(m[0].length).match(/^_([A-Za-z][\w-]*)$/);
+  if (suffix) return suffix[1];
+  let names = files;
+  if (!names) {
+    try {
+      names = fs.readdirSync(path.join(config.paths.library, folder));
+    } catch {
+      return undefined;
+    }
+  }
+  const count = new Map<string, number>();
+  for (const n of names) {
+    if (!isLight(n)) continue;
+    const f = n.match(DWARF_SUB_FILTER)?.[1];
+    if (f) count.set(f, (count.get(f) ?? 0) + 1);
+  }
+  return [...count.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+/**
+ * Library sessions that stack with `folder`: the same target and camera, shot by the same maker's
+ * scope through the same filter (sessionFilter), oldest first. `folder` itself is among them once
+ * it is in the library.
+ */
+export function librarySessionsLike(folder: string): string[] {
+  const me = parseSessionFolder(folder);
+  if (!me) return [];
+  const device = sessionDevice(folder);
+  const filter = sessionFilter(folder);
+  return librarySessions()
+    .filter((s) => s.target === me.target && s.camera === me.camera && sessionDevice(s.folder) === device && sameFilter(sessionFilter(s.folder), filter))
+    .sort(oldestFirst)
+    .map((s) => s.folder);
+}
+
+/**
+ * Every library capture as (target, camera, maker, filter, start time, integration): the integration is the
  * sub length in the folder name times the subs the stacker kept (failed_* are not counted).
  */
-export function captureLog(): Array<{ target: string; camera: 'tele' | 'wide'; startedAt?: string; integrationS: number }> {
+export function captureLog(): Array<{ target: string; camera: 'tele' | 'wide'; device?: 'dwarf' | 'seestar'; filter?: string; startedAt?: string; integrationS: number }> {
   return librarySessions().map((s) => {
-    let lights = 0;
+    let files: string[] = [];
     try {
-      lights = fs.readdirSync(sessionLocalDir(s)).filter((f) => isLight(f) && !f.startsWith('failed_')).length;
+      files = fs.readdirSync(sessionLocalDir(s));
     } catch (err) {
       log.debug(`could not read ${s.folder}: ${errMsg(err)}`);
     }
-    return { target: s.target, camera: s.camera, startedAt: s.startedAt, integrationS: lights * (s.exposureS ?? 0) };
+    const lights = files.filter((f) => isLight(f) && !f.startsWith('failed_')).length;
+    return { target: s.target, camera: s.camera, device: sessionDevice(s.folder), filter: sessionFilter(s.folder, files), startedAt: s.startedAt, integrationS: lights * (s.exposureS ?? 0) };
   });
 }
 

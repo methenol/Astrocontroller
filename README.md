@@ -55,7 +55,7 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 | `PUID` / `PGID` | (Linux) uid/gid that owns files written to `./data` and the library. Default 1000. |
 | `ASTROPHOTO_URL` | AstroPhoto Studio server (e.g. `http://gpu-box:8000` over Tailscale). Empty = processing off. |
 | `ASTROPHOTO_PROFILE` | Restoration profile, by name, from the server's `/api/v1/profiles`: `default` (the server's default: ImageMM with its Noise2Noise pass), `imagemm` (without it), `n2n-network` (fast), `n2n-rl`. |
-| `ASTROPHOTO_AUTO_PROCESS` / `ASTROPHOTO_POOL_SESSIONS` | Queue processing after each transfer / stack each new night with the earlier nights of its target. |
+| `ASTROPHOTO_AUTO_PROCESS` / `ASTROPHOTO_POOL_SESSIONS` | Queue processing after each transfer / stack each new night with the earlier nights of its target taken with the same camera, scope and filter. |
 | `ASTROPHOTO_DATA_ACCESS` / `ASTROPHOTO_LIBRARY_PATH` | `auto` \| `shared` \| `upload`, and where the library is as the server sees it (see below). |
 | `ASTROPHOTO_FETCH_OUTPUTS`, `ASTROPHOTO_PRESET`, `ASTROPHOTO_STACK_PARAMS`, `ASTROPHOTO_PARAMS`, `ASTROPHOTO_POLL_S` | Copy results back; optional preset and JSON overrides; poll interval. |
 
@@ -206,7 +206,7 @@ When a transfer finishes, the session is queued for processing on an [AstroPhoto
 
 **Field sessions** need nothing special. While the server is out of reach, items wait in the outbox. They go out once it answers, uploading when the server can't see the data.
 
-**Multi-night stacks.** One job is one image. `process_session target="C 33"` pools every library session of that target, and `ASTROPHOTO_POOL_SESSIONS=true` does this automatically after each transfer.
+**Multi-night stacks.** One job is one image. `process_session target="C 33"` pools every library session of that target, and `ASTROPHOTO_POOL_SESSIONS=true` does this automatically after each transfer, pooling only the nights shot with the same camera, scope (Dwarf or Seestar) and filter as the new one.
 
 The profile names, presets and job kinds come from the server, so new profiles in Studio work without code changes here. The agent tools are `processing_status`, `process_session` and `processing_job`; the Library tab has a Processing card.
 

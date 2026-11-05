@@ -273,9 +273,31 @@ const OPTICS_TRANSMISSION = 0.85;
 /** The filter slot matching a name (its name or an alias, ignoring case and punctuation). */
 export function findFilter<T extends DeviceFilter>(filters: T[], name: string | undefined): T | undefined {
   if (!name) return undefined;
-  const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const want = key(name);
-  return filters.find((f) => key(f.name) === want || f.aliases.some((a) => key(a) === want));
+  const want = filterKey(name);
+  return filters.find((f) => filterKey(f.name) === want || f.aliases.some((a) => filterKey(a) === want));
+}
+
+const filterKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/**
+ * One name for a filter, whichever device or record named it: the spec filter it is the name or an
+ * alias of ("dual band" → "duoband", "IR-cut" → "ircut"), a label with a note in brackets as its
+ * first part (the Dwarf's "Duo-Band (Ha/OIII)"), else the name itself without case or punctuation.
+ */
+export function filterId(name: string): string {
+  const all = loadDevices().specs.flatMap((s) => s.filters);
+  for (const n of [name, name.replace(/\s*\(.*\)\s*$/, '')]) {
+    const want = filterKey(n);
+    const f = all.find((x) => filterKey(x.name) === want) ?? all.find((x) => x.aliases.some((a) => filterKey(a) === want));
+    if (f) return filterKey(f.name);
+  }
+  return filterKey(name);
+}
+
+/** Whether two records name the same filter; two that name none count as the same. */
+export function sameFilter(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return filterId(a) === filterId(b);
 }
 
 /**
