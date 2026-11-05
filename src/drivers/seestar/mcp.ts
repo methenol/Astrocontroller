@@ -64,7 +64,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
           stop: async () => media.survey.stop(),
           running: () => media.survey.isRunning,
           progress: () => scope.state.horizonSurvey,
-          how: "the Seestar slews (no plate solve) to every 20° of azimuth at rising altitudes (8°, 16°, 25°, 35°, 50°) and judges the centre of the wide frame against a sky reference taken at 70°, stopping in each direction at the first clear sky; night only (the Sun below −12°), the sky reference must show stars (it refuses under a closed roof or cloud), ~20–40 min, moves the scope",
+          how: "a plate-solved GoTo to the sky at 65° fixes the pointing; the wide camera's focus is put at its factory infinity and checked on the stars (swept if soft); then the Seestar slews round at ~15° and ~40° altitude (higher where something runs off the top) taking wide frames, each placed by the mount's alt/az, and the map (with a panorama picture) is built and saved for this site, like the Dwarf's; night only (the Sun below −12°), needs clear sky at the anchor (it refuses under a closed roof or cloud), ~15–25 min, moves the scope",
         });
       }
       // sessions on the Seestar, transfers, the library and processing

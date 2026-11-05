@@ -69,6 +69,8 @@ export interface SeestarState {
   camera: Camera | null;
   stack: { state?: string; stacked?: number; dropped?: number; total?: number; lastError?: string; jpg?: string; at?: number };
   focus: { position?: number; maxStep?: number };
+  /** the wide camera's own focuser (second_focuser): the firmware puts it at its infinity when the wide view starts */
+  wideFocus: { position?: number; maxStep?: number };
   power: { batteryPct?: number; charging?: boolean; chargerStatus?: string; tempC?: number; overTemp?: boolean };
   storage: { freeMB?: number; totalMB?: number };
   ops: Record<string, OperationState>;
@@ -97,6 +99,7 @@ export function initialState(connection: 'local' | 'zwo'): SeestarState {
     camera: null,
     stack: {},
     focus: {},
+    wideFocus: {},
     power: {},
     storage: {},
     ops: {},
@@ -155,6 +158,11 @@ export function applyDeviceState(st: SeestarState, r: Obj): void {
   if (f) {
     st.focus.position = num(f.step) ?? st.focus.position;
     st.focus.maxStep = num(f.max_step) ?? st.focus.maxStep;
+  }
+  const f2 = obj(r.second_focuser);
+  if (f2) {
+    st.wideFocus.position = num(f2.step) ?? st.wideFocus.position;
+    st.wideFocus.maxStep = num(f2.max_step) ?? st.wideFocus.maxStep;
   }
   const p = obj(r.pi_status);
   if (p) applyPiStatus(st, p);
@@ -262,9 +270,14 @@ export function applyEvent(st: SeestarState, e: Obj): void {
       st.stack.at = at;
       if (state === 'cancel' || state === 'fail' || state === 'complete') st.stack.state = state;
       break;
-    case 'FocuserMove':
-      st.focus.position = num(e.position) ?? num(e.step) ?? st.focus.position;
+    case 'FocuserMove': {
+      // the wide's focuser reports with route SecondView (the wide view's start moves it, 2026-11-04)
+      const r = e.route;
+      const wide = (Array.isArray(r) && r.some((x) => typeof x === 'string' && x.includes('SecondView'))) || (st.camera === 'wide' && !(Array.isArray(r) && r.length));
+      const f = wide ? st.wideFocus : st.focus;
+      f.position = num(e.position) ?? num(e.step) ?? f.position;
       break;
+    }
     case 'ScopeTrack':
       st.mount.tracking = bool(e.tracking) ?? (state === 'on' ? true : state === 'off' ? false : st.mount.tracking);
       break;
@@ -310,6 +323,22 @@ function summarize(name: string, e: Obj): string {
   return parts.join(', ');
 }
 
+/**
+ * Polar alignment in flight. The firmware's 3PPA steps (calc1…calc3) need not end with a terminal
+ * 3PPA event: on fw 9.75 (2026-11-05) the run ended with EqModePA "complete" after a 3PPA "calc3",
+ * which then read as running for ever and refused everything after it. So a 3PPA step counts only
+ * while no EqModePA has ended after it, and not past POLAR_STALE_MS without a word.
+ */
+const POLAR_STALE_MS = 10 * 60_000;
+export function polarAligning(st: SeestarState, now = Date.now()): boolean {
+  const pa = st.ops['EqModePA'];
+  if (pa && !TERMINAL_STATES.has(pa.state)) return true;
+  const step = st.ops['3PPA'];
+  if (!step || TERMINAL_STATES.has(step.state)) return false;
+  if (pa && TERMINAL_STATES.has(pa.state) && (pa.at ?? 0) >= (step.at ?? 0)) return false;
+  return now - (step.at ?? now) < POLAR_STALE_MS;
+}
+
 /** What the scope is busy with, from the operations in flight. */
 export function busyWith(st: SeestarState): string | null {
   const running = (op: string) => {
@@ -320,7 +349,7 @@ export function busyWith(st: SeestarState): string | null {
   if (running('ScopeHome')) return 'parking';
   if (running('ScopeMoveToHorizon')) return 'opening the arm';
   if (running('AutoFocus')) return 'autofocus';
-  if (running('3PPA') || running('EqModePA')) return 'polar alignment';
+  if (polarAligning(st)) return 'polar alignment';
   if (running('DarkLibrary')) return 'dark library';
   if (running('PlateSolve')) return 'plate solving';
   if (st.stack.state && !TERMINAL_STATES.has(st.stack.state) && st.stack.state !== 'idle') return 'stacking';

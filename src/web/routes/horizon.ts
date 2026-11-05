@@ -3,14 +3,16 @@ import express, { type Router } from 'express';
 import { z } from 'zod';
 import { errMsg, logger } from '../../log.js';
 import { clearMasks, describeMask, maskFor, newMaskId, parseHorizonText, saveMask, toHorizonText, unknownSectors } from '../../astro/horizon.js';
+import { evidencePathOf, listSurveys, resolveSurvey, surveyIdOf } from '../../media/horizon/solve.js';
 import { body, notFound, route } from '../http.js';
 import { unsupported } from '../telescope.js';
 import { requireSite, type WebContext } from '../context.js';
 
 const log = logger('horizon');
 
-const SurveyBody = z.object({ calibrate: z.boolean().optional() });
+const SurveyBody = z.object({ calibrate: z.boolean().optional(), rehearsal: z.boolean().optional() });
 const ImportBody = z.object({ text: z.string().min(1).max(200_000) });
+const ResolveBody = z.object({ id: z.string().regex(/^[\w.-]+$/).optional(), marginDeg: z.number().min(0).max(10).optional() });
 
 export function horizonRoutes({ scope, duty }: WebContext): Router {
   const api = express.Router();
@@ -19,8 +21,11 @@ export function horizonRoutes({ scope, duty }: WebContext): Router {
     '/horizon',
     route(async () => {
       const m = maskFor(requireSite(scope));
+      const ev = m ? evidencePathOf(m) : null;
       return {
-        mask: m ? { ...m, summary: describeMask(m), notObserved: unknownSectors(m), panoramaUrl: m.survey?.panorama ? `/captures/${m.survey.panorama}` : null } : null,
+        mask: m
+          ? { ...m, summary: describeMask(m), notObserved: unknownSectors(m), panoramaUrl: m.survey?.panorama ? `/captures/${m.survey.panorama}` : null, evidenceUrl: ev ? `/captures/${ev}` : null, surveyId: surveyIdOf(m) }
+          : null,
         survey: scope.state.horizonSurvey ?? null,
       };
     }),
@@ -33,9 +38,10 @@ export function horizonRoutes({ scope, duty }: WebContext): Router {
       const b = body(req, SurveyBody);
       const survey = scope.horizonSurvey;
       if (!survey) throw unsupported(scope, 'The obstruction survey');
-      survey.assertAllowed();
+      if (b.rehearsal && scope.driver !== 'seestar') throw unsupported(scope, 'A survey rehearsal');
+      survey.assertAllowed({ rehearsal: b.rehearsal });
       duty.event('the user started the obstruction survey (map_obstructions) from the web UI: the scope pans all round for ~20 min', true);
-      survey.start({ calibrate: b.calibrate }).then(
+      survey.start({ calibrate: b.calibrate, rehearsal: b.rehearsal }).then(
         (r) => duty.event(`the obstruction survey finished: ${r.summary}`, true),
         (e) => {
           log.warn(`obstruction survey failed: ${errMsg(e)}`);
@@ -44,6 +50,25 @@ export function horizonRoutes({ scope, duty }: WebContext): Router {
       );
       return { started: true };
     }),
+  );
+
+  // Solve a kept survey again (the newest of this site's when no id) with the current evidence: no telescope needed.
+  api.post(
+    '/horizon/resolve',
+    route(async (req) => {
+      const b = body(req, ResolveBody);
+      const here = maskFor(requireSite(scope));
+      const id = b.id ?? (here ? surveyIdOf(here) : null) ?? listSurveys()[0]?.id;
+      if (!id) throw notFound('no survey has kept its frames yet (surveys from 2026-11-04 on do)');
+      const r = await resolveSurvey(id, { marginDeg: b.marginDeg });
+      duty.event(`the obstruction map was solved again from survey ${id}'s kept frames: ${r.summary}`, true);
+      return { summary: r.summary, notes: r.notes, maskId: r.mask.id };
+    }),
+  );
+
+  api.get(
+    '/horizon/surveys',
+    route(async () => ({ surveys: listSurveys() })),
   );
 
   api.post(

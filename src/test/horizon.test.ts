@@ -6,6 +6,8 @@ import { clearMasks, describeMask, horizonOf, limitAt, maskFor, parseHorizonText
 import { angleDeg, cameraGeom, fitMount, fromAltAz, pixelToDir, poseBasis, poseFor, toAltAz, type Anchor, type MountModel } from '../media/horizon/geometry.js';
 import { buildPanorama, frameEvidence, profileOf, skyline, skyLevelOf, type PanoFrame } from '../media/horizon/mask.js';
 import { cappedAzimuths } from '../media/horizon/survey.js';
+import { frameBasis, mountPole, WIDE_HFOV_DEG } from '../drivers/seestar/survey.js';
+import { FrameKeeper, loadSurvey, resolveSurvey } from '../media/horizon/solve.js';
 import type { FloatImage } from '../media/images.js';
 
 const RANGES = { rotation: [0, 315] as const, pitch: [0, 195] as const };
@@ -141,6 +143,90 @@ describe('obstruction mask from stills', () => {
     for (const k of [10, 14, 100, 358, 359]) assert.ok(c.some((x) => Math.abs(((k + 0.5 - x + 540) % 360) - 180) <= 12.5), `bin ${k} in ${c.join(',')}`);
     assert.ok(c.length <= 3);
   });
+});
+
+describe('Seestar survey geometry', () => {
+  // a site at Starfront's latitude: a tree line E, a building S, a tall tree W running off the rings
+  const truth = (az: number) => (az >= 70 && az < 110 ? 22 : az >= 160 && az < 200 ? 12 : az >= 255 && az < 275 ? 55 : 4);
+  const LAT = 31.5;
+  const SKY = 30 / 255;
+
+  /** A wide frame (portrait, 31° across) as the Seestar on its wedge sees the site, pointed at az/alt. */
+  function render(az: number, alt: number, eq: boolean): PanoFrame {
+    const { frame } = renderImg(az, alt, eq);
+    return frame;
+  }
+
+  function renderImg(az: number, alt: number, eq: boolean): { img: FloatImage; frame: PanoFrame } {
+    const W = 270;
+    const H = 480;
+    const cam = cameraGeom(W, H, WIDE_HFOV_DEG);
+    const basis = frameBasis(az, alt, mountPole(eq, LAT));
+    const data = new Float32Array(W * H * 3);
+    let seed = Math.round(az * 100 + alt) + 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const d = toAltAz(pixelToDir(cam, basis, x, y));
+        const blocked = d.alt < Math.max(0, truth(d.az));
+        const v = blocked ? 0.008 * rnd() : SKY * (0.95 + 0.1 * rnd());
+        const i = (y * W + x) * 3;
+        data[i] = v;
+        data[i + 1] = v;
+        data[i + 2] = v;
+      }
+    }
+    const img: FloatImage = { width: W, height: H, channels: 3, data, linear: false, source: 'synthetic' };
+    return { img, frame: { evidence: frameEvidence(img, SKY), cam, basis } };
+  }
+
+  test('a survey keeps its frames and is solved again from them alone', async () => {
+    const keeper = new FrameKeeper('hz-test-keep');
+    const frames = [];
+    for (const alt of [15, 40]) {
+      for (let az = 0; az < 360; az += 20) {
+        const { img, frame } = renderImg(az, alt, true);
+        const file = await keeper.keep(img);
+        assert.ok(file);
+        frames.push({ file: file!, cam: frame.cam, basis: frame.basis });
+      }
+    }
+    keeper.write({ id: 'hz-test-keep', driver: 'seestar', site: { lat: LAT, lon: -99 }, createdAt: new Date().toISOString(), mode: 'seestar-eq', skyLevel: SKY, marginDeg: 1, notes: [], frames });
+    assert.equal(loadSurvey('hz-test-keep').frames.length, 36);
+    const r = await resolveSurvey('hz-test-keep');
+    for (const [k, want] of [[90, 23], [180, 13], [20, 5]]) assert.ok(Math.abs(r.mask.profile[k]! - want) <= 2.5, `az ${k}: ${r.mask.profile[k]} (want ≈${want})`);
+    assert.match(r.notes[0], /solved again from the 36 frames/);
+    assert.ok(r.panoramaJpeg.length > 1000);
+    assert.throws(() => loadSurvey('../etc'), /not a survey id/);
+  });
+
+  test('a frame on the wedge is turned toward the celestial pole; in alt-az toward the zenith', () => {
+    // looking south on the meridian the pole is straight up the frame either way
+    const s = frameBasis(180, 30, mountPole(true, LAT));
+    const sAltAz = frameBasis(180, 30, mountPole(false, LAT));
+    assert.ok(angleDeg(s.u, sAltAz.u) < 1e-6 && s.u[2] > 0.8, 'south: up is the zenith side, as in alt-az');
+    // looking east the wedge tilts the frame: up leans north (toward the pole), right stays to the south side
+    const e = frameBasis(90, 20, mountPole(true, LAT));
+    assert.ok(e.u[1] > 0.3 && e.u[2] > 0.3, `east: up leans north ${e.u}`);
+    const a = frameBasis(90, 20, mountPole(false, LAT));
+    assert.ok(Math.abs(a.u[1]) < 1e-9 && a.u[2] > 0.9, 'alt-az: up is the zenith side');
+    // right is west when looking south (the picture is not mirrored)
+    assert.ok(s.r[0] < -0.99);
+  });
+
+  for (const eq of [true, false]) {
+    test(`two rings of tilted wide frames give the site's profile (${eq ? 'EQ' : 'alt-az'})`, () => {
+      const frames: PanoFrame[] = [];
+      for (const alt of [15, 40]) for (let az = 0; az < 360; az += 20) frames.push(render(az, alt, eq));
+      const sl = skyline(buildPanorama(frames));
+      const { profile } = profileOf(sl, 1);
+      assert.equal(profile.filter((v) => v === null).length, 0, 'every direction seen');
+      for (const [k, want] of [[90, 23], [180, 13], [20, 5], [330, 5], [140, 5]]) {
+        assert.ok(Math.abs(profile[k]! - want) <= 2, `az ${k}: ${profile[k]} (want ≈${want})`);
+      }
+      assert.ok(profile[265]! >= 45, `tall tree: ${profile[265]}`);
+    });
+  }
 });
 
 describe('horizon masks', () => {

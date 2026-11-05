@@ -1,13 +1,14 @@
 /**
  * From wide stills to a horizon profile.
  *
- * 1. Evidence per frame. At night settings (2.5 s, gain 60) the camera crushes anything unlit to
- *    black: trees, rooflines and walls in silhouette read 0–5 in every channel, while the sky glow
- *    — clear, hazy or cloudy, at this site and in every library frame looked at — sits at 30+ and is
- *    near neutral. Blue is ~0 even on a porch-lit tree (verified on the 2026-10 library stills). So
- *    the darkest channel, against the sky level measured on frames known to be sky, is the cue: far
- *    below it is an obstruction. A lit wall goes the other way (much brighter than any sky, and
- *    coloured), which is the second, weaker cue. Stars are removed by taking each cell's median.
+ * 1. Evidence per frame. At night settings the camera crushes anything unlit to black: trees,
+ *    rooflines and walls in silhouette read 0–5 in every channel, while the sky glow sits at 30+ and
+ *    is near neutral. So the darkest channel against the sky level is the first cue, read on each
+ *    cell's darker quartile so a branch across part of a cell counts. Three more: a lit structure
+ *    is far brighter than the sky at its altitude (and coloured or textured; glow is smooth),
+ *    foliage and edges are textured where the sky is smooth, and a verified star (compact, isolated,
+ *    well above the noise: JPEG noise makes single-pixel peaks) in an untextured, undarkened block
+ *    is sky. The survey compares each cell with the sky at its own altitude (skyByAltitude).
  * 2. A panorama in true azimuth × altitude (0.5° cells) that every frame is projected into, so the
  *    tilted frames of an EQ survey count the same as level alt-az ones and "down" is the horizon.
  * 3. The skyline: per column, the altitude below which it is obstruction, found by dynamic
@@ -25,14 +26,27 @@ import { cameraGeom, dirToPixel, fromAltAz, type CameraGeom, type Vec } from './
 const GRID_W = 240;
 /** Levels of the per-cell darkest-channel median (one per 8-bit value). */
 const HIST_BINS = 256;
-/** The darkest channel below this fraction of the sky level is an obstruction (silhouettes measure < 0.15). */
+/** The darker quartile below this fraction of the sky level is an obstruction (silhouettes measure < 0.15). */
 const DARK_RATIO = 0.4;
 const DARK_SOFT = 0.1;
-/** Brighter than the sky by this and coloured: a lit structure. Far brighter still: lit, whatever its colour. */
-const LIT_RATIO = 1.8;
-const LIT_CHROMA = 0.3;
+/**
+ * Brighter than the sky there by LIT_RATIO and coloured or textured: a lit structure (a pale wall
+ * under porch lights read 1.5-3× the sky, 2026-10-27, and was missed at the old 1.8× + strongly
+ * coloured). Smooth and neutral (what horizon glow looks like) only reaches GLOW_EVIDENCE. Far
+ * brighter still: lit, whatever it looks like.
+ */
+const LIT_RATIO = 1.5;
+const LIT_CHROMA = 0.18;
 const LIT_EVIDENCE = 0.6;
+const GLOW_EVIDENCE = 0.35;
 const GLARE_RATIO = 3;
+/** Texture (block gradient median, in noise units) above this is foliage or structure. */
+const TEXTURE_EDGE = 4;
+const TEXTURE_SOFT = 2;
+const TEXTURE_EVIDENCE = 0.55;
+/** A verified star makes its cell sky when the darker quartile is at least this bright (no silhouette in it). */
+const STAR_CLEAR_DARK = 0.7;
+const STAR_EVIDENCE = -0.9;
 /** Where in a sky frame's darkest-channel distribution the sky level is read. */
 const SKY_PERCENTILE = 0.7;
 /** Panorama cells. */
@@ -42,7 +56,8 @@ export const PANO_ALT_MAX = 84;
 /** Skyline DP: smoothness per row of jump, the jump cost cap (rows), and the weight of sky left under the line. */
 const DP_LAMBDA = 0.15;
 const DP_JUMP_CAP = 6;
-const DP_SKY_BELOW = 0.4;
+// sky seen under the line (through a tree, under a branch) costs little: the whole canopy is blocked
+const DP_SKY_BELOW = 0.15;
 /** An unobserved cell leans this little toward sky, so the line settles on observed evidence. */
 const DP_UNSEEN = -0.02;
 /** Columns of wrap-around context on each side. */
@@ -57,57 +72,258 @@ export interface Evidence {
   data: Float32Array;
 }
 
-/** Per cell: the median of the darkest channel (star-free) and the mean colour. */
-function cellStats(img: FloatImage): { gw: number; gh: number; dark: Float32Array; chroma: Float32Array } {
-  const gw = Math.min(GRID_W, img.width);
-  const cell = img.width / gw;
-  const gh = Math.max(1, Math.round(img.height / cell));
-  const dark = new Float32Array(gw * gh);
-  const chroma = new Float32Array(gw * gh);
-  const hist = new Uint32Array(HIST_BINS);
+/**
+ * Per-cell statistics of a frame, the raw material of the evidence:
+ *   dark     the median of the darkest channel (stars are too few to move it)
+ *   darkLow  its 25th percentile: a cell partly covered by a branch or a roof edge reads dark here
+ *            even when the sky between the twigs keeps the median up
+ *   chroma   how coloured the cell is (lit walls and trees under porch lights are; sky glow less so)
+ *   texture  the median gradient (|dx|+|dy| of the luminance) over a block of cells around it:
+ *            leaves, branches, roof lines and windows are textured, sky (even bright glow) is smooth.
+ *            evidenceOf judges it against the noise of the sky (silhouettes are smoother still:
+ *            crushed to black, they have no noise at all, so they cannot be the reference)
+ *   stars    verified point sources: compact (more than one pixel, less than a blob), isolated, well
+ *            above the local noise. JPEG noise at high gain makes single-pixel peaks that a plain
+ *            local-maximum count takes for stars (it fooled sky checks before).
+ */
+export interface CellStats {
+  gw: number;
+  gh: number;
+  dark: Float32Array;
+  darkLow: Float32Array;
+  chroma: Float32Array;
+  texture: Float32Array;
+  stars: Uint8Array;
+}
+
+/** Texture blocks: the gradient median is taken over TEX_BLOCK × TEX_BLOCK cells (stars are a few pixels of them). */
+const TEX_BLOCK = 3;
+/** A star: peak this many σ above the local background, at least this far above it in absolute terms. */
+const STAR_SIGMA = 7;
+const STAR_MIN_EXCESS = 5 / 255;
+/** Pixels above half the peak's excess: more than one (noise) and not a blob. */
+const STAR_MIN_PX = 2;
+const STAR_MAX_PX = 16;
+
+function percentileOfHist(hist: Uint32Array, n: number, q: number): number {
+  let acc = 0;
+  let k = 0;
+  for (; k < hist.length - 1; k++) {
+    acc += hist[k];
+    if (acc >= n * q) break;
+  }
+  const below = acc - hist[k];
+  const frac = hist[k] ? (n * q - below) / hist[k] : 0.5;
+  return (k + Math.max(0, Math.min(1, frac))) / hist.length;
+}
+
+export function frameStats(img: FloatImage): CellStats {
+  const W = img.width;
+  const H = img.height;
+  const gw = Math.min(GRID_W, W);
+  const cell = W / gw;
+  const gh = Math.max(1, Math.round(H / cell));
+  const n = gw * gh;
+  const dark = new Float32Array(n);
+  const darkLow = new Float32Array(n);
+  const chroma = new Float32Array(n);
   const ch = img.channels;
+  const lum = new Float32Array(W * H);
+  for (let i = 0, p = 0; i < W * H; i++, p += ch) {
+    const r = img.data[p];
+    const g = ch === 3 ? img.data[p + 1] : r;
+    const b = ch === 3 ? img.data[p + 2] : r;
+    lum[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+  const hist = new Uint32Array(HIST_BINS);
   for (let gy = 0; gy < gh; gy++) {
     const y0 = Math.floor(gy * cell);
-    const y1 = Math.min(img.height, Math.floor((gy + 1) * cell));
+    const y1 = Math.min(H, Math.floor((gy + 1) * cell));
     for (let gx = 0; gx < gw; gx++) {
       const x0 = Math.floor(gx * cell);
-      const x1 = Math.min(img.width, Math.floor((gx + 1) * cell));
+      const x1 = Math.min(W, Math.floor((gx + 1) * cell));
       hist.fill(0);
-      let n = 0;
+      let m = 0;
       let sr = 0;
       let sg = 0;
       let sb = 0;
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
-          const i = (y * img.width + x) * ch;
+          const i = (y * W + x) * ch;
           const r = img.data[i];
           const g = ch === 3 ? img.data[i + 1] : r;
           const b = ch === 3 ? img.data[i + 2] : r;
-          const m = Math.min(r, g, b);
-          hist[Math.min(HIST_BINS - 1, Math.floor(m * HIST_BINS))]++;
+          hist[Math.min(HIST_BINS - 1, Math.max(0, Math.floor(Math.min(r, g, b) * HIST_BINS)))]++;
           sr += r;
           sg += g;
           sb += b;
-          n++;
+          m++;
         }
       }
-      let acc = 0;
-      let k = 0;
-      for (; k < HIST_BINS - 1; k++) {
-        acc += hist[k];
-        if (acc * 2 >= n) break;
-      }
-      // the bin's position inside it, for a smoother value than the bin edge
-      const below = acc - hist[k];
-      const frac = hist[k] ? (n / 2 - below) / hist[k] : 0.5;
       const idx = gy * gw + gx;
-      dark[idx] = (k + Math.max(0, Math.min(1, frac))) / HIST_BINS;
-      const mx = Math.max(sr, sg, sb) / n;
-      const mn = Math.min(sr, sg, sb) / n;
+      dark[idx] = percentileOfHist(hist, m, 0.5);
+      darkLow[idx] = percentileOfHist(hist, m, 0.25);
+      const mx = Math.max(sr, sg, sb) / m;
+      const mn = Math.min(sr, sg, sb) / m;
       chroma[idx] = (mx - mn) / (mx + 8 / 255);
     }
   }
-  return { gw, gh, dark, chroma };
+
+  // gradient magnitude (|dx| + |dy| of the luminance), its median per block of cells
+  const grad = new Float32Array(W * H);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      grad[i] = Math.abs(lum[i + 1] - lum[i - 1]) + Math.abs(lum[i + W] - lum[i - W]);
+    }
+  }
+  const bw = Math.ceil(gw / TEX_BLOCK);
+  const bh = Math.ceil(gh / TEX_BLOCK);
+  const block = new Float32Array(bw * bh);
+  const blockLum = new Float32Array(bw * bh);
+  const GBINS = 512;
+  const GMAX = 0.25;
+  const ghist = new Uint32Array(GBINS);
+  const lhist = new Uint32Array(HIST_BINS);
+  for (let by = 0; by < bh; by++) {
+    const y0 = Math.max(1, Math.floor(by * TEX_BLOCK * cell));
+    const y1 = Math.min(H - 1, Math.floor((by + 1) * TEX_BLOCK * cell));
+    for (let bx = 0; bx < bw; bx++) {
+      const x0 = Math.max(1, Math.floor(bx * TEX_BLOCK * cell));
+      const x1 = Math.min(W - 1, Math.floor((bx + 1) * TEX_BLOCK * cell));
+      ghist.fill(0);
+      lhist.fill(0);
+      let m = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          ghist[Math.min(GBINS - 1, Math.floor((grad[y * W + x] / GMAX) * GBINS))]++;
+          lhist[Math.min(HIST_BINS - 1, Math.max(0, Math.floor(lum[y * W + x] * HIST_BINS)))]++;
+          m++;
+        }
+      }
+      block[by * bw + bx] = m ? percentileOfHist(ghist, m, 0.5) * GMAX : 0;
+      blockLum[by * bw + bx] = m ? percentileOfHist(lhist, m, 0.5) : 0;
+    }
+  }
+  const texture = new Float32Array(n);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) texture[gy * gw + gx] = block[Math.floor(gy / TEX_BLOCK) * bw + Math.floor(gx / TEX_BLOCK)];
+  }
+  // the noise for the star test: the spread of the pixels round their block's median, on the
+  // brighter half of the blocks (silhouettes are noise-free black). Not the pixel-to-pixel gradient:
+  // JPEG and the camera's denoising smooth the noise into bumps a few pixels wide, which a gradient
+  // underestimates and a 7σ cut then takes for stars (2026-11-04: 218 "stars" on a blank ceiling).
+  const midLum = median(blockLum);
+  const DBINS = 2048;
+  const DMAX = 0.25;
+  const dhist = new Uint32Array(DBINS);
+  let dn = 0;
+  for (let y = 1; y < H - 1; y += 3) {
+    const by = Math.min(bh - 1, Math.floor(y / cell / TEX_BLOCK));
+    for (let x = 1; x < W - 1; x += 3) {
+      const b = by * bw + Math.min(bw - 1, Math.floor(x / cell / TEX_BLOCK));
+      if (blockLum[b] < midLum) continue;
+      dhist[Math.min(DBINS - 1, Math.floor((Math.abs(lum[y * W + x] - blockLum[b]) / DMAX) * DBINS))]++;
+      dn++;
+    }
+  }
+  const noise = Math.max(0.5 / 255, dn ? 1.4826 * percentileOfHist(dhist, dn, 0.5) * DMAX : 1 / 255);
+  // stars
+  const stars = new Uint8Array(n);
+  const R = 2;
+  const ring = 4;
+  for (let y = ring; y < H - ring; y++) {
+    for (let x = ring; x < W - ring; x++) {
+      const i = y * W + x;
+      const v = lum[i];
+      const bg = blockLum[Math.min(bh - 1, Math.floor(y / cell / TEX_BLOCK)) * bw + Math.min(bw - 1, Math.floor(x / cell / TEX_BLOCK))];
+      const excess = v - bg;
+      if (excess < STAR_MIN_EXCESS || excess < STAR_SIGMA * noise) continue;
+      let isMax = true;
+      let above = 0;
+      for (let dy = -R; dy <= R && isMax; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          if (!dx && !dy) continue;
+          const nb = lum[i + dy * W + dx];
+          if (nb > v || (nb === v && (dy < 0 || (dy === 0 && dx < 0)))) {
+            isMax = false;
+            break;
+          }
+          if (nb - bg > excess * 0.5) above++;
+        }
+      }
+      if (!isMax) continue;
+      above++;
+      if (above < STAR_MIN_PX || above > STAR_MAX_PX) continue;
+      // isolated: the ring around it is back near the background
+      let ringHi = 0;
+      for (let k = -ring; k <= ring; k++) {
+        for (const [dx, dy] of [[k, -ring], [k, ring], [-ring, k], [ring, k]]) if (lum[i + dy * W + dx] - bg > excess * 0.35) ringHi++;
+      }
+      if (ringHi > 3) continue;
+      const gx = Math.min(gw - 1, Math.floor(x / cell));
+      const gy = Math.min(gh - 1, Math.floor(y / cell));
+      stars[gy * gw + gx] = Math.min(255, stars[gy * gw + gx] + 1);
+    }
+  }
+  return { gw, gh, dark, darkLow, chroma, texture, stars };
+}
+
+function median(a: Float32Array): number {
+  const v = Array.from(a).sort((x, y) => x - y);
+  return v[Math.floor(v.length / 2)] ?? 0;
+}
+
+/**
+ * The texture of plain sky in a frame (the gradient median of cells near the sky level): what
+ * evidenceOf measures texture against. The survey takes it from its sky anchor.
+ */
+export function skyTexture(s: CellStats, skyLevel: number): number {
+  const v: number[] = [];
+  for (let i = 0; i < s.dark.length; i++) {
+    const r = s.dark[i] / Math.max(skyLevel, 2 / 255);
+    if (r > 0.75 && r < 1.35) v.push(s.texture[i]);
+  }
+  v.sort((a, b) => a - b);
+  return Math.max(0.5 / 255, v[Math.floor(v.length * 0.4)] ?? 2 / 255);
+}
+
+/**
+ * Keep only the stars found again in a second frame of the same pointing (within a cell): the mount
+ * tracks, so a star stays where it was, and noise does not repeat. Changes `a` in place.
+ */
+export function confirmStars(a: CellStats, b: CellStats): CellStats {
+  if (a.gw !== b.gw || a.gh !== b.gh) return a;
+  const nb = near(b.stars, b.gw, b.gh);
+  for (let i = 0; i < a.stars.length; i++) if (a.stars[i] && !nb[i]) a.stars[i] = 0;
+  return a;
+}
+
+/**
+ * Cells where both frames show a "star" at the same place on the sensor although the scope turned
+ * between them: hot pixels (they repeat frame after frame, so confirmStars keeps them, and they are
+ * sharp whatever the focus, so they would hide a soft camera). Real stars moved with the sky.
+ */
+export function hotCells(a: CellStats, b: CellStats): Uint8Array {
+  const hot = new Uint8Array(a.stars.length);
+  if (a.gw !== b.gw || a.gh !== b.gh) return hot;
+  const nb = near(b.stars, b.gw, b.gh);
+  for (let i = 0; i < hot.length; i++) if (a.stars[i] && nb[i]) hot[i] = 1;
+  return near(hot, a.gw, a.gh);
+}
+
+/** Clears the stars in the given cells (a hot-pixel map); changes `s` in place. */
+export function dropStars(s: CellStats, cells: Uint8Array | null): CellStats {
+  if (!cells || cells.length !== s.stars.length) return s;
+  for (let i = 0; i < cells.length; i++) if (cells[i]) s.stars[i] = 0;
+  return s;
+}
+
+/** How many verified stars a frame shows (a sky check that JPEG noise does not pass). */
+export function starCount(s: CellStats): number {
+  let k = 0;
+  for (const v of s.stars) k += v;
+  return k;
 }
 
 /**
@@ -115,8 +331,8 @@ function cellStats(img: FloatImage): { gw: number; gh: number; dark: Float32Arra
  * the 70th percentile of its cells' darkest channel, so a branch across part of it does not drag
  * the level down. Frames are taken at the survey's fixed exposure, so it carries over to the rest.
  */
-export function skyLevelOf(img: FloatImage): number {
-  const { dark } = cellStats(img);
+export function skyLevelOf(img: FloatImage | CellStats): number {
+  const { dark } = 'dark' in img ? img : frameStats(img);
   const v = Array.from(dark).sort((a, b) => a - b);
   return v[Math.floor(v.length * SKY_PERCENTILE)] ?? 0;
 }
@@ -142,20 +358,74 @@ function blur3(a: Float32Array, w: number, h: number): Float32Array {
   return o;
 }
 
-/** Obstruction evidence for one frame against the survey's sky level. */
-export function frameEvidence(img: FloatImage, skyLevel: number): Evidence {
-  const { gw, gh, dark, chroma } = cellStats(img);
-  const m = blur3(dark, gw, gh);
-  const sky = Math.max(skyLevel, 2 / 255);
+/** Stars within a cell of each cell (a star's light can fall either side of a cell edge). */
+function near(a: Uint8Array, w: number, h: number): Uint8Array {
+  const o = new Uint8Array(a.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const yy = y + dy;
+        const xx = x + dx;
+        if (yy >= 0 && yy < h && xx >= 0 && xx < w) s += a[yy * w + xx];
+      }
+      o[y * w + x] = Math.min(255, s);
+    }
+  }
+  return o;
+}
+
+/**
+ * Obstruction evidence for one frame, +1 obstruction … −1 sky per cell, against the sky level: one
+ * number (the anchor's), or per cell (the survey's sky by altitude, so the glow low over a town is
+ * compared with the sky down there and not with the zenith's).
+ *
+ *   dark     the darker quartile far below the sky: a silhouette, or a cell partly covered by one
+ *   bright   far brighter than the sky there: a lit wall or a light. Coloured or textured adds to it;
+ *            smooth, neutral and only moderately bright counts less (that is what glow looks like)
+ *   texture  leaves, branches, edges and windows, which the sky never shows
+ *   stars    a verified star in a cell the dark cue does not claim, and the block is smooth: sky.
+ *            A star seen through a gap in a tree does not clear the tree (the block is textured).
+ */
+export function evidenceOf(s: CellStats, sky: number | ((gx: number, gy: number) => number), o: { skyTexture?: number; skyLevel?: number } = {}): Evidence {
+  const { gw, gh } = s;
+  // the sky's own texture: given (the survey's anchor, at its sky level), or read off this frame; it
+  // grows with the sky's brightness (photon noise), so a brighter sky is allowed more
+  const refLevel = o.skyLevel ?? (typeof sky === 'number' ? sky : median(s.dark));
+  const tex0 = o.skyTexture ?? skyTexture(s, refLevel);
+  const lo = blur3(s.darkLow, gw, gh);
+  const md = blur3(s.dark, gw, gh);
+  const st = near(s.stars, gw, gh);
   const data = new Float32Array(gw * gh);
-  for (let i = 0; i < data.length; i++) {
-    const d = m[i] / sky;
-    let ev = Math.tanh((DARK_RATIO - d) / DARK_SOFT);
-    if (d > LIT_RATIO && chroma[i] > LIT_CHROMA) ev = Math.max(ev, LIT_EVIDENCE);
-    if (d > GLARE_RATIO) ev = 1;
-    data[i] = ev;
+  const skyAt = typeof sky === 'number' ? () => sky : sky;
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      const i = gy * gw + gx;
+      const ref = Math.max(skyAt(gx, gy), 2 / 255);
+      const d = lo[i] / ref;
+      const b = md[i] / ref;
+      const t = s.texture[i] / (tex0 * Math.sqrt(Math.max(0.5, Math.min(4, ref / Math.max(refLevel, 2 / 255)))));
+      let ev = Math.tanh((DARK_RATIO - d) / DARK_SOFT);
+      // bright: a light or a lit wall; smooth neutral glow only counts when it is very bright
+      if (b > LIT_RATIO) {
+        const strength = Math.min(1, (b - LIT_RATIO) / (GLARE_RATIO - LIT_RATIO));
+        const looksBuilt = s.chroma[i] > LIT_CHROMA || t > TEXTURE_EDGE;
+        ev = Math.max(ev, looksBuilt ? LIT_EVIDENCE + (1 - LIT_EVIDENCE) * strength : GLOW_EVIDENCE * strength);
+      }
+      if (b > GLARE_RATIO) ev = 1;
+      // texture: foliage and structure (not the dark cue's own silhouettes, which are smooth black)
+      if (t > TEXTURE_EDGE && d > DARK_RATIO) ev = Math.max(ev, Math.min(TEXTURE_EVIDENCE, ((t - TEXTURE_EDGE) / TEXTURE_SOFT) * TEXTURE_EVIDENCE));
+      // stars: sky, where nothing dark or textured claims the cell
+      if (st[i] > 0 && d > STAR_CLEAR_DARK && t < TEXTURE_EDGE && b < GLARE_RATIO) ev = Math.min(ev, STAR_EVIDENCE);
+      data[i] = ev;
+    }
   }
   return { gw, gh, data };
+}
+
+/** Obstruction evidence for one frame against the survey's sky level. */
+export function frameEvidence(img: FloatImage, skyLevel: number): Evidence {
+  return evidenceOf(frameStats(img), skyLevel);
 }
 
 // ---- panorama

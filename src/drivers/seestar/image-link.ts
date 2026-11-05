@@ -21,7 +21,15 @@ const HEARTBEAT_MS = 4_000;
 const FIRST_REDIAL_MS = 500;
 const REDIAL_MIN_MS = 3_000;
 const REDIAL_MAX_MS = 30_000;
-const STREAM_SILENCE_MS = 90_000;
+/**
+ * A begin_streaming the firmware does not act on (sent while the view was still starting, verified
+ * 2026-11-04: after a tele -> wide switch the wide pushed nothing until the socket was redialled
+ * 90 s later) is sent again (stop + begin) if no live frame came within KICK_MS, up to KICKS times;
+ * then the socket is redialled. Once frames flow, a silence of STREAM_SILENCE_MS redials too.
+ */
+const KICK_MS = 8_000;
+const KICKS = 2;
+const STREAM_SILENCE_MS = 45_000;
 const FIRST_ID = 1;
 
 export type GrabKind = 'stacked' | 'current' | 'preview';
@@ -60,6 +68,15 @@ export class SeestarImageLink extends SafeEmitter {
   private readonly reader: FrameReader;
   private heartbeat: NodeJS.Timeout | null = null;
   private silence: NodeJS.Timeout | null = null;
+  private kick: NodeJS.Timeout | null = null;
+  private kicks = 0;
+  /**
+   * Whether live frames should be arriving now (the camera's view in ContinuousExposure): the
+   * watchdogs act only then; during a GoTo, an autofocus or a stack's long subs they wait.
+   */
+  expecting: () => boolean = () => true;
+  /** a live frame came since the last begin_streaming */
+  private flowing = false;
   private redial: NodeJS.Timeout | null = null;
   private redialMs = FIRST_REDIAL_MS;
   private _note: string | null = null;
@@ -126,10 +143,55 @@ export class SeestarImageLink extends SafeEmitter {
     this.wantStream = true;
     if (this.isConnected && !this.isStreaming) {
       this.isStreaming = true;
-      this.write('begin_streaming');
-      this.armSilence();
+      this.begin();
       this.changed();
     }
+  }
+
+  /**
+   * The camera's view just started exposing: ask for the stream again (stop + begin), since a
+   * begin_streaming that arrived before the exposures started is not acted on.
+   */
+  restartStream(): void {
+    this.wantStream = true;
+    if (!this.isConnected) return;
+    if (this.isStreaming) this.write('stop_streaming');
+    this.isStreaming = true;
+    this.kicks = 0;
+    this.begin();
+    this.changed();
+  }
+
+  private begin(): void {
+    this.flowing = false;
+    this.write('begin_streaming');
+    this.armSilence();
+    this.armKick();
+  }
+
+  private armKick(): void {
+    if (this.kick) clearTimeout(this.kick);
+    this.kick = setTimeout(() => {
+      this.kick = null;
+      if (!this.isStreaming || this.flowing || !this.isConnected) return;
+      if (!this.expecting()) {
+        this.armKick();
+        return;
+      }
+      if (this.kicks >= KICKS) {
+        this.drop(`no live frames ${Math.round((KICK_MS * (KICKS + 1)) / 1000)} s after begin_streaming`, true);
+        return;
+      }
+      this.kicks++;
+      log.info(`${this.camera}: no live frame ${KICK_MS / 1000} s after begin_streaming, asking again (${this.kicks}/${KICKS})`);
+      this.write('stop_streaming');
+      this.begin();
+    }, KICK_MS);
+  }
+
+  private disarmKick(): void {
+    if (this.kick) clearTimeout(this.kick);
+    this.kick = null;
   }
 
   stopStream(): void {
@@ -138,6 +200,7 @@ export class SeestarImageLink extends SafeEmitter {
       this.isStreaming = false;
       this.write('stop_streaming');
       this.disarmSilence();
+      this.disarmKick();
       this.changed();
     }
   }
@@ -188,8 +251,8 @@ export class SeestarImageLink extends SafeEmitter {
       log.info(`${this.camera} picture socket connected (${this.host}:${this.port})`);
       if (this.wantStream) {
         this.isStreaming = true;
-        this.write('begin_streaming');
-        this.armSilence();
+        this.kicks = 0;
+        this.begin();
       }
       this.changed();
     });
@@ -234,7 +297,12 @@ export class SeestarImageLink extends SafeEmitter {
     if (live) {
       this.liveFrames++;
       this.lastLive = f;
-      if (this.isStreaming) this.armSilence();
+      if (this.isStreaming) {
+        this.flowing = true;
+        this.kicks = 0;
+        this.disarmKick();
+        this.armSilence();
+      }
     }
     if (byId) {
       kind = byId.kind;
@@ -284,7 +352,11 @@ export class SeestarImageLink extends SafeEmitter {
 
   private armSilence(): void {
     this.disarmSilence();
-    this.silence = setTimeout(() => this.drop('no live frames for 90 s', true), STREAM_SILENCE_MS);
+    this.silence = setTimeout(() => {
+      this.silence = null;
+      if (!this.expecting()) this.armSilence();
+      else this.drop(`no live frames for ${STREAM_SILENCE_MS / 1000} s`, true);
+    }, STREAM_SILENCE_MS);
   }
 
   private disarmSilence(): void {
@@ -298,6 +370,7 @@ export class SeestarImageLink extends SafeEmitter {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
     this.disarmSilence();
+    this.disarmKick();
     const was = this.isConnected;
     if (socket) {
       socket.removeAllListeners();

@@ -193,6 +193,14 @@ body.view-full .tabbar { display: none; }
 .view-small .view-empty { font-size: 11.5px; padding: 20px 6px 6px; }
 .view-buttons { z-index: 3; position: absolute; right: 6px; top: 6px; display: flex; gap: 4px; }
 .view-buttons .mini { min-width: 38px; }
+.view-buttons .mini[aria-pressed="true"] { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+.view-buttons .mini.pending { opacity: .7; }
+.single-only { display: none; }
+/* One camera at a time (the Seestar): one view, portrait (its frames are 1080×1920), with a tele/wide switch. */
+body.single-view .view-side, body.single-view [data-swap="stack"] { display: none; }
+body.single-view .single-only:not([hidden]) { display: inline-flex; align-items: center; }
+body.single-view .views { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+body.single-view #view-main { aspect-ratio: 9 / 16; height: min(78vh, 177vw); width: auto; max-width: 100%; justify-self: center; }
 .view-buttons .mini .i { width: 17px; height: 17px; }
 /* The enlarged live view: the same chrome whether we got the Fullscreen API or the in-page mode. */
 .only-full { display: none !important; }
@@ -228,6 +236,7 @@ body.view-full .only-full, .view-main:fullscreen .only-full { display: inline-fl
 .aim-side { flex: 1 1 150px; min-width: 140px; display: flex; flex-direction: column; gap: 8px; }
 .slider { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); min-height: 34px; }
 .slider input { flex: 1; min-width: 90px; }
+.speed-rate { min-width: 7.5em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ctl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; min-width: 0; }
 .ctl-row > * { min-width: 0; }
 .ctl-row button { flex: 1 1 auto; }
@@ -813,3 +822,11 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
 .sky-opt-grid input[type=checkbox] { min-height: 0; width: 18px; height: 18px; }
 .sky-opt-grid select { min-height: 32px; }
 .plan-table td:last-child button + button { margin-left: 4px; }
+
+/* Single view on a wide screen: the portrait picture on the left at the screen's height, everything else beside it. */
+@media (min-width: 900px) {
+  body.single-view #panel-view .screen-body { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-auto-rows: min-content; column-gap: 12px; align-items: start; }
+  body.single-view #panel-view .screen-body > * { grid-column: 2; }
+  body.single-view #panel-view .screen-body > .views { grid-column: 1; grid-row: 1 / span 20; position: sticky; top: 0; }
+  body.single-view #view-main { height: calc(100dvh - 130px); min-height: 420px; }
+}

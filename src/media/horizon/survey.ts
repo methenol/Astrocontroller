@@ -11,12 +11,11 @@
  *
  * Then a sweep: two rings of stills (≈10° and ≈32° altitude, each frame ±13°) all round the
  * mechanical travel, and a ring higher up wherever an obstruction ran off the top. Every still is
- * reduced to obstruction evidence at once (mask.ts) and dropped, the panorama is built, the skyline
- * found, and the mask saved for this site. Night only (plate solving needs stars); ~15–20 min.
+ * reduced to its cell statistics at once (mask.ts) and kept on disk (captures/horizon/<id>/, so the
+ * survey can be solved again later); the solve (solve.ts, shared with the Seestar) judges each cell
+ * against the sky at its altitude, builds the panorama, finds the skyline, and the mask is saved for
+ * this site. Night only (plate solving needs stars); ~15–20 min.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import sharp from 'sharp';
 import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
 import type { Dwarf, HorizonSurvey } from '../../drivers/dwarf/device.js';
@@ -27,7 +26,8 @@ import { compass, describeMask, newMaskId, saveMask, unknownSectors, type Horizo
 import { loadImage, type FloatImage } from '../images.js';
 import type { StreamHub } from '../streams.js';
 import { cameraGeom, fitMount, fromAltAz, poseBasis, poseFor, type Anchor, type CameraGeom, type MountModel } from './geometry.js';
-import { buildPanorama, frameEvidence, profileOf, renderPanorama, skyline, skyLevelOf, thumbOf, type Evidence, type PanoFrame, type Thumb } from './mask.js';
+import { frameStats, skyLevelOf, skyTexture, thumbOf, type CellStats, type Thumb } from './mask.js';
+import { FrameKeeper, keepSolved, skyNotes, solveShots, type SurveyShot } from './solve.js';
 
 const log = logger('horizon');
 
@@ -87,7 +87,8 @@ export interface SurveyResult {
 }
 
 interface Shot {
-  evidence: Evidence;
+  stats: CellStats;
+  file: string | null;
   thumb: Thumb;
   cam: CameraGeom;
   rotationDeg: number;
@@ -153,10 +154,6 @@ export function cappedAzimuths(capped: number[]): number[] {
   return out;
 }
 
-async function encodePicture(pic: { width: number; height: number; rgb: Buffer }): Promise<Buffer> {
-  return sharp(pic.rgb, { raw: { width: pic.width, height: pic.height, channels: 3 } }).jpeg({ quality: 82 }).toBuffer();
-}
-
 /** The survey's refusals, checked before anything is sent (a caller starting it in the background answers with them). Returns the site. */
 export function assertSurveyAllowed(dwarf: Dwarf) {
   if (surveyRunning(dwarf)) throw new Error('an obstruction survey is already running');
@@ -190,6 +187,8 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
   };
   stopRequested = false;
   progress({ message: 'starting' });
+  const id = newMaskId();
+  const keeper = new FrameKeeper(id);
 
   try {
     const result = await dwarf.exclusive('mapping site obstructions', async () => {
@@ -205,8 +204,12 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
           return img;
         };
         const shots: Shot[] = [];
-        const keep = (img: FloatImage, level: number, pos: { rotationDeg: number; pitchDeg: number }) => {
-          shots.push({ evidence: frameEvidence(img, level), thumb: thumbOf(img), cam: wideCamera(dwarf, img), ...pos });
+        let texture: number | undefined;
+        const keep = async (img: FloatImage, level: number, pos: { rotationDeg: number; pitchDeg: number }) => {
+          const stats = frameStats(img);
+          // the sky's own texture, from the first anchor (certainly sky)
+          if (texture === undefined) texture = skyTexture(stats, level);
+          shots.push({ stats, file: await keeper.keep(img), thumb: thumbOf(img), cam: wideCamera(dwarf, img), ...pos });
         };
 
         // ---- anchors
@@ -309,7 +312,7 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
             }
             skyLevel = level;
           }
-          keep(img, skyLevel, pos as { rotationDeg: number; pitchDeg: number });
+          await keep(img, skyLevel, pos as { rotationDeg: number; pitchDeg: number });
           fit = fitMount(pole, anchors);
         }
         if (!anchors.length || !fit || skyLevel === null) {
@@ -337,7 +340,7 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
             await dwarf.moveTo(poses[i], MOVE_SPEED_DEG_S);
             const pos = await dwarf.readMotorPositions();
             const at = pos.rotationDeg !== undefined && pos.pitchDeg !== undefined ? { rotationDeg: pos.rotationDeg, pitchDeg: pos.pitchDeg } : poses[i];
-            keep(await shoot(), skyLevel!, at);
+            await keep(await shoot(), skyLevel!, at);
           }
           return true;
         };
@@ -348,11 +351,8 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
           if (k % 2) poses.reverse();
           if (!(finished = await sweep(poses, `ring at ${alt}°`))) break;
         }
-        const build = () => {
-          const frames: PanoFrame[] = shots.map((s) => ({ evidence: s.evidence, cam: s.cam, basis: poseBasis(model, s.rotationDeg, s.pitchDeg) }));
-          const sl = skyline(buildPanorama(frames));
-          return { frames, sl, prof: profileOf(sl, margin) };
-        };
+        const surveyShots = (): SurveyShot[] => shots.map((s) => ({ stats: s.stats, thumb: s.thumb, cam: s.cam, basis: poseBasis(model, s.rotationDeg, s.pitchDeg) }));
+        const build = () => solveShots(surveyShots(), { skyLevel: skyLevel!, skyTexture: texture, marginDeg: margin });
         let built = build();
         // higher where an obstruction ran off the top of what was photographed
         for (const alt of HIGH_RINGS) {
@@ -368,17 +368,14 @@ export async function surveyObstructions({ dwarf, hub }: SurveyDeps, o: SurveyOp
         // ---- the mask
         phase = 'build';
         progress({ message: 'building the horizon mask' });
-        const id = newMaskId();
-        const pic = renderPanorama(
-          shots.map((s, i) => ({ thumb: s.thumb, cam: s.cam, basis: built.frames[i].basis })),
-          skyLevel,
-          built.sl,
-          built.prof,
+        notes.push(...skyNotes(built.sky, skyLevel));
+        const { panorama: rel, panoramaJpeg } = await keepSolved(
+          keeper,
+          { id, driver: 'dwarf', site: { lat: loc.lat, lon: loc.lon }, createdAt: new Date().toISOString(), mode, skyLevel, skyTexture: texture, marginDeg: margin, pointingResidualDeg: Math.round(fit.residualDeg * 100) / 100, notes },
+          surveyShots(),
+          shots.map((s) => s.file),
+          built,
         );
-        const panoramaJpeg = await encodePicture(pic);
-        const rel = path.join('horizon', `${id}.jpg`);
-        fs.mkdirSync(path.join(config.paths.captures, 'horizon'), { recursive: true });
-        fs.writeFileSync(path.join(config.paths.captures, rel), panoramaJpeg);
         if (built.prof.capped.length) notes.push(`${built.prof.capped.length} directions are blocked to at least the top of what was photographed (marked "capped"): taller than the mask says there`);
         const mask: HorizonMask = {
           id,

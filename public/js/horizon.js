@@ -59,6 +59,7 @@ function render() {
       ${running ? '<button id="hz-stop">Stop survey</button>' : surveyButton()}
       ${mask && !running ? '<button class="ghost" id="hz-clear" title="Forget this site\'s map: the planner goes back to the minimum altitude alone">Clear</button>' : ''}
       ${mask ? '<button class="ghost" id="hz-export" title="Download as azimuth altitude lines for other planners">Export</button>' : ''}
+      ${mask?.surveyId && !running ? '<button class="ghost" id="hz-resolve" title="Solve the map again from the frames this survey kept, with the current judgement (the telescope is not moved)">Re-solve</button>' : ''}
       ${running ? '' : '<button class="ghost" id="hz-import-btn" title="A horizon file of azimuth altitude lines (N.I.N.A., Stellarium, Clear Night Coach, Telescopius)">Import</button><input type="file" id="hz-import" accept=".hrz,.txt,.csv,text/plain" hidden>'}
     </div>`;
   let status;
@@ -72,7 +73,8 @@ function render() {
       : `<div class="small muted">No obstruction map for this site: the planner uses the minimum altitude alone. Map it at night with the scope set up where it will shoot.</div>${last}`;
   }
   const pano = mask?.panoramaUrl ? `<img class="hz-pano" id="hz-pano" src="${esc(mask.panoramaUrl)}" alt="The surroundings unrolled, north at the left edge: red = obstruction line, yellow = the limit the planner uses" title="Red = obstruction line · yellow = the planner's limit (with margin)">` : '';
-  el.innerHTML = `<div class="row-head"><h3>Site obstructions</h3></div>${buttons}${status}${mask ? plot(mask) : ''}${pano}`;
+  const evid = mask?.evidenceUrl ? `<img class="hz-pano" id="hz-evidence" src="${esc(mask.evidenceUrl)}" alt="What the survey judged: red = obstruction, blue = sky, green = verified stars" title="What the survey judged: red = obstruction · blue = sky · green = verified stars">` : '';
+  el.innerHTML = `<div class="row-head"><h3>Site obstructions</h3></div>${buttons}${status}${mask ? plot(mask) : ''}${pano}${evid}`;
 }
 
 export async function loadHorizon() {
@@ -91,7 +93,7 @@ export async function loadHorizon() {
 $('#horizon').addEventListener('click', async (e) => {
   const t = e.target;
   if (t.id === 'hz-run') {
-    if (!confirm('Map the obstructions around the scope?\n\nThe telescope GoTos two or three sky positions to fix its pointing by plate solving (calibrating if needed), then pans all round at low altitude taking wide-camera stills, about 15–25 minutes. Night only; set it up where it will shoot and point it at clear sky first. The wide camera\'s settings are restored afterwards.')) return;
+    if (!confirm('Map the obstructions around the scope?\n\nThe telescope plate-solves on the sky to fix its pointing, then pans all round at low altitude taking wide-camera frames, about 15–25 minutes. Night only, with clear sky overhead; set it up where it will shoot. The frames are kept, so the map can be solved again later without the telescope.')) return;
     t.disabled = true;
     if (await apiToast('horizon/survey', {})) toast('Obstruction survey started');
     loadHorizon();
@@ -108,8 +110,16 @@ $('#horizon').addEventListener('click', async (e) => {
     location.href = 'api/horizon/export';
   } else if (t.id === 'hz-import-btn') {
     $('#hz-import').click();
+  } else if (t.id === 'hz-resolve') {
+    t.disabled = true;
+    const r = await apiToast('horizon/resolve', {});
+    if (r) toast(`Solved again: ${r.summary}`);
+    await loadHorizon();
+    onChange();
   } else if (t.id === 'hz-pano') {
     lightbox(t.src, 'North at the left edge · red = obstruction line · yellow = the planner\'s limit');
+  } else if (t.id === 'hz-evidence') {
+    lightbox(t.src, 'What the survey judged · red = obstruction · blue = sky · green = verified stars');
   }
 });
 

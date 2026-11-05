@@ -83,6 +83,7 @@
               <button class="mini" data-swap="tele" aria-label="Main view: telephoto">Tele</button>
               <button class="mini" data-swap="wide" aria-label="Main view: wide angle">Wide</button>
               <button class="mini" data-swap="stack" aria-label="Main view: live stack">Stack</button>
+              <button class="mini single-only" id="btn-stack-live" hidden title="While stacking the tele view shows the live stack: show the tele's own frames instead" aria-pressed="false">Live</button>
               <button class="mini" id="btn-fullscreen" title="Fill the screen (pinch to zoom)" aria-label="Fill the screen"><svg class="i" aria-hidden="true"><use href="#i-full"/></svg></button>
               <button class="mini only-full" id="btn-unfull" title="Leave full view (Esc)" aria-label="Leave full view"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button>
             </div>
@@ -119,7 +120,7 @@
                 <button data-nudge="225" aria-label="Down left">↙</button><button data-nudge="180" aria-label="Down">↓</button><button data-nudge="135" aria-label="Down right">↘</button>
               </div>
               <div class="aim-side">
-                <label class="slider">Speed<input type="range" id="speed" min="0.05" max="1" step="0.05" value="0.4"></label>
+                <label class="slider">Speed<input type="range" id="speed" min="0.05" max="1" step="0.05" value="0.4"><span id="speed-rate" class="speed-rate"></span></label>
                 <div class="ctl-row">
                   <button data-act="home" title="Home both axes (needed after power-on)">Home</button>
                   <button data-act="level" title="Point level with the horizon">Level</button>

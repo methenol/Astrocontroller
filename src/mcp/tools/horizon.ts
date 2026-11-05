@@ -1,4 +1,5 @@
 /** The site's obstruction map: survey it with the scope, look at it, clear it, import or export it. */
+import { evidencePathOf, listSurveys, resolveSurvey, surveyIdOf } from '../../media/horizon/solve.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -69,9 +70,10 @@ export function registerMapObstructions(tool: ToolFn, port: SurveyPort): void {
 
   tool(
     'map_obstructions',
-    `The site's obstruction map (horizon mask): how high trees, houses and roofs reach in each compass direction, in true azimuth (0 = N, 90 = E) and altitude, so plan_targets only offers what is actually visible from where the scope stands. action=run surveys it: ${port.how}. action=status (default) says whether this site has a map and what it holds; show adds the panorama with the skyline (red) and the limit the planner uses (yellow); clear forgets this site's map (the planner then uses the minimum altitude alone); import takes 'azimuth altitude' lines (N.I.N.A./Stellarium/Clear Night Coach/Telescopius horizon files); export gives them; stop ends a running survey. Maps are kept per site (300 m): a new location needs its own.`,
+    `The site's obstruction map (horizon mask): how high trees, houses and roofs reach in each compass direction, in true azimuth (0 = N, 90 = E) and altitude, so plan_targets only offers what is actually visible from where the scope stands. action=run surveys it: ${port.how}. action=status (default) says whether this site has a map and what it holds; show adds the panorama with the skyline (red) and the limit the planner uses (yellow); clear forgets this site's map (the planner then uses the minimum altitude alone); import takes 'azimuth altitude' lines (N.I.N.A./Stellarium/Clear Night Coach/Telescopius horizon files); export gives them; stop ends a running survey; resolve solves the newest kept survey (or survey_id) again from its saved frames with the current judgement, without moving the telescope (surveys keep their frames from 2026-11-04 on); evidence shows what the last solve judged (red obstruction, blue sky, green verified stars) to find a missed tree or a false block. Maps are kept per site (300 m): a new location needs its own.`,
     {
-      action: z.enum(['status', 'run', 'show', 'clear', 'import', 'export', 'stop']).optional().describe('default status'),
+      action: z.enum(['status', 'run', 'show', 'evidence', 'resolve', 'clear', 'import', 'export', 'stop']).optional().describe('default status'),
+      survey_id: z.string().regex(/^[\w.-]+$/).optional().describe('resolve: the kept survey to solve again (default: the one this site\'s map came from, else the newest)'),
       calibrate: z.boolean().optional().describe('run: plate-solve calibrate first at the current pointing (otherwise only if a GoTo needs it)'),
       exposure_s: z.number().min(0.3).max(15).optional().describe('run: still exposure (default 2.5 s, rescaled once if the sky reads far too dark or bright)'),
       horizon_text: z.string().optional().describe('import: "azimuth altitude" lines, # comments'),
@@ -85,6 +87,19 @@ export function registerMapObstructions(tool: ToolFn, port: SurveyPort): void {
         }
         case 'stop':
           return text((await port.stop()) ? 'stopping the obstruction survey' : 'no obstruction survey is running');
+        case 'resolve': {
+          const here = maskFor(site());
+          const id = a.survey_id ?? (here ? surveyIdOf(here) : null) ?? listSurveys()[0]?.id;
+          if (!id) throw new Error('no survey has kept its frames yet (surveys from 2026-11-04 on do): run one');
+          const r = await resolveSurvey(id);
+          return withImage(r.panoramaJpeg, JSON.stringify({ result: `solved again from survey ${id}'s kept frames; plan_targets uses this map from now on`, ...maskReport(r.mask), notes: r.notes }, null, 1));
+        }
+        case 'evidence': {
+          const m = maskFor(site());
+          const p = m ? evidencePathOf(m) : null;
+          if (!m || !p) return text('this site\'s map has no evidence picture (only surveys from 2026-11-04 on make one)');
+          return withImage(fs.readFileSync(path.join(config.paths.captures, p)), JSON.stringify({ legend: 'north at the left edge; red = judged obstruction, blue = judged sky, green = verified stars; red line = skyline, yellow = the planner\'s limit', ...maskReport(m) }, null, 1));
+        }
         case 'clear': {
           const n = clearMasks(site());
           return text(n ? `cleared ${n} obstruction map(s) for this site: the planner now uses the minimum altitude alone` : 'this site had no obstruction map');

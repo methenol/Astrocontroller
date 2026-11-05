@@ -31,7 +31,7 @@ import { readKey, type RpcResponse } from './auth.js';
 import { SeestarLink, VIEW_TIMEOUT_MS, type LinkOptions, type RequestOptions, type SeestarEvent } from './link.js';
 import { SeestarImageLink, type GrabKind } from './image-link.js';
 import { frameImage, IMG_TYPE, type Camera, type Frame } from './frames.js';
-import { applyAppState, applyDeviceState, applyEvent, busyWith, initialState, isOuter, isStacking, pair, TERMINAL_STATES, VIEW_OF, type SeestarState, type ViewState } from './model.js';
+import { applyAppState, applyDeviceState, applyEvent, busyWith, polarAligning, initialState, isOuter, isStacking, pair, TERMINAL_STATES, VIEW_OF, type SeestarState, type ViewState } from './model.js';
 import { ZwoTunnel } from './tunnel.js';
 
 export type { Camera } from './frames.js';
@@ -62,6 +62,10 @@ const SUN_SLEW_MIN_DEG = 15;
 const MOVE_RESEND_MS = 200;
 const MOVE_DUR_S = 3;
 const MOVE_LEVEL = 1;
+/** renewals outstanding at most (a slow link answers late; the firmware keeps moving for dur_sec anyway) */
+const MOVE_MAX_INFLIGHT = 2;
+/** a nudge with wait false answers by then even when the scope is slow to acknowledge */
+const MOVE_ANSWER_MS = 400;
 export const NUDGE_MAX_S = 10;
 export const NUDGE_MAX_PERCENT = 100;
 
@@ -109,6 +113,19 @@ export class SeestarOperationError extends Error {
   }
 }
 
+interface Hold {
+  angle: number;
+  percent: number;
+  until: number;
+  press?: string;
+  inflight: number;
+  timer: NodeJS.Timeout | null;
+  first: Promise<RpcResponse> | null;
+  done: Promise<RpcResponse>;
+  finish: (r: RpcResponse) => void;
+  fail: (e: Error) => void;
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const OTHER: Record<Camera, Camera> = { tele: 'wide', wide: 'tele' };
 
@@ -145,9 +162,10 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   private lastFullPoll = 0;
   private viewQueue: Promise<unknown> = Promise.resolve();
   private rawQueue: Promise<unknown> = Promise.resolve();
-  private moveTimer: NodeJS.Timeout | null = null;
-  private moveGen = 0;
-  private moveLoopEnd: ((outcome: 'superseded') => void) | null = null;
+  /** the hand movement running (nudge) */
+  private hold: Hold | null = null;
+  /** web presses already stopped: their late renewals are ignored */
+  private readonly stoppedPresses: string[] = [];
   private started = false;
   private readonly onTunnel = () => this.tunnelChanged();
 
@@ -176,7 +194,10 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       this.changed();
     });
     this.link.on('authFailed', (msg: string) => log.error(`the scope refused the handshake: ${msg}`));
-    for (const cam of ['tele', 'wide'] as Camera[]) this.images[cam].on('status', () => this.changed());
+    for (const cam of ['tele', 'wide'] as Camera[]) {
+      this.images[cam].on('status', () => this.changed());
+      this.images[cam].expecting = () => this.exposing === cam && this.viewOf(cam).stage === 'ContinuousExposure';
+    }
     this.tunnel?.on('status', this.onTunnel);
     try {
       const saved = JSON.parse(fs.readFileSync(this.releasedFile, 'utf8')) as { released?: boolean };
@@ -326,6 +347,13 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     applyEvent(this.st, e);
     const name = e.Event ?? e.event;
     if (name === 'View' || name === 'SecondView' || name === 'SelectCamera' || name === 'Stack') this.syncStreams();
+    // the exposures (re)started on the exposing camera: a begin_streaming sent before this is not
+    // acted on (the wide pushed nothing after a camera switch, 2026-11-04), so ask again now
+    if (name === 'ContinuousExposure' && e.state === 'working') {
+      const route = Array.isArray(e.route) ? (e.route as unknown[]) : [];
+      const cam: Camera | null = route.includes('SecondView') ? 'wide' : route.includes('View') ? 'tele' : null;
+      if (cam && cam === this.exposing) this.images[cam].restartStream();
+    }
     if (name === 'Stack' && e.state && TERMINAL_STATES.has(String(e.state)) && isOuter(e)) setTimeout(() => void this.applySelection('stack ended'), 1000);
     this.emit('event', e);
     if (name) this.emit(name, e);
@@ -433,7 +461,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   isBusy(): string | null {
-    return this.operation ?? busyWith(this.st) ?? (this.moveTimer ? 'hand movement' : null);
+    return this.operation ?? busyWith(this.st) ?? (this.hold ? 'hand movement' : null);
   }
 
   get busy(): boolean {
@@ -468,8 +496,11 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   private async tick(): Promise<void> {
     if (!this.link.usable) return;
     try {
-      if (Date.now() - this.lastFullPoll >= FULL_POLL_MS) await this.refreshState();
-      else if (this.st.mount.moving || this.moveTimer) await this.readPointing();
+      // a hand move skips the full poll: the scope answers one command at a time and its ~1 s
+      // get_device_state would hold the move's renewals back
+      if (this.hold) await this.readPointing();
+      else if (Date.now() - this.lastFullPoll >= FULL_POLL_MS) await this.refreshState();
+      else if (this.st.mount.moving) await this.readPointing();
     } catch (e) {
       log.debug(`poll: ${errMsg(e)}`);
     }
@@ -770,6 +801,19 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.slewTo(p.raHours, p.decDeg);
   }
 
+  /** Abort a scope_goto slew (the app's "scope_move none"). */
+  abortSlew(): Promise<RpcResponse> {
+    return this.call('scope_move', ['none'], { allowError: true });
+  }
+
+  /** The selected camera's live exposure (exp_ms.continuous, ms); get_setting answers for the selected camera. */
+  async liveExposureMs(camera: Camera): Promise<number | null> {
+    if (this.exposing !== camera) return null;
+    const s = (await this.call('get_setting', undefined, { allowError: true }))?.result as { exp_ms?: { continuous?: unknown } } | undefined;
+    const v = s?.exp_ms?.continuous;
+    return typeof v === 'number' ? v : null;
+  }
+
   stopGoto(): Promise<RpcResponse> {
     return this.call('iscope_stop_view', { stage: 'AutoGoto' }, { timeoutMs: VIEW_TIMEOUT_MS });
   }
@@ -809,7 +853,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   /** Stop whatever runs: hand movement, GoTo, autofocus, polar alignment, a stack, a non-star view. */
   async stopWork(): Promise<{ stopped: string[] }> {
     const stopped: string[] = [];
-    if (this.moveTimer) {
+    if (this.hold) {
       await this.stopMotion();
       stopped.push('hand movement');
     }
@@ -827,7 +871,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       await this.call('stop_auto_focuse');
       stopped.push('autofocus');
     }
-    if (running('3PPA') || running('EqModePA')) {
+    if (polarAligning(this.st)) {
       await this.call('stop_polar_align');
       stopped.push('polar alignment');
     }
@@ -845,16 +889,17 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     if (op) {
       this.pendingCancel = true;
       const by: Record<string, [string | null, unknown, string]> = { autofocus: ['stop_auto_focuse', undefined, 'autofocus'], 'polar alignment': ['stop_polar_align', undefined, 'polar alignment'] };
-      const [method, params, name]: [string | null, unknown, string] = by[op] ?? (op.startsWith('GoTo ') ? ['iscope_stop_view', { stage: 'AutoGoto' }, 'goto'] : [null, undefined, op]);
+      const [method, params, name]: [string | null, unknown, string] = by[op] ?? (op.startsWith('GoTo ') ? ['iscope_stop_view', { stage: 'AutoGoto' }, 'goto'] : op === 'slew' ? ['scope_move', ['none'], 'slew'] : [null, undefined, op]);
       if (!stopped.includes(name)) {
         if (method) {
           await this.call(method, params, { allowError: true, timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
           // a stop that lands before the scope has the operation running does nothing (its start was
           // just acknowledged): when it shows up running within a few seconds, stop it again
-          const stages = op === 'autofocus' ? ['AutoFocus'] : op === 'polar alignment' ? ['3PPA', 'EqModePA'] : ['AutoGoto'];
+          const stages = op === 'autofocus' ? ['AutoFocus'] : op === 'polar alignment' ? ['3PPA', 'EqModePA'] : op === 'slew' ? ['ScopeGoto'] : ['AutoGoto'];
           const end = Date.now() + STOP_RESEND_WINDOW_MS;
-          while (Date.now() < end && this.operation === op && !stages.some(running)) await sleep(250);
-          if (this.operation === op && stages.some(running)) await this.call(method, params, { allowError: true, timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+          const live = () => (op === 'polar alignment' ? polarAligning(this.st) : stages.some(running));
+          while (Date.now() < end && this.operation === op && !live()) await sleep(250);
+          if (this.operation === op && live()) await this.call(method, params, { allowError: true, timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
         }
         stopped.push(name);
       }
@@ -893,27 +938,68 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.call('stop_auto_focuse');
   }
 
-  async focuserPosition(): Promise<number | null> {
-    const r = await this.call('get_focuser_position');
-    const n = typeof r.result === 'number' ? r.result : typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : null;
-    if (n !== null) this.st.focus.position = n;
-    return n;
+  /**
+   * The tele's focuser position. move_focuser and get_focuser_position act on the SELECTED camera's
+   * focuser (verified 2026-11-04: with the wide selected, move_focuser moved the wide's
+   * second_focuser), so a focuser is only read or moved while its camera exposes.
+   */
+  async focuserPosition(camera: Camera = 'tele'): Promise<number | null> {
+    const read = async () => {
+      const r = await this.call('get_focuser_position');
+      const n = typeof r.result === 'number' ? r.result : typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : null;
+      if (n !== null) this.focusOf(camera).position = n;
+      return n;
+    };
+    return this.focuserDirect(camera) ? read() : this.withCamera(camera, `reading the ${camera} focuser`, read);
   }
 
-  async focusTo(step: number): Promise<number | null> {
-    const max = this.st.focus.maxStep ?? 2600;
-    if (!Number.isFinite(step) || step < 0 || step > max) throw new Error(`focuser position ${step} is outside 0–${max}`);
-    const r = await this.call('move_focuser', { step: Math.round(step), ret_step: true }, { timeoutMs: FOCUS_MOVE_TIMEOUT_MS });
-    const n = typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : typeof r.result === 'number' ? r.result : null;
-    if (n !== null) this.st.focus.position = n;
-    this.changed();
-    return n;
+  /** The focuser commands reach this camera's focuser now: it exposes, or (no view) the tele, which a stopped view selects. */
+  private focuserDirect(camera: Camera): boolean {
+    return this.exposing === camera || (!this.viewRunning() && camera === 'tele');
   }
 
-  async focusBy(delta: number): Promise<number | null> {
-    const cur = this.st.focus.position ?? (await this.focuserPosition());
-    if (cur === null) throw new Error('the focuser position is unknown');
-    return this.focusTo(cur + delta);
+  private focusOf(camera: Camera): SeestarState['focus'] {
+    return camera === 'wide' ? this.st.wideFocus : this.st.focus;
+  }
+
+  /** Move a camera's focuser (the tele's unless said); the camera is borrowed when it is not the one exposing. */
+  async focusTo(step: number, camera: Camera = 'tele'): Promise<number | null> {
+    const f = this.focusOf(camera);
+    const max = f.maxStep ?? (camera === 'wide' ? 1023 : 2600);
+    if (!Number.isFinite(step) || step < 0 || step > max) throw new Error(`${camera} focuser position ${step} is outside 0–${max}`);
+    const move = async () => {
+      if (!this.focuserDirect(camera)) throw new Error(`the ${camera} camera is not selected, so its focuser cannot be moved`);
+      const r = await this.call('move_focuser', { step: Math.round(step), ret_step: true }, { timeoutMs: FOCUS_MOVE_TIMEOUT_MS });
+      const n = typeof (r.result as { step?: unknown })?.step === 'number' ? (r.result as { step: number }).step : typeof r.result === 'number' ? r.result : null;
+      if (n !== null) f.position = n;
+      this.changed();
+      return n;
+    };
+    return this.focuserDirect(camera) ? move() : this.withCamera(camera, `moving the ${camera} focuser`, move);
+  }
+
+  async focusBy(delta: number, camera: Camera = 'tele'): Promise<number | null> {
+    const cur = this.focusOf(camera).position ?? (await this.focuserPosition(camera));
+    if (cur === null) throw new Error(`the ${camera} focuser position is unknown`);
+    return this.focusTo(cur + delta, camera);
+  }
+
+  /**
+   * The wide camera's factory focus (its infinity): get_setting's second_camera.factory_focal_pos
+   * (330 on the S50 Pro of 2026-11-04; the app's reset_factory_focal_pos answers 210 "not supported"
+   * on fw 9.75). With a 6 mm f/5 lens everything past ~2 m is sharp there.
+   */
+  async wideFactoryFocus(): Promise<number | null> {
+    const s = (await this.call('get_setting', undefined, { allowError: true }).catch(() => null))?.result as { second_camera?: { factory_focal_pos?: unknown; focal_pos?: unknown } } | undefined;
+    const v = s?.second_camera?.factory_focal_pos ?? s?.second_camera?.focal_pos;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  }
+
+  /** Put the wide camera's focuser back at its factory infinity; returns where it is. */
+  async resetWideFocus(): Promise<number | null> {
+    const pos = await this.wideFactoryFocus();
+    if (pos === null) throw new Error('the Seestar did not report the wide camera\'s factory focus (get_setting second_camera.factory_focal_pos)');
+    return this.focusTo(pos, 'wide');
   }
 
   async park(): Promise<OperationResult> {
@@ -925,69 +1011,104 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   /**
-   * Hand movement as the app's joystick: scope_speed_move renewed every 200 ms for `durS` seconds
-   * (angle 0 right, 90 up, 180 left, 270 down; percent 50 ≈ 2.7°/s), then a stop. A new nudge
-   * supersedes the running one; `wait: false` returns once the first command is acknowledged.
+   * Hand movement as the app's joystick: a hold that sends scope_speed_move every 200 ms until its
+   * deadline, then the stop (angle 0 right, 90 up, 180 left, 270 down; percent 1 ≈ 0.03°/s, 100 ≈
+   * 2.5°/s, close to linear, measured 2026-11-04).
+   *
+   * The firmware answers its commands one at a time, so a slow one (a view restart, the ~1 s
+   * get_device_state) holds the move's reply back: the renewals are sent on their own clock, never
+   * waiting for replies (at most MOVE_MAX_INFLIGHT outstanding, so a slow link does not pile them
+   * up), and a nudge that repeats the running hold's direction and speed only moves its deadline.
+   * That is how the web UI holds an arrow: it renews a lease faster than it runs out, and the move
+   * neither stops between renewals nor restarts. `press` names a web press: once it is stopped, a
+   * late renewal of it is ignored (the stop can overtake it on the wire).
+   *
+   * `wait: false` answers at once (the first command is on its way); `wait: true` when the hold ends.
    */
-  nudge(angleDeg: number, percent: number, durS: number, { wait = true } = {}): Promise<RpcResponse> {
+  nudge(angleDeg: number, percent: number, durS: number, { wait = true, press }: { wait?: boolean; press?: string } = {}): Promise<RpcResponse> {
     if (!this.link.usable) return Promise.reject(new Error('cannot move: the Seestar is not connected'));
+    if (press && this.stoppedPresses.includes(press)) return Promise.resolve({ code: 0, result: 'stopped' } as RpcResponse);
     const dur = Math.min(NUDGE_MAX_S, Math.max(0.05, durS));
     const pct = Math.min(NUDGE_MAX_PERCENT, Math.max(1, Math.round(percent)));
     const angle = ((Math.round(angleDeg) % 360) + 360) % 360;
-    const move = { angle, percent: pct, level: MOVE_LEVEL, dur_sec: MOVE_DUR_S };
-    const gen = ++this.moveGen;
-    this.endMoveLoop('superseded');
     const until = Date.now() + dur * 1000;
-    const first = this.call('scope_speed_move', move);
-    this.changed();
-    const loop = (async (): Promise<RpcResponse> => {
-      const firstReply = await first;
-      if (gen !== this.moveGen) return { ...firstReply, result: 'superseded' };
-      const outcome = await new Promise<'done' | 'superseded'>((resolve, reject) => {
-        this.moveLoopEnd = resolve;
-        this.moveTimer = setInterval(() => {
-          if (Date.now() >= until) {
-            this.endMoveLoop();
-            resolve('done');
-            return;
-          }
-          this.call('scope_speed_move', move).catch((e) => {
-            this.endMoveLoop();
-            reject(e);
-          });
-        }, MOVE_RESEND_MS);
-        this.changed();
+    const h = this.hold;
+    if (h && h.angle === angle && h.percent === pct && (!press || h.press === press || !h.press)) {
+      // a renewal: the same move goes on
+      h.until = Math.max(h.until, until);
+      h.press = press ?? h.press;
+      return wait ? h.done : Promise.resolve({ code: 0, result: 'renewed' } as RpcResponse);
+    }
+    if (h) this.endHold('superseded');
+    const move = { angle, percent: pct, level: MOVE_LEVEL, dur_sec: MOVE_DUR_S };
+    let finish!: (r: RpcResponse) => void;
+    let fail!: (e: Error) => void;
+    const done = new Promise<RpcResponse>((res, rej) => {
+      finish = res;
+      fail = rej;
+    });
+    void done.catch(() => undefined);
+    const hold: Hold = { angle, percent: pct, until, press, inflight: 0, timer: null, done, finish, fail, first: null };
+    this.hold = hold;
+    const send = () => {
+      hold.inflight++;
+      const p = this.call('scope_speed_move', move, { timeoutMs: 10_000 }).finally(() => hold.inflight--);
+      p.then((r) => {
+        if (r.code && this.hold === hold) {
+          this.endHold();
+          void this.sendStop().catch(() => undefined);
+          hold.fail(new Error(`the Seestar refused the move: ${r.error ?? `code ${r.code}`}`));
+        }
+      }).catch((e) => {
+        if (this.hold !== hold) return;
+        this.endHold();
+        hold.fail(e instanceof Error ? e : new Error(String(e)));
       });
-      // taken over (a newer nudge, or a stop): that one sends the scope its next command
-      if (outcome === 'superseded') return { ...firstReply, result: 'superseded' };
-      await this.sendStop();
-      return firstReply;
-    })();
-    void loop.catch(() => undefined);
-    return wait ? loop : first;
+      return p;
+    };
+    hold.first = send();
+    hold.timer = setInterval(() => {
+      if (this.hold !== hold) return;
+      if (Date.now() >= hold.until) {
+        this.endHold();
+        void this.sendStop()
+          .then((r) => hold.finish(r))
+          .catch((e) => hold.fail(e instanceof Error ? e : new Error(String(e))));
+        return;
+      }
+      if (hold.inflight < MOVE_MAX_INFLIGHT) void send().catch(() => undefined);
+    }, MOVE_RESEND_MS);
+    this.changed();
+    if (wait) return done;
+    // the first command is on the wire; a refusal of it still comes back as the answer
+    return Promise.race([hold.first, sleep(MOVE_ANSWER_MS).then(() => ({ code: 0, result: 'moving' }) as RpcResponse)]);
   }
 
-  /** End the renewal loop; `outcome` tells the nudge waiting on it that it was taken over. */
-  private endMoveLoop(outcome?: 'superseded'): void {
-    if (this.moveTimer) clearInterval(this.moveTimer);
-    this.moveTimer = null;
-    const end = this.moveLoopEnd;
-    this.moveLoopEnd = null;
-    if (outcome && end) end(outcome);
+  /** End the running hold without a stop of its own (the caller sends what comes next). */
+  private endHold(outcome?: 'superseded'): void {
+    const h = this.hold;
+    if (!h) return;
+    if (h.timer) clearInterval(h.timer);
+    this.hold = null;
+    if (outcome) h.finish({ code: 0, result: outcome } as RpcResponse);
     this.changed();
   }
 
   private stopMoveLoop(): void {
-    this.endMoveLoop('superseded');
+    this.endHold('superseded');
   }
 
   private sendStop(): Promise<RpcResponse> {
     return this.call('scope_speed_move', { angle: 0, percent: 0, level: 0, dur_sec: MOVE_DUR_S });
   }
 
-  stopMotion(): Promise<RpcResponse> {
-    this.moveGen++;
-    this.endMoveLoop('superseded');
+  /** Stop hand movement now; `press` retires that web press, so its late renewals do nothing. */
+  stopMotion(press?: string): Promise<RpcResponse> {
+    if (press) {
+      this.stoppedPresses.push(press);
+      if (this.stoppedPresses.length > 32) this.stoppedPresses.shift();
+    }
+    this.endHold('superseded');
     return this.sendStop();
   }
 
@@ -1130,6 +1251,22 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     const image = await frameImage(frame, camera);
     image.camera = camera;
     return { image, frame };
+  }
+
+  /**
+   * Run with this camera's live frames in RAW (the 16-bit Bayer sub at the set exposure and gain),
+   * JPEG again afterwards whatever happens. The wide's live JPEG in a star view is auto-exposed and
+   * tone-mapped (exposure, gain and the ISP's manual settings change nothing, the ISP ones answer
+   * 207 in star mode; 2026-11-05): walls, windows and sky all came out within a few levels of each
+   * other. The RAW frames carry the scene's real contrast.
+   */
+  async withRawFrames<T>(camera: Camera, run: () => Promise<T>): Promise<T> {
+    await this.setTransferMode(camera, 'Raw');
+    try {
+      return await run();
+    } finally {
+      await this.setTransferMode(camera, 'Jpg').catch((e) => log.warn(`could not put the ${camera} camera's live frames back to JPEG: ${errMsg(e)}`));
+    }
   }
 
   /** One raw (Bayer) frame: the transfer mode goes to Raw for it and back to JPEG after. */

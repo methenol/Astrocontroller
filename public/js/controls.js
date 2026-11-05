@@ -1,57 +1,81 @@
 /** Manual controls on the View screen: nudging, focus, capture, camera mode and settings. */
 import { $, $$, toast, busy, baseName } from './dom.js';
 import { api, control } from './api.js';
-import { emit } from './bus.js';
+import { emit, on } from './bus.js';
 import { state } from './state.js';
 
 // ---- nudging
-// Held arrows send short nudges that each run out by themselves (NUDGE_MS), repeated faster than
-// they expire, so the mount moves smoothly while held and stops on its own if this page goes away.
-// Only one nudge loop ever runs, and every way a press can end stops it.
-const NUDGE_MS = 700;
-const NUDGE_EVERY_MS = 550;
-let nudge = null; // { timer, button, pointerId }
-/** The nudge request on the wire: a stop must reach the server after it, never before. */
+// A held arrow is one press: it renews a lease (NUDGE_MS) faster than the lease runs out, so the
+// mount moves smoothly while held and stops on its own if this page goes away. The server keeps one
+// move going across renewals (a renewal does not wait for the telescope), and the release's stop
+// names the press, so a renewal still on the wire cannot start it again. Only one press runs.
+const NUDGE_MS = 1500;
+const NUDGE_EVERY_MS = 300;
+let nudge = null; // { timer, button, pointerId, press }
+/** The last nudge request on the wire: a second stop follows it (a driver without press ids). */
 let nudgeInFlight = Promise.resolve();
+let pressSeq = 0;
+const pageId = Math.random().toString(36).slice(2, 8);
 
-/** Ends the loop; the stop (with its toast label, if any) follows any nudge still in flight. */
+/** Ends the press; the stop goes at once, and once more after a nudge still in flight. */
 function endNudge(label) {
+  const press = nudge?.press;
   if (nudge) {
     clearInterval(nudge.timer);
     nudge = null;
   }
-  return nudgeInFlight.then(() => control({ action: 'stop' }, label));
+  const first = control(press ? { action: 'stop', press } : { action: 'stop' }, label);
+  if (press) void nudgeInFlight.then(() => api('control', { action: 'stop', press }).catch(() => undefined));
+  return first;
 }
 
 function stopNudge() {
   if (nudge) endNudge();
 }
 
-function startNudge(button, pointerId, angle) {
-  if (nudge) {
-    // a second finger or button while one is held: the first press ends here
-    clearInterval(nudge.timer);
-    nudge = null;
+/** The slider's rate for the camera in the main view, when the driver has a curve (the Seestar). */
+function speedRate() {
+  const c = state.config?.nudgeCurve;
+  const el = $('#speed-rate');
+  if (!el) return;
+  if (!c) {
+    el.textContent = '';
+    return;
   }
-  const speed = Number($('#speed').value);
+  const cam = state.telescope?.camera?.selected === 'wide' ? 'wide' : 'tele';
+  const [lo, hi] = c[cam];
+  const t = Math.max(0, Math.min(1, (Number($('#speed').value) - c.speedMin) / (1 - c.speedMin)));
+  const pct = Math.max(1, Math.round(lo * (hi / lo) ** t));
+  const rate = pct * c.degPerSPerPercent;
+  el.textContent = `${rate < 0.1 ? rate.toFixed(2) : rate.toFixed(1)}°/s ${cam === 'wide' ? 'pan' : 'nudge'}`;
+  el.title = cam === 'wide' ? 'Wide camera in the main view: panning speed' : 'Tele camera in the main view: fine nudge for framing';
+}
+$('#speed').addEventListener('input', speedRate);
+on('telescope', speedRate);
+on('config', speedRate);
+
+function startNudge(button, pointerId, angle) {
+  // a second finger or button while one is held: the first press ends here
+  if (nudge) endNudge();
+  const press = `${pageId}-${++pressSeq}`;
   let failed = false;
-  let sending = false;
+  let sending = 0;
   const loop = {};
   const tick = () => {
-    // a slow link: skip a tick rather than queue nudges behind each other
-    if (sending || nudge !== loop) return;
-    sending = true;
-    nudgeInFlight = api('control', { action: 'nudge', angle, speed, ms: NUDGE_MS })
+    // a slow link: at most two renewals outstanding (the lease covers several ticks)
+    if (sending >= 2 || nudge !== loop) return;
+    sending++;
+    nudgeInFlight = api('control', { action: 'nudge', angle, speed: Number($('#speed').value), ms: NUDGE_MS, press })
       .catch((e) => {
         // one toast per press, not one per tick
         if (!failed) toast(`Nudge: ${e.message}`, true);
         failed = true;
       })
       .finally(() => {
-        sending = false;
+        sending--;
       });
   };
-  Object.assign(loop, { timer: setInterval(tick, NUDGE_EVERY_MS), button, pointerId });
+  Object.assign(loop, { timer: setInterval(tick, NUDGE_EVERY_MS), button, pointerId, press });
   nudge = loop;
   tick();
 }
@@ -72,11 +96,11 @@ for (const b of $$('[data-nudge]')) {
   b.addEventListener('pointerup', end);
   b.addEventListener('pointercancel', end);
   b.addEventListener('lostpointercapture', end);
-  // keyboard and assistive tech: a click nudges once
+  // keyboard and assistive tech: a click nudges once (half a second)
   b.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
-    control({ action: 'nudge', angle: Number(b.dataset.nudge), speed: Number($('#speed').value), ms: NUDGE_MS });
+    control({ action: 'nudge', angle: Number(b.dataset.nudge), speed: Number($('#speed').value), ms: 500 });
   });
 }
 // the page losing focus or going to the background never leaves the mount moving

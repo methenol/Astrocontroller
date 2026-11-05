@@ -6,7 +6,7 @@ import express from 'express';
 import * as sky from '../astro/sky.js';
 import type { Seestar } from '../drivers/seestar/device.js';
 import { initialState } from '../drivers/seestar/model.js';
-import { projectState, seestarWeb } from '../drivers/seestar/web.js';
+import { nudgePercent, projectState, seestarWeb } from '../drivers/seestar/web.js';
 import { dwarfWeb } from '../drivers/dwarf/web.js';
 import { controlRoutes } from '../web/routes/control.js';
 import { jsonErrors } from '../web/http.js';
@@ -114,7 +114,8 @@ describe('Seestar behind the shared web UI', () => {
     assert.equal(t.bodyMode, 'eq');
     assert.deepEqual(t.goto, { state: 'done', target: 'M 31' });
     assert.equal(t.tracking.state, 'running');
-    assert.equal(t.focusPosition, 1580);
+    // the focus readout is the main view's camera's focuser (each camera has its own)
+    assert.deepEqual((t as any).focusPositions, { tele: 1580, wide: undefined });
     assert.deepEqual(t.stacking.tele, { state: 'running', currentCount: 42, stackedCount: 40, totalCount: 100, target: 'M 31' });
     // stacking is shown by the stacking bar, not as a busy operation
     assert.equal(t.operation, undefined);
@@ -134,16 +135,41 @@ describe('Seestar behind the shared web UI', () => {
     assert.equal((projectState(stub as unknown as Seestar) as any).link.state, 'connecting');
   });
 
-  test('a nudge turns the screen angle and speed into the Seestar joystick move, answered at once', async () => {
+  test('a nudge turns the screen angle into the joystick move and the slider into the camera\'s speed curve, answered at once', async () => {
     const { stub, web } = make();
     await withControl(web, async (post) => {
-      const r = await post({ action: 'nudge', angle: 0, speed: 0.5, ms: 400 });
+      // tele in the main view: the slider runs 1-30% (a fine nudge for framing)
+      (stub as any).selected = 'tele';
+      const r = await post({ action: 'nudge', angle: 0, speed: 0.05, ms: 400, press: 'p1' });
       assert.equal(r.status, 200);
-      // screen 0 (up) is the Seestar's 90; half throw is the app's percent 50; the move stops itself
-      assert.deepEqual(stub.calls[0], ['nudge', 90, 50, 0.4, { wait: false }]);
-      // a held arrow: the route takes up to 5 s a move, full throw is percent 100
+      // screen 0 (up) is the Seestar's 90; the bottom of the slider is the slowest percent
+      assert.deepEqual(stub.calls[0], ['nudge', 90, 1, 0.4, { wait: false, press: 'p1' }]);
+      assert.equal(r.body.camera, 'tele');
       await post({ action: 'nudge', angle: 90, speed: 1, ms: 5000 });
-      assert.deepEqual(stub.calls[1], ['nudge', 0, 100, 5, { wait: false }]);
+      assert.deepEqual(stub.calls[1], ['nudge', 0, 30, 5, { wait: false, press: undefined }]);
+      // wide: 5-100% (panning)
+      (stub as any).selected = 'wide';
+      await post({ action: 'nudge', angle: 180, speed: 1, ms: 1500 });
+      assert.deepEqual(stub.calls[2], ['nudge', -90, 100, 1.5, { wait: false, press: undefined }]);
+      await post({ action: 'nudge', angle: 180, speed: 0.05, ms: 1500 });
+      assert.equal(stub.calls[3][2], 5);
+    });
+    // the curve is exponential and monotonic in between
+    let last = 0;
+    for (let s = 0.05; s <= 1.0001; s += 0.05) {
+      const p = nudgePercent(s, 'wide');
+      assert.ok(p >= last, `monotonic at ${s}`);
+      last = p;
+    }
+    assert.equal(nudgePercent(0.525, 'tele'), Math.round(Math.sqrt(30)));
+  });
+
+  test('a press\'s release stops only that hand movement', async () => {
+    const { stub, web } = make();
+    await withControl(web, async (post) => {
+      const r = await post({ action: 'stop', press: 'p1' });
+      assert.deepEqual(r.body, { ok: true, stopped: ['hand movement'] });
+      assert.deepEqual(stub.calls, [['stopMotion', 'p1']]);
     });
   });
 
@@ -164,7 +190,7 @@ describe('Seestar behind the shared web UI', () => {
       assert.equal((await post({ action: 'setting', setting: 'exposure', value: '10' })).status, 200);
       assert.equal((await post({ action: 'setting', setting: 'gain', value: 80 })).status, 200);
       assert.deepEqual(stub.calls, [
-        ['focusBy', -20],
+        ['focusBy', -20, 'tele'],
         ['setExposure', { stackMs: 10_000 }],
         ['setGain', 80],
       ]);
@@ -221,7 +247,9 @@ describe('Seestar behind the shared web UI', () => {
     const { web } = make();
     const dwarf = dwarfWeb({ state: { fov: {} } } as never, {} as never);
     for (const [k, v] of Object.entries(dwarf.capabilities)) if (k !== 'video') assert.equal(v, true, k);
-    assert.deepEqual(Object.keys(web.capabilities).sort(), Object.keys(dwarf.capabilities).sort());
+    // singleView is a layout hint (one camera exposes at a time), not a feature the Dwarf lacks
+    assert.deepEqual(Object.keys(web.capabilities).filter((k) => k !== 'singleView').sort(), Object.keys(dwarf.capabilities).sort());
+    assert.equal(web.capabilities.singleView, true);
     assert.deepEqual(web.capabilities.video, ['tele', 'wide', 'stack']);
     // parity: the Seestar does everything the Dwarf does
     for (const [k, v] of Object.entries(web.capabilities)) if (k !== 'video') assert.equal(v, true, k);

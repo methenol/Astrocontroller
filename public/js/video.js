@@ -37,6 +37,13 @@ let videoWs = null;
 let retry = 0;
 let stackWasActive = false;
 let serverStreams = {};
+// One camera at a time (capabilities.singleView, the Seestar): one view with a tele/wide switch; the
+// tele shows the live stack while it stacks unless `showLive` asks for its own frames.
+let single = false;
+let showLive = false;
+/** when the camera was last picked on this page (the scope's selection is followed otherwise) */
+let pickedAt = 0;
+const PICK_GRACE_MS = 4000;
 
 const imgOf = (slot) => $(slot === 'main' ? '#img-main' : `#img-${slot}`);
 const RUNNING = new Set(['running', 'stopping']);
@@ -46,8 +53,15 @@ export function stackActive() {
   return !!s && (RUNNING.has(s.tele?.state) || RUNNING.has(s.wide?.state));
 }
 
+/** The source a slot shows: in the single view the tele's slot shows the live stack while stacking. */
+function displayed(slot) {
+  if (single && slot === 'main' && views.main === 'tele' && stackActive() && !showLive) return 'stack';
+  return views[slot];
+}
+
 function wantedSources() {
   if (document.hidden || !viewOnScreen()) return [];
+  if (single) return [...new Set([views.main, displayed('main')])];
   // the stack feed only means something while stacking (otherwise it mirrors the tele preview)
   return [...new Set(Object.values(views))].filter((s) => s !== 'stack' || stackActive());
 }
@@ -75,8 +89,8 @@ function connectVideo() {
     const url = URL.createObjectURL(new Blob([new Uint8Array(ev.data, HEADER_BYTES)], { type: 'image/jpeg' }));
     const old = blobUrls[src];
     blobUrls[src] = url;
-    for (const [slot, s] of Object.entries(views)) {
-      if (s !== src) continue;
+    for (const slot of Object.keys(views)) {
+      if (displayed(slot) !== src) continue;
       const img = imgOf(slot);
       img.src = url;
       img.style.visibility = 'visible';
@@ -90,12 +104,13 @@ function connectVideo() {
   };
 }
 
-export function setView(slot, src) {
-  views[slot] = src;
+export function setView(slot, camera) {
+  views[slot] = camera;
+  const src = displayed(slot);
   const img = imgOf(slot);
   const fig = img.closest('figure');
   fig.dataset.src = src;
-  $('.view-name', fig).textContent = src[0].toUpperCase() + src.slice(1);
+  $('.view-name', fig).textContent = src === 'stack' && single ? 'Tele · live stack' : src[0].toUpperCase() + src.slice(1);
   // this source's latest frame at once if there is one; otherwise the placeholder
   if (blobUrls[src]) {
     img.src = blobUrls[src];
@@ -108,13 +123,52 @@ export function setView(slot, src) {
   if (slot === 'main') {
     state.mainSrc = src;
     // capture defaults to whichever camera is in the main view
-    if (src === 'tele' || src === 'wide') $('#cap-cam').value = src;
+    if (camera === 'tele' || camera === 'wide') $('#cap-cam').value = camera;
     $('#empty-main').textContent = src === 'stack' ? 'no live-stacking image yet' : 'waiting for video…';
+    renderSwitch();
   }
   subscribe();
 }
 
+/** The tele/wide switch (single view): which camera is chosen, still switching, the stack/live toggle. */
+function renderSwitch() {
+  const exposing = state.telescope?.camera?.exposing;
+  for (const b of $$('[data-swap]')) {
+    const on = b.dataset.swap === views.main;
+    b.setAttribute('aria-pressed', String(on));
+    b.classList.toggle('pending', single && on && !!exposing && exposing !== views.main);
+    b.title = single && on && exposing && exposing !== views.main ? `switching the scope to the ${views.main} camera…` : '';
+  }
+  const live = $('#btn-stack-live');
+  if (live) {
+    live.hidden = !(single && views.main === 'tele' && stackActive());
+    live.setAttribute('aria-pressed', String(showLive));
+  }
+}
+
+/** The driver's layout: the single view takes the camera the scope already exposes, so opening a page never switches it. */
+function applyLayout() {
+  const want = !!state.config?.capabilities?.singleView;
+  if (want !== single) {
+    single = want;
+    document.body.classList.toggle('single-view', single);
+    setView('main', views.main);
+  }
+  // the single view follows the scope's selection (sticky on the server: a tool, the agent or another
+  // tab may change it), except right after a pick here, while the server has not caught up yet
+  if (single && Date.now() - pickedAt > PICK_GRACE_MS) {
+    const sel = state.telescope?.camera?.selected;
+    if ((sel === 'tele' || sel === 'wide') && sel !== views.main) setView('main', sel);
+  }
+}
+
 function swapIntoMain(src) {
+  if (single) {
+    if (src === 'stack') return;
+    pickedAt = Date.now();
+    if (src !== views.main) setView('main', src);
+    return;
+  }
   if (src === views.main) return;
   const other = Object.entries(views).find(([, v]) => v === src)?.[0];
   if (other) setView(other, views.main);
@@ -185,9 +239,14 @@ function updateTeleBox() {
 
 on('telescope', () => {
   updateTeleBox();
+  applyLayout();
+  renderSwitch();
   const active = stackActive();
   if (active === stackWasActive) return;
   stackWasActive = active;
+  if (!active) showLive = false;
+  // the single view's tele slot changes between the stack and the tele's own frames
+  if (single) setView('main', views.main);
   subscribe();
   if (!active) {
     // the stack feed's last frame belongs to the stack that ended
@@ -197,6 +256,7 @@ on('telescope', () => {
     if (old) setTimeout(() => URL.revokeObjectURL(old), REVOKE_AFTER_MS);
   }
 });
+on('config', applyLayout);
 on('screen', subscribe);
 on('view', subscribe);
 document.addEventListener('visibilitychange', subscribe);
@@ -209,6 +269,11 @@ for (const b of $$('[data-swap]')) {
   });
 }
 for (const slot of ['a', 'b']) $(`#view-${slot}`).addEventListener('click', () => swapIntoMain(views[slot]));
+$('#btn-stack-live').addEventListener('click', (e) => {
+  e.stopPropagation();
+  showLive = !showLive;
+  setView('main', views.main);
+});
 
 // ---- full-bleed live view
 // The Fullscreen API where it exists (desktop, Android Chrome); iOS Safari has no element
@@ -336,6 +401,7 @@ export function startVideo() {
   setView('main', 'tele');
   setView('a', 'wide');
   setView('b', 'stack');
+  applyLayout();
   connectVideo();
   setInterval(renderHealth, HEALTH_EVERY_MS);
 }

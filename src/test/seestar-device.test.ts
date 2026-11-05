@@ -171,6 +171,37 @@ describe('Seestar device', () => {
     assert.ok(fake.calls.filter((c) => c.method === 'scope_speed_move').length >= 3);
   });
 
+  test('a held press keeps one move going through slow replies and renewals, and a stopped press stays stopped', async () => {
+    await connected();
+    // the firmware answers one command at a time: a slow reply must not end the hold early
+    let slow = true;
+    fake.on('scope_speed_move', async () => {
+      if (slow) await wait(900);
+      return { result: 0 };
+    });
+    fake.calls.length = 0;
+    const t0 = Date.now();
+    const first = await scope.nudge(90, 20, 0.7, { wait: false, press: 'a' });
+    assert.ok(Date.now() - t0 < 600, 'answered without waiting for the scope');
+    assert.equal(first.result, 'moving');
+    // renewals of the same press only move the deadline
+    for (let i = 0; i < 4; i++) {
+      await wait(300);
+      assert.equal((await scope.nudge(90, 20, 0.7, { wait: false, press: 'a' })).result, 'renewed');
+    }
+    const moves = () => fake.calls.filter((c) => c.method === 'scope_speed_move').map((c) => c.params as Record<string, number>);
+    assert.equal(moves().filter((m) => m.percent === 0).length, 0, 'no stop while the press is held');
+    assert.ok(moves().length <= 2 + 8, 'at most two renewals in flight');
+    assert.equal(scope.isBusy(), 'hand movement');
+    slow = false;
+    await scope.stopMotion('a');
+    // a renewal of the stopped press that arrives late does nothing
+    assert.equal((await scope.nudge(90, 20, 0.7, { wait: false, press: 'a' })).result, 'stopped');
+    assert.equal(scope.isBusy(), null);
+    await wait(500);
+    assert.deepEqual(moves().at(-1), { angle: 0, percent: 0, level: 0, dur_sec: 3 });
+  });
+
   test('stop ends the running stage the way the app does and leaves the star view up', async () => {
     await connected();
     fake.calls.length = 0;

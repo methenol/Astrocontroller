@@ -62,7 +62,25 @@ const CAPABILITIES: Capabilities = {
   horizonSurvey: true,
   wire: true,
   video: ['tele', 'wide', 'stack'],
+  singleView: true,
 };
+
+/**
+ * The nudge slider per camera: the speed (0.05-1 on the UI's slider) runs exponentially from the
+ * camera's slowest to its fastest percent. The firmware's rate is close to linear in the percent
+ * (measured on an S50 Pro, fw 9.75, 2026-11-04: 1% 0.03°/s, 10% 0.34°/s, 50% 1.35°/s, 100% 2.48°/s).
+ * Tele (1.4°×2.5° field): 1-30%, from a crawl for framing to about a field in 2 s. Wide: 5-100%,
+ * panning to get onto a target or look round the sky.
+ */
+export const NUDGE_CURVE = { tele: [1, 30], wide: [5, 100], degPerSPerPercent: 0.026, speedMin: 0.05 } as const;
+
+export function nudgePercent(speed: number, camera: 'tele' | 'wide'): number {
+  const [lo, hi] = NUDGE_CURVE[camera];
+  const t = Math.max(0, Math.min(1, (speed - NUDGE_CURVE.speedMin) / (1 - NUDGE_CURVE.speedMin)));
+  return Math.max(1, Math.min(NUDGE_MAX_PERCENT, Math.round(lo * (hi / lo) ** t)));
+}
+
+export const nudgeDegPerS = (percent: number) => Math.round(percent * NUDGE_CURVE.degPerSPerPercent * 1000) / 1000;
 
 /** The UI's operation words for what the Seestar is busy with. */
 const OPERATION: Record<string, string> = { goto: 'GoTo', parking: 'parking', autofocus: 'autofocus', 'polar alignment': 'polar alignment', 'dark library': 'dark library', stacking: '' };
@@ -128,7 +146,8 @@ export function projectState(scope: Pick<Seestar, 'state' | 'isBusy' | 'selected
     storage: st.storage.totalMB !== undefined ? { availableGB: gb(st.storage.freeMB) ?? 0, totalGB: gb(st.storage.totalMB) ?? 0 } : undefined,
     goto: { state: opWord(st.ops.AutoGoto), target },
     tracking: { state: st.mount.tracking === undefined ? 'idle' : st.mount.tracking ? 'running' : 'idle', target: st.mount.tracking ? target : undefined },
-    focusPosition: st.focus.position,
+    focusPosition: scope.selected === 'wide' ? st.wideFocus.position : st.focus.position,
+    focusPositions: { tele: st.focus.position, wide: st.wideFocus.position },
     autofocus: { state: opWord(st.ops.AutoFocus) },
     fov: { tele: st.fov ?? NOMINAL_FOV },
     capture: {},
@@ -176,7 +195,13 @@ export function seestarMedia(scope: Seestar): SeestarMedia {
     img.capturedAt = Date.now();
     return { img, encoded: shot.jpeg };
   };
-  const survey = new SeestarSurvey(scope, async () => (await liveFrame('wide')).img);
+  // the survey works from the wide's live frames as they come (bin 2, 1080×1920): no resolution
+  // switch per frame, which would restart the exposures every time
+  const survey = new SeestarSurvey(scope, async () => {
+    const { image, frame } = await scope.grabImage('wide', 'preview');
+    image.capturedAt = Date.now();
+    return { image, jpeg: frame.payload.subarray(0, 2).equals(JPEG_SOI) ? frame.payload : undefined };
+  });
   return { hub, capture, storage: seestarStorage(new SeestarFiles(scope)), survey, liveFrame };
 }
 
@@ -184,15 +209,22 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
   const control = async (b: ControlAction): Promise<unknown> => {
     switch (b.action) {
       case 'nudge': {
-        // the UI's angle is the screen's (0 up, 90 right), the Seestar's the math one (0 right, 90 up);
-        // the UI's speed is the stick's throw (0-1): the app's percent. A held arrow sends these
-        // faster than they run out, each taking the move over; the answer comes as soon as the
-        // scope has the command, so the next one is not held behind the stop.
-        await scope.nudge(90 - b.angle, Math.max(1, Math.round(b.speed * NUDGE_MAX_PERCENT)), Math.min(NUDGE_MAX_S, b.ms / 1000), { wait: false });
-        return { ok: true };
+        // the UI's angle is the screen's (0 up, 90 right), the Seestar's the math one (0 right, 90 up).
+        // The speed (the slider, 0-1) runs along the curve of the camera in the main view: the tele
+        // nudges for framing, the wide pans. A held arrow renews its press faster than it runs out
+        // (device.ts keeps one move going); the answer does not wait for the scope.
+        const camera = scope.selected;
+        const pct = nudgePercent(b.speed, camera);
+        await scope.nudge(90 - b.angle, pct, Math.min(NUDGE_MAX_S, b.ms / 1000), { wait: false, press: b.press });
+        return { ok: true, camera, percent: pct, degPerS: nudgeDegPerS(pct) };
       }
       case 'stop': {
-        // the UI's stop ends whatever runs: hand movement, an operation, a stack
+        // the UI's stop ends whatever runs: hand movement, an operation, a stack. A press's own
+        // release (press set) only ends that hand movement.
+        if (b.press) {
+          await scope.stopMotion(b.press);
+          return { ok: true, stopped: ['hand movement'] };
+        }
         const { stopped } = await scope.stopWork();
         if (!stopped.includes('hand movement')) await scope.stopMotion();
         return { ok: true, stopped };
@@ -260,8 +292,10 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
         // the Seestar's autofocus is a star autofocus: the astro one is the same
         return { result: `autofocus ${(await scope.autofocus()).state}` };
       case 'focus': {
-        const at = await scope.focusBy(b.direction === 'near' ? -b.steps : b.steps);
-        return { result: `focuser at ${at ?? '?'}` };
+        // the focuser of the camera in the main view (the one being looked at); each camera has its own
+        const camera = scope.selected;
+        const at = await scope.focusBy(b.direction === 'near' ? -b.steps : b.steps, camera);
+        return { result: `${camera} focuser at ${at ?? '?'}` };
       }
       case 'star_measure': {
         // one full-resolution tele frame, measured; the plate scale comes from the tele field
@@ -376,6 +410,7 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
       return projectState(scope);
     },
     capabilities: CAPABILITIES,
+    nudgeCurve: NUDGE_CURVE,
     hub,
     location: () => scope.location(),
     requireLocation: () => scope.requireLocation(),
@@ -388,9 +423,9 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
     routes,
     wireLines: (n, o) => scope.link.wireLines(n, o),
     horizonSurvey: {
-      start: async () => ({ summary: (await survey.run()).summary }),
+      start: async (o) => ({ summary: (await survey.run({ rehearsal: o.rehearsal })).summary }),
       stop: async () => survey.stop(),
-      assertAllowed: () => survey.assertAllowed(),
+      assertAllowed: (o) => survey.assertAllowed(o),
     },
     on: (event, fn) => scope.on(event === 'state' ? 'state' : 'event', wrap(event, fn)),
     off: (event, fn) => {

@@ -50,6 +50,12 @@ export interface Capabilities {
   wire: boolean;
   /** the live views the telescope serves */
   video: Array<'tele' | 'wide' | 'stack'>;
+  /**
+   * One camera exposes at a time (the Seestar): the UI shows one view with a tele/wide switch, the
+   * tele showing the live stack while it stacks, instead of a main view and thumbnails that would
+   * compete for the camera.
+   */
+  singleView?: boolean;
 }
 
 /** A GoTo the shared routes have resolved and checked (altitude, the Sun). */
@@ -73,6 +79,8 @@ export interface WebTelescope {
   /** what the UI renders (see the module comment) */
   readonly state: Record<string, unknown> & { connected: boolean; released: boolean };
   readonly capabilities: Capabilities;
+  /** the nudge slider's percent range per camera (the UI shows the rate); absent: the speed is passed as it is */
+  readonly nudgeCurve?: { tele: readonly [number, number]; wide: readonly [number, number]; degPerSPerPercent: number; speedMin: number };
   readonly hub: VideoHub;
   location(): ObserverLocation | null;
   requireLocation(): ObserverLocation;
@@ -85,7 +93,8 @@ export interface WebTelescope {
   control(b: ControlAction): Promise<unknown>;
   goto(t: GotoTarget): Promise<unknown>;
   /** the obstruction survey, where the driver can run one */
-  horizonSurvey?: { start(o: { calibrate?: boolean }): Promise<{ summary: string }>; stop(): Promise<unknown>; assertAllowed(): void };
+  /** rehearsal (the Seestar's): everything but the sky, and no mask saved — for checking the mechanics */
+  horizonSurvey?: { start(o: { calibrate?: boolean; rehearsal?: boolean }): Promise<{ summary: string }>; stop(): Promise<unknown>; assertAllowed(o?: { rehearsal?: boolean }): void };
   /** recent link traffic for /api/wire */
   wireLines?(n: number, o: { notifications: boolean }): string[];
   /** driver-only API under /api (the Seestar's tunnel and raw RPC) */

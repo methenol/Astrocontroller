@@ -62,6 +62,21 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
   server.on('upgrade', onUpgrade);
 
   // ---- video
+  // One small copy per frame, shared by every viewer: the longest side fits LIVE_STREAM_WIDTH (a
+  // portrait Seestar frame, 1080×1920, would pass a width-only limit of 1280 untouched).
+  const small = new WeakMap<Buffer, Promise<Buffer>>();
+  const smallCopy = (jpeg: Buffer): Promise<Buffer> => {
+    let p = small.get(jpeg);
+    if (!p) {
+      const side = config.web.liveWidth;
+      p = sharp(jpeg, { failOn: 'none' })
+        .resize({ width: side, height: side, fit: 'inside', withoutEnlargement: true, fastShrinkOnLoad: true })
+        .jpeg({ quality: 78, mozjpeg: false })
+        .toBuffer();
+      small.set(jpeg, p);
+    }
+    return p;
+  };
   videoWss.on('connection', (ws) => {
     const subs = new Map<string, () => void>();
     const busy = new Set<number>();
@@ -69,10 +84,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
       // Slow client or a resize still in flight: skip this frame rather than queue it.
       if (ws.readyState !== ws.OPEN || ws.bufferedAmount > VIDEO_BACKLOG_BYTES || busy.has(idx)) return;
       busy.add(idx);
-      sharp(f.jpeg)
-        .resize({ width: config.web.liveWidth, withoutEnlargement: true })
-        .jpeg({ quality: 78 })
-        .toBuffer()
+      smallCopy(f.jpeg)
         .then((small) => {
           if (ws.readyState !== ws.OPEN) return;
           const header = Buffer.alloc(9);

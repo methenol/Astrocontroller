@@ -20,8 +20,10 @@ const camera = z.enum(['tele', 'wide']).optional();
 const num = z.coerce.number().refine(Number.isFinite, 'must be a number');
 
 export const ControlBody = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('nudge'), angle: num.default(0), speed: num.min(0).max(1).default(0.5), ms: num.int().min(50).max(5000).default(600) }),
-  z.object({ action: z.enum(['stop', 'home', 'park', 'level', 'goto_stop', 'polar_align', 'polar_stop', 'sync', 'liveview', 'reboot', 'shutdown']) }),
+  // press: the web press a held arrow renews (its release stops it, and only it)
+  z.object({ action: z.literal('nudge'), angle: num.default(0), speed: num.min(0).max(1).default(0.5), ms: num.int().min(50).max(5000).default(600), press: z.string().max(64).optional() }),
+  z.object({ action: z.literal('stop'), press: z.string().max(64).optional() }),
+  z.object({ action: z.enum(['home', 'park', 'level', 'goto_stop', 'polar_align', 'polar_stop', 'sync', 'liveview', 'reboot', 'shutdown']) }),
   z.object({ action: z.literal('photo'), camera }),
   z.object({ action: z.literal('burst'), camera, count: num.int().default(10) }),
   z.object({ action: z.literal('record'), camera, on: z.boolean().optional() }),

@@ -25,6 +25,7 @@ export function publicConfig(scope: WebTelescope) {
     driver: scope.driver,
     driverLabel: scope.label,
     capabilities: scope.capabilities,
+    nudgeCurve: scope.nudgeCurve ?? null,
     // Starfront's autonomous nights: offered on the agent tab only when this is on
     starfront: config.starfront.available,
     telescope: host.host,

@@ -363,7 +363,7 @@ test('the obstruction map card: empty, a map with its plot, clear reloads the pl
   await until(() => calls.some((c) => c.method === 'POST' && c.path === 'horizon/survey'), 'the survey request');
 });
 
-test('a held nudge arrow nudges at once, and the stop on release reaches the server after that nudge', async () => {
+test('a held nudge arrow is one press: it nudges at once, and its release stops that press at once and again after the nudge on the wire', async () => {
   openTab('view');
   let answer!: () => void;
   const held = new Promise<void>((r) => (answer = r));
@@ -377,17 +377,23 @@ test('a held nudge arrow nudges at once, and the stop on release reaches the ser
   await tick();
   const nudges = calls.filter((c) => (c.body as { action?: string })?.action === 'nudge');
   assert.equal(nudges.length, 1);
-  assert.deepEqual(nudges[0].body, { action: 'nudge', angle: Number(arrow.dataset.nudge), speed: 0.4, ms: 700 });
+  const body = nudges[0].body as { press: string };
+  assert.match(body.press, /^\w+-\d+$/);
+  assert.deepEqual(body, { action: 'nudge', angle: Number(arrow.dataset.nudge), speed: 0.4, ms: 1500, press: body.press });
   // another pointer's release is not this press ending
   pointer(arrow, 'pointerup', 8);
+  await tick();
+  assert.equal(calls.filter((c) => (c.body as { action?: string })?.action === 'stop').length, 0);
   pointer(arrow, 'pointerup', 7);
   await tick();
-  assert.equal(calls.filter((c) => (c.body as { action?: string })?.action === 'stop').length, 0, 'the stop waits for the nudge on the wire');
+  // the stop names the press and does not wait for the nudge still on the wire (the server ignores a late renewal of a stopped press)
+  const stops = () => calls.filter((c) => (c.body as { action?: string })?.action === 'stop');
+  assert.equal(stops().length, 1);
+  assert.deepEqual(stops()[0].body, { action: 'stop', press: body.press });
   answer();
-  await until(() => calls.some((c) => (c.body as { action?: string })?.action === 'stop'), 'the stop');
+  await until(() => stops().length === 2, 'the second stop');
   const order = calls.map((c) => (c.body as { action?: string })?.action);
-  assert.ok(order.lastIndexOf('nudge') < order.indexOf('stop'));
-  assert.equal(order.filter((a) => a === 'stop').length, 1);
+  assert.ok(order.lastIndexOf('nudge') < order.lastIndexOf('stop'));
 });
 
 test('attachments: at most 8, images only, and one can be removed', async () => {
