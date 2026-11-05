@@ -37,10 +37,15 @@ const log = logger('seestar.horizon');
 
 /** The anchor: a sky position this high, toward the south (north in the southern hemisphere). */
 const ANCHOR_ALT = 65;
-/** Frame centres: the wide frame is ~31° across and ~54° tall (portrait), so these cover about −10…65°. */
-const RINGS = [15, 40];
-const HIGH_RING = 62;
-const AZ_STEP = 20;
+/**
+ * Frame centres: the wide frame is ~31° across and ~54° tall (portrait), so one ring at 22° covers
+ * about −5…49° (tilted on the wedge it still spans ±27°), and a ring higher up is added only where
+ * an obstruction ran off the top. A RAW frame per pointing takes ~20 s over Wi-Fi, so pointings
+ * are kept few.
+ */
+const RINGS = [22];
+const HIGH_RING = 55;
+const AZ_STEP = 24;
 /** The wide camera's horizontal field (the short side), measured 2026-11-04: 67-70 px/° on the 2160 px frame. */
 export const WIDE_HFOV_DEG = 31;
 /** Verified stars the anchor's wide frame needs: fewer and the focus is swept; still fewer and the survey stops. */
@@ -48,9 +53,57 @@ const ANCHOR_STARS_GOOD = 25;
 const ANCHOR_STARS_MIN = 8;
 /** The wide focus sweep around the factory position (steps), judged on the verified star count. */
 const FOCUS_OFFSETS = [-60, -40, -20, 0, 20, 40, 60];
-/** The anchor's sky level (darkest channel) is wanted at least this bright; the live exposure goes up to 2 s for it. */
-const SKY_LOW = 10 / 255;
-const LONG_EXPOSURE_MS = 2000;
+/**
+ * The survey's frames are the wide's RAW subs, not its live JPEGs: in a star view the JPEG is
+ * auto-exposed and tone-mapped (exposure, gain and the ISP settings change nothing), and at a
+ * light-polluted site a porch-lit wall, a dark window and the sky came out within a few levels of
+ * each other (2026-11-05). RAW at 4 s, gain as it is: sky ~256 counts above the black level
+ * (σ ~95), the lit wall 2.5× that in its darkest channel and warm, the window darker than the sky.
+ * The survey runs at 3 s (the live JPEG's cadence is ~3 s anyway).
+ *
+ * The JPEGs are still the better source of stars (corrected by the camera, low noise per pixel; in
+ * RAW the 7σ cut passed 3 stars where the JPEG had 71): each pointing takes its confirmed stars
+ * from two JPEG frames and its evidence (levels, colour, texture) from one RAW frame. The two share
+ * the evidence grid (240 cells across either way) and the mount tracks between them.
+ */
+const RAW_EXPOSURE_MS = 3000;
+/** The 12-bit sensor's offset in the 16-bit RAW counts (measured 2026-11-05: values step by 64, the shadows sit at 4096). */
+const RAW_BLACK = 4096 / 65535;
+/**
+ * The wide lens's vignetting in RAW (the JPEG path corrects it, RAW does not): the sky's level by
+ * distance from the centre (0 = centre, 1 = corner) in 0.1 steps, measured on a sky frame near the
+ * zenith (2026-11-05, green channel; red and blue agree within their 64-count steps). Uncorrected,
+ * the frame's dim edges read as dark obstructions.
+ */
+export const WIDE_VIGNETTING = [1, 0.95, 0.9, 0.85, 0.75, 0.7, 0.6, 0.55, 0.5, 0.45];
+
+/** The vignetting at a pixel's distance from the centre (fraction of the half-diagonal), interpolated. */
+export function vignetting(r: number): number {
+  const t = Math.max(0, Math.min(WIDE_VIGNETTING.length - 1, r * WIDE_VIGNETTING.length - 0.5));
+  const k = Math.floor(t);
+  const f = t - k;
+  return WIDE_VIGNETTING[k] * (1 - f) + (WIDE_VIGNETTING[Math.min(k + 1, WIDE_VIGNETTING.length - 1)] ?? WIDE_VIGNETTING[k]) * f;
+}
+
+/** RAW → black level off, flat-fielded (vignetting), times `scale`, clamped to 0..1. */
+export function flattenRaw(img: FloatImage, scale: number): FloatImage {
+  const { width: W, height: H } = img;
+  const cx = W / 2;
+  const cy = H / 2;
+  const R = Math.hypot(cx, cy);
+  const data = new Float32Array(img.data.length);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const g = scale / vignetting(Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / R);
+      const o = (y * W + x) * 3;
+      for (let c = 0; c < 3; c++) data[o + c] = Math.max(0, Math.min(1, (img.data[o + c] - RAW_BLACK) * g));
+    }
+  }
+  return { ...img, data, linear: false };
+}
+
+/** RAW frames are scaled so the anchor's sky (its darker cells) sits here, where the evidence's thresholds were set. */
+const SKY_NORM = 40 / 255;
 const MARGIN_DEG = 1;
 const SUN_DOWN_DEG = -12;
 const DEADLINE_MS = 27 * 60_000;
@@ -128,8 +181,10 @@ export class SeestarSurvey {
 
   constructor(
     private readonly scope: Seestar,
-    /** the next wide frame */
+    /** the next wide frame (the live JPEG) */
     private readonly wideFrame: () => Promise<WideFrame>,
+    /** one RAW wide frame, exposed after the call (linear, half-size colour); without it the JPEGs are used */
+    private readonly rawFrame?: () => Promise<FloatImage>,
   ) {}
 
   get isRunning(): boolean {
@@ -219,7 +274,28 @@ export class SeestarSurvey {
             log.warn(`survey: wide focuser at ${was}, factory ${factory}: moving it back`);
           }
           if (factory !== null) await this.scope.focusTo(factory, 'wide');
+          // the survey's exposure (the RAW frames'; the JPEG is auto-exposed whatever it is), put back after
           const cont = await this.scope.liveExposureMs('wide').catch(() => null);
+          if (this.rawFrame) {
+            await this.scope.setExposure({ continuousMs: RAW_EXPOSURE_MS }, 'wide');
+            if (cont !== null) restore.push(() => this.scope.setExposure({ continuousMs: cont }, 'wide'));
+            notes.push(`frames: the wide camera's RAW subs at ${RAW_EXPOSURE_MS / 1000} s for the evidence (its live JPEG is auto-exposed and flattens the scene), its JPEGs for the stars`);
+          }
+          let scale: number | null = null;
+          /** RAW → the black level off, scaled so the anchor's sky reads SKY_NORM (a JPEG frame is left as it is) */
+          const norm = (img: FloatImage): FloatImage => {
+            if (!img.linear) return img;
+            if (scale === null) {
+              const flat = flattenRaw(img, 1);
+              const v: number[] = [];
+              for (let i = 0; i < flat.data.length; i += 3 * 37) v.push(Math.min(flat.data[i], flat.data[i + 1], flat.data[i + 2]));
+              v.sort((a, b) => a - b);
+              const sky = v[Math.floor(v.length * 0.3)] ?? 0;
+              scale = SKY_NORM / Math.max(64 / 65535, sky);
+              log.info(`survey: RAW sky ${(sky * 65535).toFixed(0)} counts above black, scale ${scale.toFixed(1)}`);
+            }
+            return flattenRaw(img, scale);
+          };
           /** cells of the sensor's hot pixels (found at the anchor), cleared from every frame */
           let hot: Uint8Array | null = null;
           /** A settled frame and its statistics, its stars confirmed by the frame before it. */
@@ -232,7 +308,20 @@ export class SeestarSurvey {
             const before = frameStats((await this.wideFrame()).image);
             checkStop();
             const f = await this.wideFrame();
-            return { ...f, stats: dropStars(confirmStars(frameStats(f.image), before), hot) };
+            return { image: f.image, jpeg: f.jpeg, stats: dropStars(confirmStars(frameStats(f.image), before), hot) };
+          };
+          /**
+           * The pointing's frame for the evidence: a RAW frame (flat-fielded and scaled), its stars the
+           * JPEGs' (`stars`, confirmed); without RAW, the JPEG frame itself.
+           */
+          const evidenceFrame = async (jpeg: WideFrame & { stats: CellStats }): Promise<WideFrame & { stats: CellStats }> => {
+            if (!this.rawFrame) return jpeg;
+            checkStop();
+            const image = norm(await this.rawFrame());
+            const stats = frameStats(image);
+            if (stats.gw === jpeg.stats.gw && stats.gh === jpeg.stats.gh) stats.stars.set(jpeg.stats.stars);
+            else stats.stars.fill(0);
+            return { image, stats };
           };
           let anchor = await fresh();
           let anchorStats = anchor.stats;
@@ -250,19 +339,16 @@ export class SeestarSurvey {
             anchorStats = dropStars(moved.stats, hot);
           }
           let level = skyLevelOf(anchorStats);
-          if (level < SKY_LOW && cont !== null && cont < LONG_EXPOSURE_MS) {
-            await this.scope.setExposure({ continuousMs: LONG_EXPOSURE_MS }, 'wide');
-            restore.push(() => this.scope.setExposure({ continuousMs: cont }, 'wide'));
-            notes.push(`the sky read ${Math.round(level * 255)}/255 at ${cont} ms, so the stills were taken at ${LONG_EXPOSURE_MS} ms`);
-            anchor = await fresh();
-            anchorStats = anchor.stats;
-            level = skyLevelOf(anchorStats);
-          }
           let stars = starCount(anchorStats);
           log.info(`survey anchor (wide): ${stars} verified stars, sky ${(level * 255).toFixed(1)}/255, focuser ${this.scope.state.wideFocus.position ?? '?'}`);
           if (stars < ANCHOR_STARS_GOOD && factory !== null && !o.rehearsal) {
             // soft or faint: sweep the focuser round the factory position on the star count
             let best = { pos: factory, stars, stats: anchorStats, img: anchor };
+            // stopped (or failed) in the middle of the sweep: the focuser goes back where it was
+            restore.push(async () => {
+              if (!sweptFocus) await this.scope.focusTo(factory, 'wide');
+            });
+            let sweptFocus = false;
             for (const off of FOCUS_OFFSETS) {
               if (!off) continue;
               checkStop();
@@ -275,6 +361,7 @@ export class SeestarSurvey {
               if (n > best.stars) best = { pos, stars: n, stats: st, img };
             }
             await this.scope.focusTo(best.pos, 'wide');
+            sweptFocus = true;
             if (best.pos !== factory) notes.push(`the wide focus was best at ${best.pos} (${best.stars} stars; ${stars} at the factory ${factory})`);
             ({ stars, stats: anchorStats, img: anchor } = best);
             level = skyLevelOf(anchorStats);
@@ -282,6 +369,11 @@ export class SeestarSurvey {
           if (stars < ANCHOR_STARS_MIN && !o.rehearsal) {
             throw new Error(`the wide camera shows ${stars} stars at the anchor (at least ${ANCHOR_STARS_MIN} are needed): cloud, dew on the lens, or the roof is closing. Nothing was mapped.`);
           }
+          // the sky reference from the anchor's RAW frame (the scale for every RAW frame is set by it)
+          const anchorRaw = await evidenceFrame({ ...anchor, stats: anchorStats });
+          anchor = anchorRaw;
+          anchorStats = anchorRaw.stats;
+          level = skyLevelOf(anchorStats);
           const texture = skyTexture(anchorStats, level);
           const pole = mountPole(!!this.scope.state.mount.eqMode, site.lat);
           const keeper = new FrameKeeper(id);
@@ -293,7 +385,7 @@ export class SeestarSurvey {
             return { stats, thumb: thumbOf(img), cam: cameraGeom(img.width, img.height, WIDE_HFOV_DEG), basis: frameBasis(p.azDeg, p.altDeg, pole), alt: p.altDeg, az: p.azDeg, file: await keeper.keep(img, f.jpeg) };
           };
           const shoot = async (): Promise<Shot> => {
-            const f = await fresh();
+            const f = await evidenceFrame(await fresh());
             return shotOf(f, f.stats);
           };
           // the anchor frame is a sky frame of the survey too

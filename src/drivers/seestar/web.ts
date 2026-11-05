@@ -18,10 +18,10 @@ import { body, route } from '../../web/http.js';
 import { unsupported, type Capabilities, type GotoTarget, type WebTelescope } from '../../web/telescope.js';
 import type { ControlAction } from '../../web/routes/control.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
-import { SeestarCapture } from './capture.js';
+import { bayerFits, SeestarCapture } from './capture.js';
 import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
 import { NOMINAL_FOV, seestarFocusSweep } from './focus.js';
-import { frameImage, JPEG_SOI } from './frames.js';
+import { frameImage, framePixels, JPEG_SOI } from './frames.js';
 import { SeestarVideoHub } from './hub.js';
 import type { SeestarEvent } from './link.js';
 import { isStacking, TERMINAL_STATES, type OperationState, type SeestarState } from './model.js';
@@ -201,7 +201,7 @@ export function seestarMedia(scope: Seestar): SeestarMedia {
     const { image, frame } = await scope.grabImage('wide', 'preview');
     image.capturedAt = Date.now();
     return { image, jpeg: frame.payload.subarray(0, 2).equals(JPEG_SOI) ? frame.payload : undefined };
-  });
+  }, async () => frameImage(await scope.grabRaw('wide'), 'wide'));
   return { hub, capture, storage: seestarStorage(new SeestarFiles(scope)), survey, liveFrame };
 }
 
@@ -379,6 +379,18 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
       route(async (req) => {
         const b = body(req, z.object({ method: z.string().min(1), params: z.unknown().optional() }));
         return scope.raw(b.method, b.params);
+      }),
+    );
+    // one raw (Bayer, 16-bit) frame of a camera as FITS, for measuring the sensor's real levels; nothing is saved
+    api.get(
+      '/seestar/raw.fits',
+      route(async (req, res) => {
+        const camera = req.query.camera === 'wide' ? 'wide' : 'tele';
+        const f = await scope.withCamera(camera, `a raw ${camera} frame`, () => scope.grabRaw(camera));
+        const { width, height } = f.header;
+        const px = framePixels(f.payload, width * height * 2, `raw frame of ${f.payload.length} B`);
+        res.setHeader('Cache-Control', 'no-store');
+        res.type('application/fits').send(bayerFits(px, width, height, { BAYERPAT: 'GRBG', WIDECAM: camera === 'wide' ? 1 : 0 }));
       }),
     );
     api.get(

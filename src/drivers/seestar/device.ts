@@ -373,7 +373,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     if (typeof cont === 'number' && !LIVE_EXPOSURE_OPTIONS.includes(cont)) await this.call('set_setting', { exp_ms: { continuous: 1000 } }).catch((e) => log.warn(`live exposure: ${errMsg(e)}`));
   }
 
-  private setTransferMode(camera: Camera, mode: 'Jpg' | 'Raw'): Promise<RpcResponse> {
+  setTransferMode(camera: Camera, mode: 'Jpg' | 'Raw'): Promise<RpcResponse> {
     return this.call('set_setting', { wide_cam: camera === 'wide', preview: { image_transfer_mode: mode, raw_bin2: mode === 'Jpg' } });
   }
 

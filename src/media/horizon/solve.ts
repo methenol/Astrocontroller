@@ -54,15 +54,17 @@ function cellAltitudes(s: SurveyShot): Float32Array {
 export interface SkyModel {
   /** the sky level (darkest channel, 0..1) at an altitude */
   at(altDeg: number): number;
-  /** the bands measured: altitude (centre) → level */
-  bands: Array<{ alt: number; level: number; cells: number }>;
+  /** the sky's chromaticity at an altitude (null: no band measured it) */
+  colourAt(altDeg: number): { r: number; b: number } | null;
+  /** the bands measured: altitude (centre) → level and colour */
+  bands: Array<{ alt: number; level: number; r: number; b: number; cells: number }>;
 }
 
 /** The sky's level by altitude, from the cells that are certainly sky (see the file comment). */
 export function skyByAltitude(shots: SurveyShot[], anchorLevel: number, alts = shots.map(cellAltitudes)): SkyModel {
-  const per = new Map<number, number[]>();
+  const per = new Map<number, Array<[number, number, number]>>();
   shots.forEach((s, k) => {
-    const { gw, gh, dark, darkLow, stars, texture } = s.stats;
+    const { gw, gh, dark, stars, texture, cr, cb } = s.stats;
     // texture against the frame's own sky-like cells: the certain sky is the smooth part
     const tx = Array.from(texture).sort((a, b) => a - b);
     const smooth = tx[Math.floor(tx.length * 0.5)] ?? 0;
@@ -75,39 +77,42 @@ export function skyByAltitude(shots: SurveyShot[], anchorLevel: number, alts = s
           const xx = gx + dx;
           if (yy >= 0 && yy < gh && xx >= 0 && xx < gw) star += stars[yy * gw + xx];
         }
-        if (!star || darkLow[i] < 0.6 * anchorLevel || texture[i] > smooth * 1.5) continue;
+        // certain sky: a verified star, smooth, and not a silhouette (the high sky is darker than the anchor's, so
+        // the test is the median against a low bar, not the darker quartile)
+        if (!star || dark[i] < 0.3 * anchorLevel || texture[i] > smooth * 1.5) continue;
         const band = Math.floor(alts[k][i] / BAND_DEG);
         if (alts[k][i] < 0) continue;
         let list = per.get(band);
         if (!list) per.set(band, (list = []));
-        list.push(dark[i]);
+        list.push([dark[i], cr[i], cb[i]]);
       }
     }
   });
   const bands = [...per.entries()]
     .filter(([, v]) => v.length >= BAND_MIN_CELLS)
     .map(([b, v]) => {
-      v.sort((x, y) => x - y);
-      const level = Math.max(SKY_MODEL_RANGE[0] * anchorLevel, Math.min(SKY_MODEL_RANGE[1] * anchorLevel, v[Math.floor(v.length / 2)]));
-      return { alt: (b + 0.5) * BAND_DEG, level, cells: v.length };
+      const mid = (k: 0 | 1 | 2) => v.map((x) => x[k]).sort((x, y) => x - y)[Math.floor(v.length / 2)];
+      const level = Math.max(SKY_MODEL_RANGE[0] * anchorLevel, Math.min(SKY_MODEL_RANGE[1] * anchorLevel, mid(0)));
+      return { alt: (b + 0.5) * BAND_DEG, level, r: mid(1), b: mid(2), cells: v.length };
     })
     .sort((a, b) => a.alt - b.alt);
-  const at = (alt: number): number => {
-    if (!bands.length) return anchorLevel;
-    if (alt <= bands[0].alt) return bands[0].level;
+  const interp = (alt: number, key: 'level' | 'r' | 'b'): number => {
+    if (alt <= bands[0].alt) return bands[0][key];
     const last = bands[bands.length - 1];
-    if (alt >= last.alt) return last.level;
+    if (alt >= last.alt) return last[key];
     for (let k = 1; k < bands.length; k++) {
       if (alt <= bands[k].alt) {
         const a = bands[k - 1];
         const b = bands[k];
         const t = (alt - a.alt) / (b.alt - a.alt);
-        return a.level + t * (b.level - a.level);
+        return a[key] + t * (b[key] - a[key]);
       }
     }
-    return last.level;
+    return last[key];
   };
-  return { at, bands };
+  const at = (alt: number): number => (bands.length ? interp(alt, 'level') : anchorLevel);
+  const colourAt = (alt: number) => (bands.length ? { r: interp(alt, 'r'), b: interp(alt, 'b') } : null);
+  return { at, colourAt, bands };
 }
 
 export interface Solved {
@@ -145,7 +150,7 @@ export function solveShots(shots: SurveyShot[], o: { skyLevel: number; skyTextur
   const sky = skyByAltitude(shots, o.skyLevel, alts);
   const evidence = shots.map((s, k) => {
     const gw = s.stats.gw;
-    return evidenceOf(s.stats, (gx, gy) => sky.at(alts[k][gy * gw + gx]), { skyTexture: o.skyTexture, skyLevel: o.skyLevel });
+    return evidenceOf(s.stats, (gx, gy) => sky.at(alts[k][gy * gw + gx]), { skyTexture: o.skyTexture, skyLevel: o.skyLevel, skyColour: (gx, gy) => sky.colourAt(alts[k][gy * gw + gx]) });
   });
   const frames: PanoFrame[] = shots.map((s, k) => ({ evidence: evidence[k], cam: s.cam, basis: s.basis }));
   const sl = skyline(buildPanorama(frames));
