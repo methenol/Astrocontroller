@@ -193,15 +193,13 @@ export async function uploadFile(localFile: string, remotePath: string, onBytes?
   });
 }
 
-/** Download a job output (a server path from StudioJob.outputs) to a local file, via `<file>.part`. */
-export async function download(urlPath: string, localFile: string, signal?: AbortSignal): Promise<void> {
+/** Open a job output (a server path from StudioJob.outputs) for streaming; the body is unread. */
+export async function openOutput(urlPath: string, signal?: AbortSignal): Promise<Response & { body: ReadableStream<Uint8Array> }> {
   if (!urlPath.startsWith('/')) throw new StudioError(`bad output url ${urlPath}`);
-  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
-  const sig = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let res: Response;
   try {
     const { base, headers } = server();
-    res = await fetch(`${base}${urlPath}`, { headers, signal: sig });
+    res = await fetch(`${base}${urlPath}`, { headers, signal });
   } catch (err) {
     throw unreachable(err);
   }
@@ -210,6 +208,14 @@ export async function download(urlPath: string, localFile: string, signal?: Abor
     await res.body?.cancel().catch(() => undefined);
     throw new StudioError(`download ${urlPath}: HTTP ${res.status}`, res.status);
   }
+  return res as Response & { body: ReadableStream<Uint8Array> };
+}
+
+/** Download a job output (a server path from StudioJob.outputs) to a local file, via `<file>.part`. */
+export async function download(urlPath: string, localFile: string, signal?: AbortSignal): Promise<void> {
+  const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+  const sig = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const res = await openOutput(urlPath, sig);
   const tmp = `${localFile}.part`;
   try {
     await pipeline(Readable.fromWeb(res.body as never), fs.createWriteStream(tmp), { signal: sig });

@@ -533,6 +533,7 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .proc-item { padding: 6px 0; border-top: 1px solid var(--line); }
 .proc-item:first-child { border-top: none; }
 .proc-item button { float: right; min-height: 32px; padding: 0 10px; font-size: 12px; margin-left: 6px; }
+.proc-outputs a { color: var(--accent); word-break: break-all; }
 .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .badge.done { color: var(--ok); }
 .badge.failed { color: var(--err); }

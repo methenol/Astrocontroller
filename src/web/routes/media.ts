@@ -1,6 +1,8 @@
 /** Live snapshots, the SD-card album, the library, transfers, processing and agent captures. */
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
@@ -246,6 +248,27 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
       if (!sessions.length) throw badRequest('give session(s) or a target with sessions in the library');
       const target = b.target ?? library.parseSessionFolder(sessions[0])?.target ?? sessions[0];
       return processing.enqueueProcessing({ sessions, target, profile: b.profile || undefined, origin: 'ui' });
+    }),
+  );
+  // a finished job's output (JPEG, TIFF, JSON), shown in the browser: the library copy, or streamed from the server
+  api.get(
+    '/processing/:id/outputs/:name',
+    route(async (req, res) => {
+      const src = processing.outputSource(processing.getItem(String(req.params.id)), String(req.params.name));
+      if (!src) throw notFound('no such output');
+      if ('local' in src) {
+        if (!fs.existsSync(src.local)) throw notFound(`${src.name} is no longer in the library`);
+        await new Promise<void>((resolve, reject) => res.sendFile(src.local, (err) => (err && !res.headersSent ? reject(err) : resolve())));
+        return;
+      }
+      const ac = new AbortController();
+      res.on('close', () => ac.abort());
+      const up = await studio.openOutput(src.remote, ac.signal);
+      res.setHeader('Content-Type', up.headers.get('content-type') ?? 'application/octet-stream');
+      const len = up.headers.get('content-length');
+      if (len) res.setHeader('Content-Length', len);
+      res.setHeader('Content-Disposition', `inline; filename="${src.name.replace(/["\\\r\n]/g, '_')}"`);
+      await pipeline(Readable.fromWeb(up.body as never), res).catch(() => undefined);
     }),
   );
   api.post('/processing/:id/cancel', route(async (req) => processing.cancelItem(String(req.params.id))));

@@ -487,6 +487,28 @@ export class ProcessingQueue {
   }
 }
 
+/** Where a done item's output can be downloaded from: a local file in the library, or a path on the Studio server. */
+export type OutputSource = { local: string; name: string } | { remote: string; name: string };
+
+/**
+ * A done item's output by its file name, or null. Local outputs must lie inside the library;
+ * remote ones (ASTROPHOTO_FETCH_OUTPUTS off) must be on the configured Studio server.
+ */
+export function outputSource(it: ProcessingItem | undefined, name: string): OutputSource | null {
+  if (!it || it.state !== 'done' || !isPlainName(name)) return null;
+  const out = (it.outputs ?? []).find((o) => path.posix.basename(o.replace(/\\/g, '/')) === name);
+  if (!out) return null;
+  const base = config.studio.url ? withoutCredentials(config.studio.url).replace(/\/+$/, '') : '';
+  if (/^https?:\/\//i.test(out)) {
+    if (!base || !out.startsWith(`${base}/`)) return null;
+    return { remote: out.slice(base.length).replace(/^\/+/, '/'), name };
+  }
+  const lib = path.resolve(config.paths.library);
+  const file = path.resolve(out);
+  if (!file.startsWith(lib + path.sep)) return null;
+  return { local: file, name };
+}
+
 const outbox = new ProcessingQueue(studioApi, () => path.join(config.paths.data, 'processing.json'));
 
 export const processingBus = outbox.bus;

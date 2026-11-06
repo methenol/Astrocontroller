@@ -166,7 +166,12 @@ export function renderProcessing() {
       else if (i.state === 'submitted' && Number.isFinite(i.studio?.progress)) pct = percent(i.studio.progress, 1);
       const eta = i.state === 'submitted' && i.studio?.etaS != null ? ` · ETA ${Math.max(1, Math.round(i.studio.etaS / 60))} min` : '';
       const msg = i.lastError ?? i.studio?.message ?? i.message ?? '';
-      const outs = i.state === 'done' && i.outputs?.length ? `<div class="muted small">${i.outputs.map((p) => esc(baseName(p))).join(', ')}</div>` : '';
+      const outs = i.state === 'done' && i.outputs?.length
+        ? `<div class="proc-outputs small">${i.outputs.map((p) => {
+          const name = baseName(String(p).replace(/\\/g, '/'));
+          return `<a href="api/processing/${seg(i.id)}/outputs/${seg(name)}" target="_blank" rel="noopener" title="open ${esc(name)}">${esc(name)}</a>`;
+        }).join(', ')}</div>`
+        : '';
       const btn = CANCELLABLE.has(i.state) ? `<button class="ghost" data-proc-cancel="${esc(i.id)}">Cancel</button>` : RETRYABLE.has(i.state) ? `<button class="ghost" data-proc-retry="${esc(i.id)}">Retry</button>` : '';
       return `<div class="proc-item"><b>${esc(i.target)}</b> <span class="muted small">${esc(i.profile ?? '')}</span> <span class="badge ${esc(i.state)}">${esc(i.state)}</span>${btn}
         <div class="muted small">${esc(msg)}${eta}</div>${pct != null ? `<div class="progress"><div style="width:${pct}%"></div></div>` : ''}${outs}</div>`;

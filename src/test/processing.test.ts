@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
-import { ProcessingQueue, type StudioClient } from '../processing/queue.js';
+import { ProcessingQueue, outputSource, type StudioClient } from '../processing/queue.js';
 import { OutboxStore } from '../processing/store.js';
 import type { StudioJob } from '../processing/studio.js';
+import type { ProcessingItem } from '../processing/store.js';
 
 const S1 = 'DWARF_RAW_TELE_M 31_EXP_15_GAIN_60_2026-10-01-22-20-58-268';
 
@@ -239,5 +240,40 @@ describe('processing outbox', () => {
     assert.equal(q.enqueue({ sessions: [S1], target: 'M 31' }).id, a.id);
     q.stop();
     await q.settled();
+  });
+});
+
+describe('processing output downloads', () => {
+  const savedPaths = { ...config.paths };
+  const savedStudio = { ...config.studio };
+  const lib = path.join(os.tmpdir(), 'proc-out-lib');
+  const item = (over: Partial<ProcessingItem>): ProcessingItem => ({ id: 'p1', sessions: [S1], target: 'M 31', profile: 'default', kind: 'all', origin: 'ui', createdAt: 1, state: 'done', generation: 0, attempts: 0, ...over });
+
+  beforeEach(() => {
+    Object.assign(config.paths, { library: lib });
+    Object.assign(config.studio, { url: 'http://user:pw@studio.test:8112' });
+  });
+  afterEach(() => {
+    Object.assign(config.paths, savedPaths);
+    Object.assign(config.studio, savedStudio);
+  });
+
+  test('a local output in the library is found by its file name', () => {
+    const f = path.join(lib, S1, 'processed', 'M31.jpg');
+    assert.deepEqual(outputSource(item({ outputs: [f] }), 'M31.jpg'), { local: f, name: 'M31.jpg' });
+  });
+
+  test('a remote output (outputs not fetched) is a path on the configured server', () => {
+    assert.deepEqual(outputSource(item({ outputs: ['http://studio.test:8112/api/v1/jobs/j1/outputs/M31.tif'] }), 'M31.tif'), { remote: '/api/v1/jobs/j1/outputs/M31.tif', name: 'M31.tif' });
+  });
+
+  test('refuses unknown names, open items, paths outside the library and other hosts', () => {
+    const f = path.join(lib, S1, 'processed', 'M31.jpg');
+    assert.equal(outputSource(item({ outputs: [f] }), 'other.jpg'), null);
+    assert.equal(outputSource(item({ outputs: [f], state: 'submitted' }), 'M31.jpg'), null);
+    assert.equal(outputSource(item({ outputs: ['/etc/passwd'] }), 'passwd'), null);
+    assert.equal(outputSource(item({ outputs: ['http://evil.test/x.jpg'] }), 'x.jpg'), null);
+    assert.equal(outputSource(item({ outputs: [f] }), '..'), null);
+    assert.equal(outputSource(undefined, 'M31.jpg'), null);
   });
 });
