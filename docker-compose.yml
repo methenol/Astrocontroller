@@ -9,7 +9,8 @@ services:
     image: astrocontroller:latest
     container_name: ${CONTAINER_NAME:-astrocontroller}
     restart: unless-stopped
-    stop_grace_period: 15s
+    # the hub stops every profile's process at once; each needs a couple of seconds
+    stop_grace_period: 30s
     env_file: .env
     environment:
       # Fixed inside the container; the host side comes from .env.
@@ -26,8 +27,12 @@ services:
       # Agent home, sessions, skills, notes, captures. Give each driver its own
       # (DATA_PATH=./data-seestar for the Seestar) so the two agents do not mix.
       - ${DATA_PATH:-./data}:/data
-      # Your imagery library (FITS lights, stacks, calibration frames).
+      # Your imagery library (FITS lights, stacks, calibration frames). Each profile gets its own
+      # folder in it (/library/<profile id>); the migrated single-telescope setup keeps /library itself.
       - ${LIBRARY_PATH:-./library}:/library
+      # The ZWO Telescope Network handshake key: the official Seestar app's key, extracted from the APK,
+      # one for every ZWO connection (a Seestar on the LAN does not use it). SEESTAR_KEY_PATH=/keys/seestar.pem in .env.
+      - ${KEYS_PATH:-./keys}:/keys:ro
 
   # ZWO Telescope Network tunnel (seestar-portfwd/, vendored here from github.com/Phaeilo/seestar-portfwd),
   # for TELESCOPE_DRIVER=seestar
@@ -77,6 +82,11 @@ services:
       # the telescope (POST /connect and /disconnect on SEESTAR_TUNNEL_CONTROL_PORT). Set to 1 to
       # have the tunnel take the scope as soon as the container starts, as it used to.
       SEESTAR_TUNNEL_AUTOSTART: ${SEESTAR_TUNNEL_AUTOSTART:-0}
+      # One supervisor per ZWO profile (seestar-portfwd/src/manager.py): Astrocontroller's profile hub
+      # asks for a slot per Seestar it drives over ZWO, each with its own account, serial and ports
+      # (device port + slot*1000). SEESTAR_USER above, when set, still runs slot 0 as before.
+      SEESTAR_TUNNEL_MULTI: ${SEESTAR_TUNNEL_MULTI:-1}
+      SEESTAR_TUNNEL_MANAGER_PORT: ${SEESTAR_TUNNEL_MANAGER_PORT:-4709}
       SEESTAR_TUNNEL_CONTROL_PORT: ${SEESTAR_TUNNEL_CONTROL_PORT:-4710}
       # optional: both sides then require Authorization: Bearer <token>
       SEESTAR_TUNNEL_CONTROL_TOKEN: ${SEESTAR_TUNNEL_CONTROL_TOKEN:-}

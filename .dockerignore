@@ -14,3 +14,4 @@ data-*
 # the ZWO tunnel is built by its own service (seestar-portfwd/Containerfile); its 12 MB of
 # ThroughTek libraries and Python sources have no business in this image's build context
 seestar-portfwd
+keys

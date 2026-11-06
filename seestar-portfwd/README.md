@@ -278,3 +278,16 @@ and this note when copying it.
 Not affiliated with, endorsed, or supported by ZWO. All product and company
 names are the property of their respective owners and may be trademarks.
 Developed with Claude and Anthropic models. Use at your own risk.
+
+## Several telescopes in one container (`SEESTAR_TUNNEL_MULTI=1`)
+
+With `SEESTAR_TUNNEL_MULTI=1` the entry point is the multi-tunnel manager (`src/manager.py`) instead of a single supervisor. It answers on `SEESTAR_TUNNEL_MANAGER_PORT` (4709):
+
+| Request | Effect |
+|---|---|
+| `GET /health` | the manager is up (the image's healthcheck) |
+| `GET /tunnels` | every slot: serial, account, running, pid, ports |
+| `PUT /tunnels/<n>` `{"user","password","sn","country"}` | run slot *n*'s supervisor with this account (no-op if unchanged) |
+| `DELETE /tunnels/<n>` | stop slot *n*: its supervisor releases the telescope first |
+
+Slot *n* forwards each device port to local port + *n*×1000 (`TUTK_PORT_OFFSET` in `tunnel.c`), runs its control API on 4710 + *n*×1000 and keeps its session journal and source id in `/var/lib/seestar-portfwd/slot-<n>/`. Every device port is distinct modulo 1000, so slots never collide; 33 is the highest slot. Credentials live only in memory and in the supervisor's environment. Astrocontroller's profile hub sends them again every minute, so a restarted container gets its slots back by itself. If `SEESTAR_USER`/`SEESTAR_PASSWORD` are set on the container, slot 0 starts with them and with the original state paths, so a single-telescope setup works unchanged.

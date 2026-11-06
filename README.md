@@ -61,6 +61,26 @@ Requirements: Docker. The telescope must be in **STA mode** on your LAN (set thi
 
 Generated agent config (`models.yml`, `config.yml`, `mcp.json`) is rewritten from `.env` on every start under `data/home/.omp/agent/`.
 
+## Several telescopes: profiles
+
+One container can drive several telescopes at once, for example a Dwarf in the garden, a Seestar on the patio and two Seestars at Starfront over ZWO Telescope Network. Each one has its own agent, plan, site, weather and autonomous nights. The page at `http://localhost:8080` is the **profile hub**: a bar along the top switches between telescopes, and **Profiles** is where you create, edit, remove, activate and deactivate them.
+
+- **A profile** sets the telescope type (Dwarf or Seestar), its IP (on your LAN), its location (latitude, longitude, elevation, time zone) and, for a Seestar, the handshake key. A Seestar can instead use **ZWO Telescope Network** (account e-mail, password, serial), and that unlocks **Starfront mode** with a building picker taken from Starfront's roof service. You can add your own `NAME=value` variables under *More settings* (`PLAN_BORTLE`, `PLAN_DEVICE`, `LLM_MODEL`…). These apply to that profile only.
+- **Active profile**: it runs as its own Astrocontroller process and its UI opens in the hub. It connects to its telescope, its agent can be woken and chatted with, its plans run, and its autonomous nights fire if you enabled them in its own UI.
+- **Deactivated profile**: it has no process at all. Nothing ticks: no connection, no duty, no roof polling, no autonomous night, and the agent never wakes. Deactivating a ZWO profile also gives the scope back to the Telescope Network.
+- **Separate folders**: each profile has its own data folder (`data/profiles/<id>/`: the agent's home, workspace, notes, skills, chat history, sessions, plans) and its own library folder (`library/<id>/`), so the agents never mix.
+- **Shared from `.env`**: the LLM, AstroPhoto Studio, units, Stellarium, the default Seestar key and the tunnel's host and token. Telescope and site variables from `.env` (`DWARF_*`, `SEESTAR_*` connection settings, `OBSERVER_*`, `PLAN_*`, `STARFRONT_*`) are not handed down; each profile has its own.
+- **First start**: your current `.env` setup becomes one active profile that keeps its data and library folders as they were (`/data`, `/library`), so the agent keeps everything it learned. To bring in another copy of Astrocontroller, create a profile for it, then copy that copy's data folder into `data/profiles/<id>/` while the profile is deactivated.
+- **Editing an active profile**: the new settings apply when its process restarts. The hub asks whether to restart now.
+
+Each telescope also opens on its own at `http://localhost:8080/p/<id>/`, for a separate browser tab or a phone at the scope.
+
+**ZWO Telescope Network key.** Connections over ZWO Telescope Network are signed with the key that ships inside the official Seestar app (the PEM you extract from the APK). A Seestar on the LAN does not use it. It is the same key for every ZWO connection, so there is one for all ZWO profiles. It lives in `./keys/seestar.pem`, mounted read-only at `/keys`, with `SEESTAR_KEY_PATH=/keys/seestar.pem` in `.env`. A ZWO profile's card warns when the key is missing or unreadable.
+
+**Several Seestars over ZWO Telescope Network.** The `seestar-portfwd` container (`COMPOSE_PROFILES=seestar`) runs with `SEESTAR_TUNNEL_MULTI=1`: a small manager on port 4709 runs one tunnel supervisor per ZWO profile, each with its own account, serial, session state and ports. A profile in slot *n* reaches its scope on the device ports plus *n*×1000, so control 4700 becomes 5700, 6700 and so on. The hub assigns the ports and passes them on. The migrated setup keeps slot 0 with its old ports, so `docker-compose.seestar-ports.yml` still publishes that one.
+
+`docker compose up -d --build` rebuilds both containers. The single-telescope app without the hub is still `node dist/index.js`.
+
 ## Agent chat
 
 The Agent tab streams the agent's work as it happens:

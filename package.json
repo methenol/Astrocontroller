@@ -11,6 +11,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "hub": "node dist/hub/main.js",
+    "dev:hub": "tsc -p tsconfig.json && node --env-file-if-exists=.env dist/hub/main.js",
     "dev": "tsc -p tsconfig.json && node --env-file-if-exists=.env dist/index.js",
     "catalog": "tsc -p tsconfig.json && node dist/tools/build-catalog.js",
     "smoke": "node --env-file-if-exists=.env dist/tools/smoke.js",

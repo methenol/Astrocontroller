@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#050608">
+  <meta name="color-scheme" content="dark">
+  <title>Astrocontroller</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23111827' stroke='%2393c5fd' stroke-width='2'/><circle cx='16' cy='16' r='5' fill='%2393c5fd'/></svg>">
+  <link rel="apple-touch-icon" href="icons/icon-512.png">
+  <link rel="stylesheet" href="hub/hub.css">
+  <script type="module" src="hub/hub.js"></script>
+</head>
+<body>
+  <header class="hubbar">
+    <span class="logo" aria-hidden="true"></span>
+    <nav class="switcher" id="switcher" aria-label="Telescopes"></nav>
+    <a class="iconlink" id="open-tab" href="#" target="_blank" rel="noopener" title="Open this telescope in its own browser tab" hidden>↗</a>
+    <button type="button" class="manage" id="btn-manage" aria-pressed="false">Profiles</button>
+  </header>
+
+  <main class="stage">
+    <iframe id="frame" title="Telescope" allow="fullscreen; clipboard-write; geolocation; screen-wake-lock" hidden></iframe>
+
+    <section class="idle" id="idle" hidden>
+      <div class="card">
+        <h2 id="idle-name"></h2>
+        <p class="muted" id="idle-why"></p>
+        <pre class="output" id="idle-output" hidden></pre>
+        <div class="row">
+          <button type="button" class="primary" id="idle-activate">Activate</button>
+          <button type="button" id="idle-edit">Edit</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="manager" id="manager" hidden>
+      <div class="manager-head">
+        <h1>Telescope profiles</h1>
+        <button type="button" class="primary" id="btn-new">New profile</button>
+      </div>
+      <p class="muted small">Each active profile runs its own Astrocontroller: its own connection, agent (with its own home folder, notes and skills), night plan, weather and site. A deactivated profile runs nothing at all: no connection, no duty, no autonomous night, the agent never wakes.</p>
+      <div class="cards" id="cards"></div>
+    </section>
+  </main>
+
+  <dialog id="edit" class="sheet">
+    <form id="edit-form" method="dialog" novalidate>
+      <h2 id="edit-title">New profile</h2>
+
+      <label class="field">Name <input name="name" required maxlength="60" placeholder="Backyard Dwarf"></label>
+
+      <fieldset class="field">
+        <legend>Telescope</legend>
+        <label class="choice"><input type="radio" name="driver" value="dwarf" checked> DWARFLAB Dwarf</label>
+        <label class="choice"><input type="radio" name="driver" value="seestar"> ZWO Seestar</label>
+      </fieldset>
+
+      <div data-when="seestar">
+        <label class="choice"><input type="checkbox" name="zwo"> Connect over ZWO Telescope Network (a remote scope, e.g. at Starfront)</label>
+      </div>
+
+      <label class="field" data-when="local">Telescope IP or host name
+        <input name="host" inputmode="url" autocomplete="off" spellcheck="false" placeholder="">
+        <span class="hint" id="host-hint"></span>
+      </label>
+
+      <fieldset class="field" data-when="zwo">
+        <legend>ZWO account</legend>
+        <label class="field">E-mail <input name="user" type="email" autocomplete="off" spellcheck="false"></label>
+        <label class="field">Password <input name="password" type="password" autocomplete="new-password"></label>
+        <div class="grid2">
+          <label class="field">Serial number <input name="serial" autocomplete="off" spellcheck="false" placeholder="when the account has several"></label>
+          <label class="field">Country <input name="country" maxlength="8" placeholder="US"></label>
+        </div>
+        <label class="choice"><input type="checkbox" name="starfront"> Starfront mode (autonomous nights that follow the observatory roof)</label>
+        <label class="field" data-when="starfront">Building
+          <select name="building"></select>
+          <span class="hint" id="building-hint"></span>
+        </label>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>Location</legend>
+        <div class="grid2">
+          <label class="field">Latitude <input name="latitude" inputmode="decimal" placeholder="31.0"></label>
+          <label class="field">Longitude <input name="longitude" inputmode="decimal" placeholder="-98.5"></label>
+          <label class="field">Elevation (m) <input name="elevationM" inputmode="decimal" placeholder="0"></label>
+          <label class="field">Time zone <input name="timezone" list="zones" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <datalist id="zones"></datalist>
+        <button type="button" class="small-btn" id="btn-here">Use this device's location</button>
+      </fieldset>
+
+      <details class="field">
+        <summary>More settings for this telescope</summary>
+        <label class="field">Variables (one NAME=value per line; they win over .env for this profile only)
+          <textarea name="env" rows="5" spellcheck="false" placeholder="PLAN_BORTLE=4&#10;PLAN_DEVICE=seestar-s50&#10;LLM_MODEL=…"></textarea>
+        </label>
+        <p class="hint" id="paths"></p>
+      </details>
+
+      <p class="error" id="edit-error" role="alert"></p>
+      <div class="row end">
+        <button type="button" id="edit-cancel">Cancel</button>
+        <button type="submit" class="primary" id="edit-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm" class="sheet small">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text"></p>
+      <label class="choice" id="confirm-check-row" hidden><input type="checkbox" id="confirm-check"> <span id="confirm-check-label"></span></label>
+      <div class="row end">
+        <button value="cancel">Cancel</button>
+        <button value="ok" class="primary" id="confirm-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="output" class="sheet">
+    <form method="dialog">
+      <h2 id="output-title">Output</h2>
+      <pre class="output tall" id="output-text"></pre>
+      <div class="row end"><button value="close">Close</button></div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

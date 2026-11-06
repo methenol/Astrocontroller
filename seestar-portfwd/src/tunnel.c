@@ -102,7 +102,7 @@ static int control_selftest(unsigned short port) {
     return 0;
 }
 
-// Every known device service, each forwarded to the same local port. Two tunnel
+// Every known device service, each forwarded to the same local port (plus TUTK_PORT_OFFSET). Two tunnel
 // sessions mirror the app's control/bulk split. Add a line to forward more.
 struct portmap {
     unsigned short port;
@@ -374,25 +374,30 @@ int main(void) {
         }
     }
 
-    // Map each port onto its channel; a single failure is reported, not fatal.
-    printf("[*] forwarding %d ports:\n", NPORTS);
+    // Map each port onto its channel; a single failure is reported, not fatal. TUTK_PORT_OFFSET
+    // moves every local port up by that much (device port 4700 -> local 4700 + offset), so several
+    // tunnels, one per telescope, can share one network namespace (the multi-tunnel manager in
+    // src/supervisor.py gives slot n the offset n*1000). 0 = each port on its own number, as before.
+    int offset = env_int("TUTK_PORT_OFFSET", 0, 0, 33000);
+    printf("[*] forwarding %d ports%s:\n", NPORTS, offset ? " (offset)" : "");
     int mapped = 0;
     for (int i = 0; i < NPORTS; i++) {
         int ci = PORTS[i].channel >= nchan ? nchan - 1 : PORTS[i].channel;
-        PORTS[i].mapped = port_mapping(chan_sid[ci], PORTS[i].port, PORTS[i].port);
+        unsigned local = PORTS[i].port + (unsigned)offset;
+        PORTS[i].mapped = port_mapping(chan_sid[ci], local, PORTS[i].port);
         int ok = PORTS[i].mapped >= 0;
         if (ok) mapped++;
         if (ok) printf("    127.0.0.1:%-5u -> device:%-5u  ok (session %d)\n",
-                       PORTS[i].port, PORTS[i].port, ci);
+                       local, PORTS[i].port, ci);
         else printf("    127.0.0.1:%-5u -> device:%-5u  FAILED (%d, session %d)\n",
-                    PORTS[i].port, PORTS[i].port, PORTS[i].mapped, ci);
+                    local, PORTS[i].port, PORTS[i].mapped, ci);
     }
     if (mapped == 0) { fprintf(stderr, "[!] no port mappings succeeded\n"); return 1; }
 
     sleep(1);   // the mapping accept loops run on SDK threads
     for (int i = 0; i < NPORTS; i++) {
         if (PORTS[i].port == 4700 && PORTS[i].mapped >= 0) {
-            control_selftest(PORTS[i].port);
+            control_selftest((unsigned short)(PORTS[i].port + offset));
             break;
         }
     }

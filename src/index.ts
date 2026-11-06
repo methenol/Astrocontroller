@@ -39,8 +39,8 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-server.listen(config.web.port, () => {
-  log.info(`Astrocontroller on http://0.0.0.0:${config.web.port}  (MCP at /mcp, driver ${driver.id}: ${runtime.describeTarget()})`);
+const onListen = () => {
+  log.info(`Astrocontroller on http://${config.web.bind || '0.0.0.0'}:${config.web.port}  (MCP at /mcp, driver ${driver.id}: ${runtime.describeTarget()})`);
   // null = not set; 0 is a real latitude (the equator) or longitude (Greenwich)
   if (config.observer.latitude === null || config.observer.longitude === null) log.warn('OBSERVER_LATITUDE / OBSERVER_LONGITUDE not set — planning, calibration and GoTo need them');
   runtime.start();
@@ -53,7 +53,9 @@ server.listen(config.web.port, () => {
   if (config.agent.enabled) {
     agent.start(`http://127.0.0.1:${config.web.port}/mcp`).catch((e) => log.error(`agent failed to start: ${errMsg(e)}`));
   }
-});
+};
+if (config.web.bind) server.listen(config.web.port, config.web.bind, onListen);
+else server.listen(config.web.port, onListen);
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {

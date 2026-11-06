@@ -168,6 +168,10 @@ export const config = {
   },
   web: {
     port: env.port('WEB_PORT', 8080),
+    /** the address to listen on ('' = every interface); the profile hub runs each profile on 127.0.0.1 */
+    bind: env.str('WEB_BIND', ''),
+    /** set by the profile hub (src/hub/): the profile this process is, for the page title */
+    profileName: env.str('ASTRO_PROFILE_NAME', ''),
     liveFps: env.num('LIVE_STREAM_FPS', 8, { min: 1, max: 30 }),
     liveWidth: env.num('LIVE_STREAM_WIDTH', 1280, { min: 160, max: 3840, int: true }),
   },

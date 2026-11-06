@@ -20,6 +20,7 @@ import { weatherRoutes } from './routes/weather.js';
 import { nightRoutes } from './routes/night.js';
 import { RainGuard } from '../astro/weather/guard.js';
 import { observerSite } from './context.js';
+import { escapeHtml } from '../hub/html.js';
 
 const log = logger('web');
 
@@ -63,7 +64,9 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   const bootId = Date.now().toString(36);
   const indexFile = path.join(config.paths.public, 'index.html');
   app.get(['/', '/index.html'], (_req, res) => {
-    const html = fs.readFileSync(indexFile, 'utf8').replace(/(href="style\.css|src="js\/main\.js)"/g, `$1?v=${bootId}"`);
+    let html = fs.readFileSync(indexFile, 'utf8').replace(/(href="style\.css|src="js\/main\.js)"/g, `$1?v=${bootId}"`);
+    // run by the profile hub: the tab says which telescope it is
+    if (config.web.profileName) html = html.replace('<title>Astrocontroller</title>', `<title>${escapeHtml(config.web.profileName)} · Astrocontroller</title>`);
     res.setHeader('Cache-Control', 'no-cache');
     res.type('html').send(html);
   });

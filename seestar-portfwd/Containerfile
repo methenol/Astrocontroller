@@ -53,7 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /bionic /bionic
 COPY --from=builder /work/tunnel /work/libdnshook.so /work/
 COPY tunnel_libs/*.so /tutk/
-COPY src/supervisor.py /work/src/supervisor.py
+COPY src/supervisor.py src/manager.py /work/src/
 COPY seestar_status.py /work/seestar_status.py
 # bionic and the TUTK libs must share one search path (LD_LIBRARY_PATH=/opt/lib).
 RUN mkdir -p /opt/lib \

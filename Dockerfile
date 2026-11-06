@@ -47,4 +47,6 @@ VOLUME ["/data", "/library"]
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/index.js"]
+# The profile hub: one Astrocontroller process per active telescope profile (src/hub/main.ts).
+# CMD ["node", "dist/index.js"] runs the single-telescope app directly, as before the hub.
+CMD ["node", "dist/hub/main.js"]

@@ -1136,6 +1136,12 @@ def cli(cfg: Config, mode: str) -> int:
 
 
 def main() -> int:
+    # SEESTAR_TUNNEL_MULTI=1: this container hosts one supervisor per telescope (src/manager.py),
+    # each started by the manager with SEESTAR_TUNNEL_SLOT set; this process is then the manager.
+    multi = os.environ.get("SEESTAR_TUNNEL_MULTI", "").strip().lower() in ("1", "true", "yes", "on")
+    if multi and not os.environ.get("SEESTAR_TUNNEL_SLOT"):
+        import manager  # noqa: PLC0415  (beside this file; only the multi-tunnel setup needs it)
+        return manager.main()
     cfg = Config()
     argv = sys.argv[1:]
     if argv and argv[0] in ("--status", "--health"):
