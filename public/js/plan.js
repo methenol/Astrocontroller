@@ -364,9 +364,6 @@ const SETTINGS = [
   ['Fillers', [
     ['fillerWeight', 'filler value', 'number', { min: 0, max: 1, step: 0.05, title: "a filler's value next to a normal-priority program target (their filter: Find targets)" }],
   ]],
-  ['Automation', [
-    ['autoRun', 'run the plan every night', 'checkbox', { title: "start a duty that carries out the plan at the plan's start every night (Starfront's autonomous nights do this themselves when the roof opens)" }],
-  ]],
 ];
 
 const getPath = (o, p) => p.split('.').reduce((a, k) => (a == null ? a : a[k]), o);

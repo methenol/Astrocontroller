@@ -303,7 +303,7 @@ export class StarfrontNights extends SafeEmitter {
       return;
     }
     try {
-      this.d.duty.start({ objective: NIGHT_OBJECTIVE, until: 'dawn', by: 'user' });
+      this.d.duty.start({ objective: NIGHT_OBJECTIVE, until: 'dawn', by: 'user', via: "Starfront's autonomous nights" });
       night.engagedAt = this.now();
       night.engagedBy = why;
       log.info(`night ${key} started: ${why}`);

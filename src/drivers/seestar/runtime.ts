@@ -26,7 +26,7 @@ import { seestarFacts } from './acquisition.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const scope = new Seestar();
-  // the night plan's lines go into every duty sample; the plan needs the duty (it starts the nightly one), so it is bound late
+  // the night plan's lines go into every duty sample; the night needs the duty (its journal and events), so it is bound late
   let night: NightServices | null = null;
   // on autonomous nights the agent keeps being woken while the scope is released: it connects it again itself
   const duty: DutyLoop = new DutyLoop(withNightPlan(seestarDuty(scope, { autonomous: (): boolean => !!nights?.enabled }), () => night), agent);
@@ -66,7 +66,6 @@ function create({ agent }: DriverDeps): DriverRuntime {
     probe: seestarProbe(scope),
     duty,
     facts: seestarFacts(scope),
-    nightsEnabled: () => !!nights?.status().enabled,
   });
   const web = seestarWeb(scope, media, nights);
   return {

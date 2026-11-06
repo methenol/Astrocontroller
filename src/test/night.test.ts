@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { findObject } from '../astro/catalog.js';
 import { PLAN_DEFAULTS, addTarget, removeTarget, type PlanSettings } from '../night/program.js';
 import { setRest, liftRest } from '../astro/rest.js';
-import { daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
+import { alternatesAt, daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
 import { Journal } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
 import { learn } from '../night/progress.js';
@@ -123,6 +123,21 @@ describe('night plan: the solver', () => {
     assert.ok(b);
     assert.notEqual(b.alternates[0].quadrant, b.quadrant);
     assert.ok(!b.alternates.some((a) => a.key === b.target!.key));
+  });
+
+  test('alternates in an hour the forecast puts below the floor: the sky check beats the forecast', () => {
+    const cands = [cand('M 31'), cand('M 42'), cand('M 33'), cand('M 45'), cand('NGC 7000')];
+    const cloudy = () => ({ observability: 10 }) as never;
+    const input = { site: SITE, start: W.start, end: W.end, candidates: cands, settings: { ...SETTINGS, useForecast: true }, overheadMin: 8, efficiency: 0.75, conditions: cloudy };
+    const at = new Date(W.start.getTime() + 2 * 3600e3);
+    // the forecast alone leaves nothing: a weather block
+    assert.ok(solveNight({ ...input, from: at }).blocks.every((b) => b.kind !== 'target'));
+    const alts = alternatesAt(input, at);
+    assert.ok(alts.length > 0, 'alternates when the sky check found it clear');
+    assert.ok(alts.every((a) => /set aside because the sky check found it clear/.test(a.reason)));
+    // with a clear forecast nothing is set aside
+    const clear = alternatesAt({ ...input, conditions: () => ({ observability: 90 }) as never }, at);
+    assert.ok(clear.length > 0 && clear.every((a) => !/set aside/.test(a.reason)));
   });
 
   test('a target that never clears the limits says so', () => {

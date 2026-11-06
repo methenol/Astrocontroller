@@ -10,8 +10,8 @@
  * - Holds are the plan's say from the night itself: a target obscured (by a tree or a cloud: a
  *   filler takes its place until it clears), skipped for the night, pinned to a time, or a part of
  *   the sky out for a while.
- * - autoRun starts a duty that carries the plan out every night at its start, for a scope left out
- *   unattended; Starfront's autonomous nights start that duty themselves when the roof opens.
+ * - The plan never starts a duty by itself: the owner starts it (the Plan tab's run, the duty bar),
+ *   or Starfront's autonomous nights do when the roof opens (agent/starfront.ts).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,8 +45,8 @@ const REFRESH_MS = 30 * 60_000;
 const DEBOUNCE_MS = 5_000;
 /** the next night is solved from this local hour */
 const PREPARE_HOUR = 12;
-/** autoRun starts the plan's duty this long before the plan starts (time to open the arm and connect) */
-const AUTORUN_LEAD_MS = 15 * 60_000;
+/** the night counts as under way this long before the plan starts (time to open the arm and connect) */
+const LEAD_MS = 15 * 60_000;
 /** an obscured target with no end given is held this long when it is setting or the cause is cloud */
 const HOLD_DEFAULT_MIN = 45;
 /** an obstruction's top is taken to be this much above where the target was seen blocked */
@@ -84,7 +84,6 @@ export interface PlannedNight extends Solved {
 interface NightFile {
   plan: PlannedNight | null;
   holds: Hold[];
-  autoRunAt?: number;
 }
 
 /**
@@ -130,9 +129,6 @@ export interface PlanDeps {
   journal: Journal;
   /** the session the journal is recording now */
   active?: () => { night: string; session: JournalSession } | null;
-  duty?: { start(o: { objective: string; until?: string; by: 'user' | 'agent' }): unknown; status(): { status: string; objective?: string } };
-  /** Starfront's autonomous nights are on (they start the night's duty themselves) */
-  nightsEnabled?: () => boolean;
   /** told when the plan changes what the agent should do now (a duty event) */
   notify?: (text: string) => void;
   now?: () => number;
@@ -219,7 +215,7 @@ export class PlanService extends SafeEmitter {
       const plan = raw.plan ?? null;
       // blocks outside the plan's own window (another night's, filed here by mistake) are dropped
       if (plan) plan.blocks = plan.blocks.filter((b) => b.end > plan.window.start && b.start < plan.window.end);
-      f = { plan, holds: Array.isArray(raw.holds) ? raw.holds : [], autoRunAt: raw.autoRunAt };
+      f = { plan, holds: Array.isArray(raw.holds) ? raw.holds : [] };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`ignoring unreadable ${this.file(night)}: ${errMsg(e)}`);
     }
@@ -700,7 +696,7 @@ export class PlanService extends SafeEmitter {
       const settings = loadSettings();
       const w = planWindow(site, new Date(now), settings);
       const f = this.load(w.night);
-      const during = now >= w.start.getTime() - AUTORUN_LEAD_MS && now < w.end.getTime();
+      const during = now >= w.start.getTime() - LEAD_MS && now < w.end.getTime();
       const localHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.observer.timezone, hour: '2-digit', hourCycle: 'h23' }).format(new Date(now)));
       if (!f.plan) {
         if (during || localHour >= PREPARE_HOUR || now >= w.start.getTime() - 6 * 3600e3) await this.replan('a new night');
@@ -714,29 +710,8 @@ export class PlanService extends SafeEmitter {
         else if (during) this.followBlock(f.plan);
         if (stamp) this.lastForecast = stamp.fetchedAt;
       }
-      this.autoRun(w, f, settings);
     } catch (e) {
       log.warn(`plan tick: ${errMsg(e)}`);
-    }
-  }
-
-  private autoRun(w: PlanWindow, f: NightFile, settings: PlanSettings): void {
-    const duty = this.d.duty;
-    if (!settings.autoRun || !duty || f.autoRunAt || this.d.nightsEnabled?.()) return;
-    const now = this.now();
-    if (now < w.start.getTime() - AUTORUN_LEAD_MS || now >= w.end.getTime() - 30 * 60_000) return;
-    f.autoRunAt = now;
-    this.save(w.night);
-    if (duty.status().status !== 'off') {
-      this.d.journal.event(w.night, 'duty', 'the plan\'s nightly duty was not started: a duty was already on', now);
-      return;
-    }
-    try {
-      duty.start({ objective: PLAN_OBJECTIVE, until: w.end.toISOString(), by: 'user' });
-      this.d.journal.event(w.night, 'duty', `the plan's nightly duty started (until ${hm(w.end)})`, now);
-      log.info(`auto-run: the night plan's duty started for ${w.night}`);
-    } catch (e) {
-      log.warn(`auto-run: ${errMsg(e)}`);
     }
   }
 

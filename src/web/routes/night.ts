@@ -112,7 +112,7 @@ export function nightRoutes({ night, duty }: WebContext): Router {
       }
     }),
   );
-  // run tonight's plan now: the owner starts the plan's duty by hand (autoRun does it every night)
+  // run tonight's plan now: the owner starts the plan's duty by hand (only Starfront's autonomous nights start one by themselves)
   api.post(
     '/plan/run',
     route(async () => {

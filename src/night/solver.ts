@@ -880,8 +880,22 @@ export function solveNight(input: SolveInput): Solved {
   };
 }
 
-/** Rank alternates for a moment outside the plan's blocks (night_plan action=alternates). */
+/**
+ * Rank alternates for a moment outside the plan's blocks (night_plan action=alternates).
+ *
+ * The agent asks for these after it looked at the sky (sky_check) and found part of it clear. When
+ * the forecast has that hour below its floor, every target's merit is 0 there and the solve gives a
+ * weather block with nothing in it; the sky the telescope sees beats the forecast, so the moment is
+ * solved again without the forecast and the rows say so.
+ */
 export function alternatesAt(input: SolveInput, at: Date, opts: { exclude?: string[]; quadrant?: Quadrant; limit?: number } = {}): Alternate[] {
+  const rows = alternateRows(input, at, opts);
+  if (rows.length || !input.conditions || !input.settings.useForecast) return rows;
+  const note = `; the forecast has this hour below ${input.settings.weatherMinScore}/100, set aside because the sky check found it clear`;
+  return alternateRows({ ...input, conditions: undefined }, at, opts).map((r) => ({ ...r, reason: r.reason + note }));
+}
+
+function alternateRows(input: SolveInput, at: Date, opts: { exclude?: string[]; quadrant?: Quadrant; limit?: number }): Alternate[] {
   const sub: SolveInput = { ...input, from: at, history: [] };
   const solved = solveNight({ ...sub, candidates: input.candidates.filter((c) => !(opts.exclude ?? []).includes(c.key)) });
   const b = solved.blocks.find((x) => !x.past && x.start <= at.getTime() + SLOT_MS && x.end > at.getTime());

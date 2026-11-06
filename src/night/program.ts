@@ -93,8 +93,6 @@ export const PlanSettingsSchema = z.object({
   fillerMaxSizeArcmin: z.number().min(0).max(1200).nullable(),
   /** a filler's value relative to a normal-priority program target (0–1) */
   fillerWeight: z.number().min(0).max(1),
-  /** start a duty that runs the plan every night at the plan's start (Starfront nights do this themselves) */
-  autoRun: z.boolean(),
 });
 export type PlanSettings = z.infer<typeof PlanSettingsSchema>;
 
@@ -122,7 +120,6 @@ export const PLAN_DEFAULTS: PlanSettings = {
   fillerMinSizeArcmin: null,
   fillerMaxSizeArcmin: null,
   fillerWeight: 0.5,
-  autoRun: false,
 };
 
 export const ProgramTargetInput = z.object({

@@ -48,6 +48,8 @@ export interface DutyState {
   objective?: string;
   startedAt?: number;
   startedBy?: 'user' | 'agent';
+  /** what started it on the owner's behalf when no one pressed Start (the plan's nightly run, Starfront's nights) */
+  startedVia?: string;
   /** end of the duty (ms); the agent cannot complete it earlier */
   until?: number;
   untilLabel?: string;
@@ -104,6 +106,7 @@ function savedDuty(raw: unknown): Partial<DutyState> | null {
     objective: str('objective'),
     startedAt: num('startedAt'),
     startedBy: by,
+    startedVia: str('startedVia'),
     until: num('until'),
     untilLabel: str('untilLabel'),
     intervalS: num('intervalS'),
@@ -217,7 +220,7 @@ export class DutyLoop extends SafeEmitter {
 
   // ---------------------------------------------------------------- control
   /** until: 'dawn' (astronomical dawn of the current/next night), 'none', 'HH:MM' local, or an ISO time. */
-  start(o: { objective: string; until?: string; intervalS?: number; by: 'user' | 'agent' }): DutyState {
+  start(o: { objective: string; until?: string; intervalS?: number; by: 'user' | 'agent'; via?: string }): DutyState {
     const objective = o.objective.trim();
     if (!objective) throw new Error('objective required');
     const until = parseUntil(o.until, this.now(), () => {
@@ -234,6 +237,7 @@ export class DutyLoop extends SafeEmitter {
       objective,
       startedAt: this.now(),
       startedBy: o.by,
+      startedVia: o.via,
       until: until?.at,
       untilLabel: until?.label,
       intervalS: clampInterval(o.intervalS ?? config.agent.dutyIntervalS),
@@ -246,8 +250,8 @@ export class DutyLoop extends SafeEmitter {
       // the user is directing a new duty: the previous one's undelivered events and END steps no longer apply
       this.dropPending();
     }
-    log.info(`duty started by the ${o.by}: "${objective}"${until ? ` until ${until.label}` : ''}`);
-    this.agent.note('info', `Duty started${until ? ` until ${until.label}` : ''}: ${objective}`);
+    log.info(`duty started by ${o.via ?? `the ${o.by}`}: "${objective}"${until ? ` until ${until.label}` : ''}`);
+    this.agent.note('info', `Duty started${o.via ? ` by ${o.via}` : ''}${until ? ` until ${until.label}` : ''}: ${objective}`);
     this.save();
     return this.state;
   }

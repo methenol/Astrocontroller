@@ -35,7 +35,6 @@ export interface NightDeps {
   fovArcmin: () => { w: number; h: number };
   probe: JournalProbe;
   duty: DutyLoop;
-  nightsEnabled?: () => boolean;
   /** what the scope says about itself (the acquisition planner's capture settings per block) */
   facts?: FactsSource;
 }
@@ -54,9 +53,7 @@ export function createNight(d: NightDeps): NightServices {
     fovArcmin: d.fovArcmin,
     journal,
     active: () => recorder.active(),
-    duty: d.duty,
-    nightsEnabled: d.nightsEnabled,
-    facts: d.facts,
+      facts: d.facts,
     notify: (text) => d.duty.event(text, true),
   });
   const nightOf = (at = Date.now()) => {
