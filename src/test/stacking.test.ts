@@ -1,5 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { StackTracker, type StackHealth, type CameraName } from '../drivers/dwarf/stacking.js';
 import { readWireLog, at, type WireLine } from './wirelog-replay.js';
@@ -25,8 +26,9 @@ function replay(lines: WireLine[], until = Infinity, exposureS?: number) {
   return { tr, health, progressEvents, setNow: (t: number) => (now = t) };
 }
 
-describe('StackTracker on the 2026-10-12 C 20 wide stack (real wire log)', () => {
-  const lines = readWireLog(FIXTURE);
+// the wire log is a local capture (*.log is git-ignored): the suite runs where it is present
+describe('StackTracker on the 2026-10-12 C 20 wide stack (real wire log)', { skip: !fs.existsSync(FIXTURE) && `no fixture at ${FIXTURE}` }, () => {
+  const lines = fs.existsSync(FIXTURE) ? readWireLog(FIXTURE) : [];
 
   test('the fixture parses', () => {
     assert.ok(lines.length > 2000);

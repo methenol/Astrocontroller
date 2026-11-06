@@ -111,6 +111,8 @@ export interface AdviseRequest {
   fixed?: { filter?: string; gain?: number; subS?: number };
   collectedMin?: number;
   journal?: Pick<Journal, 'recentSessions'> | null;
+  /** the plan's forecast floor: hours below it are advisory cloud, weighed in the sub choice */
+  cloudFloor?: number;
 }
 
 /** Settings for one target over one window, everything gathered. */
@@ -133,6 +135,7 @@ export function adviseFor(r: AdviseRequest): { rig: Rig; rec: Recommendation } {
     usableMin: r.usableMin ?? (slices.length / Math.max(1, Math.round((r.to.getTime() - r.from.getTime()) / (SLICE_MIN * 60e3)))) * ((r.to.getTime() - r.from.getTime()) / 60e3),
     collectedMin: r.collectedMin,
     keepBySubS: keepBySub(r.journal),
+    cloudFloor: r.cloudFloor,
   });
   return { rig, rec };
 }

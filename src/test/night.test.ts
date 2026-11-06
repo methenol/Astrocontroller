@@ -130,14 +130,32 @@ describe('night plan: the solver', () => {
     const cloudy = () => ({ observability: 10 }) as never;
     const input = { site: SITE, start: W.start, end: W.end, candidates: cands, settings: { ...SETTINGS, useForecast: true }, overheadMin: 8, efficiency: 0.75, conditions: cloudy };
     const at = new Date(W.start.getTime() + 2 * 3600e3);
-    // the forecast alone leaves nothing: a weather block
-    assert.ok(solveNight({ ...input, from: at }).blocks.every((b) => b.kind !== 'target'));
+    // the forecast below the floor is advisory: targets are still planned, each block says so
+    const r = solveNight({ ...input, from: at });
+    const tb = r.blocks.filter((b) => b.kind === 'target');
+    assert.ok(tb.length > 0, 'targets planned under a cloudy forecast');
+    assert.ok(r.blocks.every((b) => b.kind !== 'weather'));
+    assert.ok(tb.every((b) => b.clouds && /sky_check/.test(b.clouds.advisory) && /obscured cause=cloud/.test(b.clouds.advisory)));
+    assert.ok(r.slots.filter((s) => s.t >= at.getTime()).every((s) => s.cloudy));
     const alts = alternatesAt(input, at);
     assert.ok(alts.length > 0, 'alternates when the sky check found it clear');
-    assert.ok(alts.every((a) => /set aside because the sky check found it clear/.test(a.reason)));
-    // with a clear forecast nothing is set aside
+    assert.ok(alts.every((a) => /below 35\/100 \(advisory: the sky check decides\)/.test(a.reason)));
+    // with a clear forecast there is no advisory
     const clear = alternatesAt({ ...input, conditions: () => ({ observability: 90 }) as never }, at);
-    assert.ok(clear.length > 0 && clear.every((a) => !/set aside/.test(a.reason)));
+    assert.ok(clear.length > 0 && clear.every((a) => !/advisory/.test(a.reason)));
+    assert.ok(solveNight({ ...input, from: at, conditions: () => ({ observability: 90 }) as never }).blocks.every((b) => !b.clouds));
+  });
+
+  test('cloudy hours yield less, so a program target is not used up before the clear hours', () => {
+    const cands = [cand('M 31', { goalMin: 120, priority: 5 })];
+    const mid = W.start.getTime() + 3 * 3600e3;
+    const cond = (t: Date) => ({ observability: t.getTime() < mid ? 10 : 90 }) as never;
+    const r = solveNight({ site: SITE, start: W.start, end: W.end, candidates: cands, settings: { ...SETTINGS, useForecast: true }, overheadMin: 8, efficiency: 0.75, conditions: cond });
+    const m31 = r.blocks.filter((b) => b.kind === 'target' && b.target!.displayName === 'M 31');
+    assert.ok(m31.some((b) => b.start < mid && b.clouds), 'planned (advisory) under the cloudy hours');
+    assert.ok(m31.some((b) => b.end > mid + 3600e3), 'its goal is not used up by the cloudy hours: it carries on into the clear ones');
+    const cloudy = m31.find((b) => b.clouds)!;
+    assert.ok(cloudy.clouds!.cloudyMin < (cloudy.end - cloudy.start) / 60e3, 'only the cloudy part is flagged');
   });
 
   test('a target that never clears the limits says so', () => {

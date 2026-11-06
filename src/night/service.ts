@@ -441,7 +441,7 @@ export class PlanService extends SafeEmitter {
       try {
         const from = k.bestFrom ?? Math.max(now, w.start.getTime());
         const to = k.bestUntil ?? end;
-        return adviseFor({ facts, site, target: targetInfo(c.name), from: new Date(from), to: new Date(to), conditions: this.lastConditions, journal: this.d.journal }).rec;
+        return adviseFor({ facts, site, target: targetInfo(c.name), from: new Date(from), to: new Date(to), conditions: this.lastConditions, journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore }).rec;
       } catch {
         return null;
       }
@@ -525,7 +525,7 @@ export class PlanService extends SafeEmitter {
     try {
       const program = t.programId ? loadProgram().find((p) => p.id === t.programId) : undefined;
       const owned = program?.filter && program.filter !== 'auto' ? program.filter : undefined;
-      const { rec } = adviseFor({ facts, site: this.site(), target: targetInfo(t.name), from: new Date(b.start), to: new Date(b.end), usableMin, conditions, fixed: { filter: owned }, collectedMin: Math.round(got), journal: this.d.journal });
+      const { rec } = adviseFor({ facts, site: this.site(), target: targetInfo(t.name), from: new Date(b.start), to: new Date(b.end), usableMin, conditions, fixed: { filter: owned }, collectedMin: Math.round(got), journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore });
       return {
         device: rec.device.name,
         filter: rec.settings.filter,
@@ -893,6 +893,7 @@ export class PlanService extends SafeEmitter {
       instruction = `The plan starts at ${hm(plan.window.start)} with ${first?.target ? `${first.target.displayName} (${hm(first.start)}–${hm(first.end)})` : 'no target'}. Nothing is stacked before then; get ready (connect, open the arm).`;
     } else if (phase === 'after') instruction = "The plan's night has ended.";
     else if (!block || block.kind !== 'target') {
+      // 'weather' blocks come only from plans solved before the forecast floor became advisory
       const why = block?.kind === 'weather' ? 'the forecast is below the floor' : 'no target is usable';
       instruction = `${why} until ${block ? hm(block.end) : '?'}${next?.target ? `; then ${next.target.displayName} at ${hm(next.start)}` : ''}. Check the sky (sky_check) and, if part of it is clear, night_plan action=alternates.`;
     } else if (onPlan) {
@@ -902,6 +903,7 @@ export class PlanService extends SafeEmitter {
     } else {
       instruction = `Now: ${block.target!.displayName} (${hm(block.start)}–${hm(block.end)}, ${dur(minutesLeft ?? 0)} left): ${go(block)}.`;
     }
+    if (phase === 'night' && block?.target && block.clouds) instruction += ` Clouds forecast (${block.clouds.sky}/100, below the ${block.clouds.floor}/100 floor; advisory): sky_check first; if ${block.target.displayName} is obscured, night_plan action=obscured target=${block.target.gotoName} cause=cloud for an alternate.`;
     if (phase === 'night' && block?.target?.notes) instruction += ` Owner's note on it: ${block.target.notes}`;
     return { night: plan.night, phase, at, block, next, minutesLeft, scopeOn, onPlan, instruction };
   }

@@ -46,6 +46,12 @@ const WIND_CAP_KMH = 15;
 const WIND_SUB_S = 10;
 /** Rejection when nothing was learned: the scope's own stacker drops a few subs to satellites and gusts. */
 const DEFAULT_KEEP = 0.95;
+/**
+ * Under a forecast below the plan's floor (advisory clouds), a sub survives a passing cloud with
+ * probability exp(-(1 - clear) × sub / CLOUD_GAP_S): long subs lose more, so shorter ones (and the
+ * gain that suits them) are favoured while the block is still shot.
+ */
+const CLOUD_GAP_S = 300;
 /** Fewer subs than this tonight starve the stacker's statistics (Noise2Noise halves, sigma clipping). */
 const MIN_FRAMES = 20;
 const FEW_FRAMES_KEEP = 0.9;
@@ -123,6 +129,8 @@ export interface AdviseInput {
   collectedMin?: number;
   /** kept share of taken subs, by sub length, learned from the journal */
   keepBySubS?: Record<string, number>;
+  /** the plan's forecast floor (0–100): a slice below it is under advisory cloud */
+  cloudFloor?: number;
 }
 
 export interface Candidate {
@@ -173,6 +181,8 @@ export interface Recommendation {
     fwhmArcsec: number;
     fwhmSource: string;
     transparency: string;
+    /** the forecast below the floor for part of the window (advisory), null when not */
+    clouds: string | null;
     windMaxKmh: number | null;
     caps: string[];
   };
@@ -266,7 +276,8 @@ export function advise(input: AdviseInput): Recommendation {
   const sliceSky = slices.map((s) => {
     const k = extinctionFor(s.transparencyIdx);
     const sky = skyBrightness({ zenithSqm: input.zenithSqm, altDeg: s.altDeg, moon: s.moon, k });
-    return { ...s, k, sqm: sky.sqm, moonFraction: sky.moonFraction, trans: transmission(s.altDeg, k), cap: trailCap(rig, site.lat, s, fwhmPx) };
+    const cloudy = input.cloudFloor !== undefined && s.observability !== undefined && s.observability < input.cloudFloor;
+    return { ...s, k, sqm: sky.sqm, moonFraction: sky.moonFraction, trans: transmission(s.altDeg, k), cap: trailCap(rig, site.lat, s, fwhmPx), cloudLoss: cloudy ? 1 - Math.min(1, s.observability! / 100) : 0 };
   });
 
   const fixedFilter = input.fixed?.filter ? findFilter(rig.filters, input.fixed.filter) : undefined;
@@ -310,7 +321,9 @@ export function advise(input: AdviseInput): Recommendation {
           held++;
           const noise2 = (eT + eSky + sensor.darkCurrentEPerS) * t + sensor.readNoiseE ** 2;
           // SNR² per wall hour per Bayer cell
-          sum += ((CELL_PX * (eT * t) ** 2) / noise2) * (3600 / cycleS) * keep;
+          // a passing cloud ruins the sub it crosses: the longer the sub, the likelier
+          const survive = s.cloudLoss ? Math.exp((-s.cloudLoss * t) / CLOUD_GAP_S) : 1;
+          sum += ((CELL_PX * (eT * t) ** 2) / noise2) * (3600 / cycleS) * keep * survive;
         }
         const heldFrac = held / sliceSky.length;
         let merit = sum / sliceSky.length;
@@ -398,6 +411,11 @@ export function advise(input: AdviseInput): Recommendation {
     if (sameOther) why.push(`gain ${best.gain}: read noise ${r2(sensor.readNoiseE)} e⁻ and a ${Math.round(sensor.fullWellE)} e⁻ well (gain ${sameOther.gain} would give ${Math.round((sameOther.merit / Math.max(1e-12, best.merit)) * 100)}% of the rate)`);
   }
   why.push(...best.why);
+  const cloudySlices = sliceSky.filter((s) => s.cloudLoss > 0);
+  const cloudLine = cloudySlices.length
+    ? `forecast below ${input.cloudFloor}/100 for ${Math.round((cloudySlices.length / sliceSky.length) * 100)}% of the window (advisory): weighed for subs lost to passing cloud, so the sub is ${best.subS}s${rig.gainSettable ? ` at gain ${best.gain}` : ''}; check the sky first and expect rejected frames`
+    : null;
+  if (cloudLine) why.unshift(cloudLine);
   if (sbSource === 'nominal') why.push(`no surface brightness in the catalog: judged as a faint ${NOMINAL_SB} mag/arcsec² target`);
 
   const bgPct = Math.round(best.maxBackgroundFrac * 1000) / 10;
@@ -446,6 +464,7 @@ export function advise(input: AdviseInput): Recommendation {
       fwhmArcsec: r1(fwhmArcsec),
       fwhmSource,
       transparency: transIdx.length ? `7Timer ${Math.min(...transIdx)}–${Math.max(...transIdx)} (extinction ${r2(extinctionFor(Math.max(...transIdx)))} mag/airmass at worst, airmass ${r2(Math.min(...slices.map((s) => airmass(s.altDeg))))}–${r2(Math.max(...slices.map((s) => airmass(s.altDeg))))})` : 'no forecast: an average clear night',
+      clouds: cloudLine,
       windMaxKmh: winds.length ? Math.round(Math.max(...winds)) : null,
       caps,
     },

@@ -12,9 +12,12 @@
  * - **the Moon** — while it is up, a Lorentzian avoidance: the separation required is
  *   D / (1 + (days from full / W)²), D and W per filter class (wide for broadband, tight for a line
  *   filter), and what is left of a moonlit minute for this target through its glass (detect.ts);
- * - **the sky** — the hourly forecast: an hour below the plan's floor is not scheduled at all;
- *   poor seeing costs a galaxy or a planetary more than an emission nebula, poor transparency
- *   costs broadband more than a line filter.
+ * - **the sky** — the hourly forecast: an hour below the plan's floor is advisory, not a wall —
+ *   it is still scheduled (the forecast is often wrong, and a gap in the cloud is worth taking),
+ *   at a fraction of its merit and with its expected yield scaled by the forecast, and the block
+ *   says to check the sky (sky_check) and ask for an alternate if its target is clouded; poor
+ *   seeing costs a galaxy or a planetary more than an emission nebula, poor transparency costs
+ *   broadband more than a line filter.
  *
  * Walking the slots in order, each target is valued at the current slot as
  *   base × mean merit over the next minimum block × urgency,
@@ -72,6 +75,8 @@ const TRANS_MAX_COST = 0.3;
 const FILLER_CAP_MIN = 240;
 /** alternates offered per block */
 const ALTERNATES = 4;
+/** an hour the forecast puts below the floor keeps this share of its merit (advisory: still planned, fillers and all) */
+const CLOUDY_MERIT = 0.25;
 
 export type Quadrant = 'N' | 'E' | 'S' | 'W';
 export const quadrantOf = (az: number): Quadrant => {
@@ -218,6 +223,8 @@ export interface Block {
   pinned?: boolean;
   /** an earlier part of the night, kept from the plan in force then */
   past?: boolean;
+  /** the forecast has (part of) the block below the plan's floor: advisory, the block is still planned */
+  clouds?: { cloudyMin: number; sky: number | null; floor: number; advisory: string };
   reason: string;
   alternates: Alternate[];
 }
@@ -248,6 +255,8 @@ export interface SlotInfo {
   moonAlt: number;
   /** forecast observability 0–100, null without a forecast */
   sky: number | null;
+  /** the forecast has this slot below the plan's floor (advisory) */
+  cloudy?: boolean;
   seeingIdx?: number;
   transparencyIdx?: number;
   temperatureC?: number;
@@ -366,11 +375,13 @@ function slotsOf(input: SolveInput): SlotInfo[] {
   for (let t = start.getTime(); t < end.getTime(); t += SLOT_MS) {
     const mid = new Date(Math.min(t + SLOT_MS / 2, end.getTime()));
     const c = settings.useForecast ? conditions?.(mid) : undefined;
+    const obs = c && Number.isFinite(c.observability) ? Math.round(c.observability) : null;
     out.push({
       t,
       sunAlt: r1(sky.bodyAlt(site, 'Sun', mid)),
       moonAlt: r1(sky.bodyAlt(site, 'Moon', mid)),
-      sky: c && Number.isFinite(c.observability) ? Math.round(c.observability) : null,
+      sky: obs,
+      cloudy: obs !== null && obs < settings.weatherMinScore ? true : undefined,
       seeingIdx: c?.seeingIdx,
       transparencyIdx: c?.transparencyIdx,
       temperatureC: c?.temperatureC,
@@ -403,7 +414,8 @@ function curves(input: SolveInput, slots: SlotInfo[], illum: number): Curve[] {
       const kh = keyholeWeight(aa.altitude, mount);
       const moonQ = settings.moonAvoidance && s.moonAlt > MOON_HORIZON ? moonFactor(sep, req, c.moonKeep) : 1;
       if (moonQ > 0) cv.geomMoon[i] = 1;
-      const wxQ = s.sky === null ? 1 : s.sky < settings.weatherMinScore ? 0 : 0.4 + 0.6 * (s.sky / 100);
+      // below the floor is advisory: the hour stays plannable, worth a fraction of a clear one
+      const wxQ = s.sky === null ? 1 : (0.4 + 0.6 * (s.sky / 100)) * (s.cloudy ? CLOUDY_MERIT : 1);
       const seeQ = s.seeingIdx === undefined ? 1 : 1 - SEEING_MAX_COST * (c.seeingSens ?? 0.4) * ramp(s.seeingIdx, SEEING_GOOD, SEEING_BAD);
       const trQ = s.transparencyIdx === undefined ? 1 : 1 - TRANS_MAX_COST * (c.narrowband ? 0.4 : 1) * ramp(s.transparencyIdx, TRANS_GOOD, TRANS_BAD);
       cv.merit[i] = altQ * kh * moonQ * wxQ * seeQ * trQ;
@@ -427,7 +439,7 @@ function baseValue(cv: Curve, settings: PlanSettings): number {
 /** What the plan can do with one candidate tonight, by the same scoring the scheduler uses. */
 export interface CandidateRank {
   key: string;
-  /** minutes it is usable from `from` to the end (up, clear of obstructions and holds, the Moon allowing it, forecast above the floor) */
+  /** minutes it is usable from `from` to the end (up, clear of obstructions and holds, the Moon allowing it; hours the forecast puts below the floor count, at their lower merit) */
   usableMin: number;
   /** its longest usable run */
   bestFrom: number | null;
@@ -488,7 +500,7 @@ export function rankCandidates(input: SolveInput): CandidateRank[] {
     const meanMerit = n ? sum / n : 0;
     const geom = cv.geom.slice(first).some(Boolean);
     const moon = cv.geomMoon.slice(first).some(Boolean);
-    const why = n ? null : !geom ? 'not above the limits (minimum altitude, obstructions) in the plan window' : !moon ? 'the Moon is too close whenever it is up' : 'up only while the forecast is below the floor, or held';
+    const why = n ? null : !geom ? 'not above the limits (minimum altitude, obstructions) in the plan window' : !moon ? 'the Moon is too close whenever it is up' : 'held whenever it is up';
     return {
       key: cv.c.key,
       usableMin,
@@ -540,6 +552,13 @@ export function solveNight(input: SolveInput): Solved {
   const minBlockSlots = Math.max(1, Math.round(settings.minBlockMin / SLOT_MIN));
   const maxBlockSlots = settings.maxBlockMin > 0 ? Math.max(minBlockSlots, Math.round(settings.maxBlockMin / SLOT_MIN)) : Infinity;
   const slotYield = SLOT_MIN * input.efficiency;
+  /** what a slot yields of a clear one: an hour the forecast puts below the floor is expected to give its observability's share */
+  const slotW = allSlots.map((s) => (s.cloudy ? clamp01((s.sky ?? 0) / 100) : 1));
+  const wSum = (a: number, b: number) => {
+    let k = 0;
+    for (let j = a; j < b && j < n; j++) k += slotW[j];
+    return k;
+  };
 
   // what each target still needs tonight, in integration minutes
   const remaining = new Map<Curve, number>();
@@ -555,7 +574,7 @@ export function solveNight(input: SolveInput): Solved {
   /** integration minutes still to be had for a target from slot i to the end */
   const available = (cv: Curve, i: number) => {
     let k = 0;
-    for (let j = i; j < n; j++) if (usable(cv, j)) k++;
+    for (let j = i; j < n; j++) if (usable(cv, j)) k += slotW[j];
     return k * slotYield;
   };
   const base = (cv: Curve) => baseValue(cv, settings);
@@ -577,7 +596,7 @@ export function solveNight(input: SolveInput): Solved {
   const runs: Run[] = [];
   const st: { cur: Run | null } = { cur: null };
   const currentKey = input.current?.key ?? null;
-  const yieldOf = (r: Run, slots: number) => Math.max(0, slots * SLOT_MIN - r.overheadMin) * input.efficiency;
+  const yieldOf = (r: Run, slots: number) => Math.max(0, wSum(r.startIdx, r.startIdx + slots) * SLOT_MIN - r.overheadMin) * input.efficiency;
   const close = () => {
     if (!st.cur) return;
     st.cur.expectedMin = yieldOf(st.cur, st.cur.endIdx - st.cur.startIdx);
@@ -657,27 +676,35 @@ export function solveNight(input: SolveInput): Solved {
     return xs.length ? Math.round(xs.reduce((p, q) => p + q, 0) / xs.length) : null;
   };
   let cursor = firstIdx;
+  // a gap is nothing usable (limits, the Moon, holds, every goal met): the forecast alone never makes one
   const pushGap = (a: number, b: number) => {
-    // split by why nothing is shot: forecast below the floor, or nothing up / everything held or done
-    let k = a;
-    while (k < b) {
-      const wx = allSlots[k].sky !== null && allSlots[k].sky! < settings.weatherMinScore;
-      let e = k + 1;
-      while (e < b && (allSlots[e].sky !== null && allSlots[e].sky! < settings.weatherMinScore) === wx) e++;
-      blocks.push({
-        id: `${prefix}${blocks.length}`,
-        kind: wx ? 'weather' : 'gap',
-        start: Math.max(allSlots[k].t, from),
-        end: Math.min(allSlots[e - 1].t + SLOT_MS, input.end.getTime()),
-        overheadMin: 0,
-        expectedMin: 0,
-        sky: meanSky(k, e),
-        merit: 0,
-        reason: wx ? `forecast below ${settings.weatherMinScore}/100: watch the sky (sky_check) and take any clear part (alternates)` : 'no target in the program or the fillers is usable then (below the limits, the Moon, holds, or every goal met)',
-        alternates: [],
-      });
-      k = e;
-    }
+    const cloudyMin = allSlots.slice(a, b).filter((s) => s.cloudy).length * SLOT_MIN;
+    blocks.push({
+      id: `${prefix}${blocks.length}`,
+      kind: 'gap',
+      start: Math.max(allSlots[a].t, from),
+      end: Math.min(allSlots[b - 1].t + SLOT_MS, input.end.getTime()),
+      overheadMin: 0,
+      expectedMin: 0,
+      sky: meanSky(a, b),
+      merit: 0,
+      reason: `no target in the program or the fillers is usable then (below the limits, the Moon, holds, or every goal met)${cloudyMin ? `; the forecast is also below ${settings.weatherMinScore}/100 for ${cloudyMin} min of it` : ''}`,
+      alternates: [],
+    });
+  };
+  /** the advisory a block carries when the forecast has part of it below the floor */
+  const cloudsOf = (a: number, b: number, target: string): Block['clouds'] => {
+    const cloudyMin = allSlots.slice(a, b).filter((s) => s.cloudy).length * SLOT_MIN;
+    if (!cloudyMin) return undefined;
+    const xs = allSlots.slice(a, b).filter((s) => s.cloudy).map((s) => s.sky!);
+    const sky = xs.length ? Math.round(xs.reduce((p, q) => p + q, 0) / xs.length) : null;
+    const whole = cloudyMin >= (b - a) * SLOT_MIN;
+    return {
+      cloudyMin,
+      sky,
+      floor: settings.weatherMinScore,
+      advisory: `clouds forecast (${sky}/100, below the ${settings.weatherMinScore}/100 floor) for ${whole ? 'the whole block' : `${cloudyMin} min of it`}: advisory — check the sky (sky_check) before and during it; if ${target} is obscured, night_plan action=obscured cause=cloud for an alternate (or night_plan action=alternates for a clear part of the sky); capture settings favour shorter subs so a passing cloud costs less`,
+    };
   };
   for (const r of runs.sort((a, b) => a.startIdx - b.startIdx)) {
     if (r.startIdx > cursor) pushGap(cursor, r.startIdx);
@@ -711,6 +738,8 @@ export function solveNight(input: SolveInput): Solved {
     } else why.push(`filler (planner score ${Math.round(c.fillerScore ?? 0)})`);
     why.push(`alt ${Math.round(alts[0])}°→${Math.round(alts[alts.length - 1])}° (max ${Math.round(Math.max(...alts))}°), ${q}`);
     if (moonUp) why.push(`Moon up ${moonUp} min, ≥${Math.round(minSep)}° away`);
+    const clouds = cloudsOf(a, b, c.displayName);
+    if (clouds) why.push(clouds.advisory);
     return {
       id,
       kind: 'target',
@@ -726,6 +755,7 @@ export function solveNight(input: SolveInput): Solved {
       sky: meanSky(a, b),
       merit: Math.round(merit * 100) / 100,
       pinned: r.pinned || undefined,
+      clouds,
       reason: why.join('; '),
       alternates: alternatesFor(cvs, cv, a, b, minBlockSlots),
     };
@@ -786,7 +816,8 @@ export function solveNight(input: SolveInput): Solved {
     let runFrom = 0;
     let bestRun = 0;
     for (let i = firstIdx; i < n; i++) {
-      if (cv.merit[i] > 0) {
+      // usable here: up, the Moon allowing it, and the forecast above the floor
+      if (cv.merit[i] > 0 && !allSlots[i].cloudy) {
         use += SLOT_MIN;
         if (!run) runFrom = allSlots[i].t;
         run++;
@@ -820,7 +851,7 @@ export function solveNight(input: SolveInput): Solved {
       reason = `the Moon (${Math.round(illum * 100)}%) is too close whenever it is up`;
     } else if (!use) {
       status = 'weather';
-      reason = 'up, but the forecast is below the floor whenever it is';
+      reason = 'up, but the forecast is below the floor whenever it is (advisory: it can still be planned then, other targets made more of those hours)';
     } else if (anyHeld) {
       status = 'held';
       reason = 'held: ' + holds.filter((h) => h.target === c.key).map((h) => h.reason).join('; ');
@@ -883,16 +914,16 @@ export function solveNight(input: SolveInput): Solved {
 /**
  * Rank alternates for a moment outside the plan's blocks (night_plan action=alternates).
  *
- * The agent asks for these after it looked at the sky (sky_check) and found part of it clear. When
- * the forecast has that hour below its floor, every target's merit is 0 there and the solve gives a
- * weather block with nothing in it; the sky the telescope sees beats the forecast, so the moment is
- * solved again without the forecast and the rows say so.
+ * The agent asks for these after it looked at the sky (sky_check), often because the block's
+ * target is clouded. An hour the forecast puts below its floor is advisory and still planned, so
+ * there are rows; they say the forecast has it below the floor and that the sky check decides.
  */
 export function alternatesAt(input: SolveInput, at: Date, opts: { exclude?: string[]; quadrant?: Quadrant; limit?: number } = {}): Alternate[] {
   const rows = alternateRows(input, at, opts);
-  if (rows.length || !input.conditions || !input.settings.useForecast) return rows;
-  const note = `; the forecast has this hour below ${input.settings.weatherMinScore}/100, set aside because the sky check found it clear`;
-  return alternateRows({ ...input, conditions: undefined }, at, opts).map((r) => ({ ...r, reason: r.reason + note }));
+  const c = input.settings.useForecast ? input.conditions?.(at) : undefined;
+  if (!c || !Number.isFinite(c.observability) || c.observability >= input.settings.weatherMinScore) return rows;
+  const note = `; the forecast has this hour below ${input.settings.weatherMinScore}/100 (advisory: the sky check decides)`;
+  return rows.map((r) => ({ ...r, reason: r.reason + note }));
 }
 
 function alternateRows(input: SolveInput, at: Date, opts: { exclude?: string[]; quadrant?: Quadrant; limit?: number }): Alternate[] {

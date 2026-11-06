@@ -561,6 +561,8 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .np-block:focus { outline: none; }
 .np-block:focus-visible rect:first-child { stroke: var(--accent); stroke-width: 2; }
 .np-ovh { fill: rgba(0, 0, 0, .35); pointer-events: none; }
+.np-cloud { fill: url(#np-cloudhatch); pointer-events: none; }
+.np-cloudnote { border-left: 3px solid #94a3b8; padding-left: 8px; }
 .np-btext { fill: #06090e; font-size: 12px; font-weight: 600; pointer-events: none; }
 .np-bsub { fill: rgba(6, 9, 14, .75); font-size: 10.5px; pointer-events: none; }
 .np-block.gap .np-btext, .np-block.weather .np-btext { fill: var(--muted); }
@@ -570,6 +572,7 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .np-key { display: inline-flex; align-items: center; gap: 5px; }
 .np-key i { width: 12px; height: 8px; border-radius: 2px; display: inline-block; }
 .np-key i.ovh { background: repeating-linear-gradient(90deg, #475569 0 3px, #1f2937 3px 6px); }
+.np-key i.cloud { background: repeating-linear-gradient(45deg, rgba(148, 163, 184, .7) 0 2px, rgba(100, 116, 139, .5) 2px 4px); }
 .np-h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
 .np-actions button { min-height: var(--tap-sm); }
 .np-add { margin: 8px 0; }

@@ -178,8 +178,15 @@ function renderTimeline() {
     const cls = `np-block ${b.kind}${b.past ? ' past' : ''}${b.id === selected ? ' sel' : ''}${b.target?.source === 'filler' ? ' filler' : ''}`;
     const fill = b.kind === 'target' ? colour(b.target.key, b.target.source) : b.kind === 'weather' ? 'url(#np-hatch)' : '#111827';
     const label = b.kind === 'target' ? b.target.displayName : b.kind === 'weather' ? 'cloud' : '';
-    const title = b.kind === 'target' ? `${b.target.displayName} ${hm(b.start)}–${hm(b.end)}: ~${b.expectedMin} min` : `${hm(b.start)}–${hm(b.end)}: ${b.reason}`;
-    parts.push(`<g class="${cls}" data-block="${esc(b.id)}" tabindex="0" role="button" aria-label="${esc(title)}"><rect x="${a}" y="${yBlocks}" width="${w}" height="${ROW.blocks}" rx="5" fill="${fill}"/>${b.overheadMin && b.kind === 'target' ? `<rect x="${a}" y="${yBlocks}" width="${Math.min(w, x(b.start + b.overheadMin * 60e3) - a)}" height="${ROW.blocks}" rx="5" class="np-ovh"/>` : ''}${w > 36 ? `<text x="${a + 6}" y="${yBlocks + 15}" class="np-btext">${esc(label)}</text><text x="${a + 6}" y="${yBlocks + 29}" class="np-bsub">${b.kind === 'target' ? esc(`${hm(b.start)} · ${dur(b.expectedMin)}`) : ''}</text>` : ''}<title>${esc(title)}</title></g>`);
+    const title = b.kind === 'target' ? `${b.target.displayName} ${hm(b.start)}–${hm(b.end)}: ~${b.expectedMin} min${b.clouds ? ` (clouds forecast ${b.clouds.sky}/100: advisory, check the sky)` : ''}` : `${hm(b.start)}–${hm(b.end)}: ${b.reason}`;
+    // the forecast's cloudy slots shaded grey over the block: the target stays planned in case the sky is better than forecast
+    const shade = b.kind === 'target' && b.clouds
+      ? p.slots.filter((s) => s.cloudy && s.t + SLOT_MS > b.start && s.t < b.end).map((s) => {
+          const sa = x(Math.max(s.t, b.start));
+          return `<rect x="${sa}" y="${yBlocks}" width="${Math.max(0.5, x(Math.min(s.t + SLOT_MS, b.end)) - sa)}" height="${ROW.blocks}" class="np-cloud"/>`;
+        }).join('')
+      : '';
+    parts.push(`<g class="${cls}" data-block="${esc(b.id)}" tabindex="0" role="button" aria-label="${esc(title)}"><rect x="${a}" y="${yBlocks}" width="${w}" height="${ROW.blocks}" rx="5" fill="${fill}"/>${b.overheadMin && b.kind === 'target' ? `<rect x="${a}" y="${yBlocks}" width="${Math.min(w, x(b.start + b.overheadMin * 60e3) - a)}" height="${ROW.blocks}" rx="5" class="np-ovh"/>` : ''}${shade}${w > 36 ? `<text x="${a + 6}" y="${yBlocks + 15}" class="np-btext">${esc(label)}</text><text x="${a + 6}" y="${yBlocks + 29}" class="np-bsub">${b.kind === 'target' ? esc(`${hm(b.start)} · ${dur(b.expectedMin)}`) : ''}</text>` : ''}<title>${esc(title)}</title></g>`);
   }
   // altitude: every scheduled or program target, bold where it is scheduled
   const minAlt = last.settings?.minAltitude ?? state.config?.minAltitude ?? 0;
@@ -199,13 +206,13 @@ function renderTimeline() {
   }
   const now = Date.now();
   if (now >= t0 && now <= t1) parts.push(`<line class="np-nowline" x1="${x(now)}" x2="${x(now)}" y1="${ySky - 4}" y2="${H - 12}"/><text class="np-tick now" x="${x(now)}" y="${H - 2}" text-anchor="middle">now</text>`);
-  el.innerHTML = `<svg class="np-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tonight's plan as a timeline"><defs><pattern id="np-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#1a2436"/><line x1="0" y1="0" x2="0" y2="6" stroke="#334155" stroke-width="3"/></pattern></defs>${parts.join('')}</svg>`;
+  el.innerHTML = `<svg class="np-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tonight's plan as a timeline"><defs><pattern id="np-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#1a2436"/><line x1="0" y1="0" x2="0" y2="6" stroke="#334155" stroke-width="3"/></pattern><pattern id="np-cloudhatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="rgba(148,163,184,.45)"/><line x1="0" y1="0" x2="0" y2="6" stroke="rgba(100,116,139,.7)" stroke-width="2"/></pattern></defs>${parts.join('')}</svg>`;
   const keys = [...scheduled.keys()];
   $('#np-legend').innerHTML = keys.length
     ? keys.map((k) => {
         const b = scheduled.get(k)[0];
         return `<span class="np-key"><i style="background:${colour(k, b.target.source)}"></i>${esc(b.target.displayName)}${b.target.source === 'filler' ? ' (filler)' : ''}</span>`;
-      }).join('') + '<span class="np-key"><i class="ovh"></i>switch (GoTo, focus)</span>'
+      }).join('') + '<span class="np-key"><i class="ovh"></i>switch (GoTo, focus)</span>' + (p.blocks.some((b) => b.clouds) ? '<span class="np-key"><i class="cloud"></i>clouds forecast (advisory)</span>' : '')
     : '';
 }
 
@@ -235,13 +242,14 @@ function renderDetail() {
       <div><span>Altitude</span>${esc(Math.round(b.alt.start))}° → ${esc(Math.round(b.alt.end))}° (max ${esc(Math.round(b.alt.max))}°)</div>
       <div><span>Direction</span>${esc(b.quadrant)} · az ${esc(b.az.start)}°→${esc(b.az.end)}°</div>
       <div><span>Moon</span>${b.moon ? `up ${esc(b.moon.upMin)} min, ≥${esc(b.moon.sepDeg)}° away` : 'down'}</div>
-      <div><span>Sky</span>${b.sky == null ? 'no forecast' : `${esc(b.sky)}/100`}</div>
+      <div><span>Sky</span>${b.sky == null ? 'no forecast' : `${esc(b.sky)}/100`}${b.clouds ? ` <span class="badge waiting" title="${esc(b.clouds.advisory)}">clouds ${esc(dur(b.clouds.cloudyMin))}</span>` : ''}</div>
       <div><span>Filter</span>${esc(t.filter ?? 'auto')}</div>
       <div><span>GoTo name</span>${esc(t.gotoName)}</div>
     </div>
     ${t.advice ? `<div class="np-advice"><div>${verdict(t.advice.detect, t.advice.detectReason)} <span class="small">${esc(t.advice.detectReason)}${t.advice.surfaceBrightness != null ? ` (SB ${esc(t.advice.surfaceBrightness)} mag/arcsec²)` : ''}</span></div>
       <div class="small"><b>Framing:</b> ${esc(t.advice.framing)}</div>
       ${t.advice.acquisition ? captureLine(t.advice.acquisition) : t.advice.sub ? `<div class="small"><b>Subs:</b> ${esc(subLine(t.advice.sub.subS, t.advice.sub.rangeS, t.advice.sub.subs))} in this block — ${esc(t.advice.sub.line)}</div>` : ''}</div>` : ''}
+    ${b.clouds ? `<p class="small np-cloudnote"><b>Clouds forecast (advisory):</b> ${esc(b.clouds.advisory)}</p>` : ''}
     <p class="small">${esc(b.reason)}</p>
     ${t.notes ? `<p class="small"><b>Note:</b> ${esc(t.notes)}</p>` : ''}
     <div class="ctl-row np-actions">
