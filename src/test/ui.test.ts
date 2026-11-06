@@ -483,3 +483,36 @@ test('the Rain Guard: an alarm from the server shows on every screen and is sile
   await until(() => ui.$('#btn-guard-ack').hidden, 'the silence button to go');
   assert.match(text('#guard-text'), /silenced at/);
 });
+
+test('the Switches group reads the switches when opened and sets one with On/Off', async () => {
+  openTab('view');
+  let heater: boolean | null = null;
+  const list = () => [
+    { id: 'lens_defog', label: 'Dew heater', hint: 'Heats the lens', on: heater },
+    { id: 'ring_light', label: 'Ring light', hint: 'The ring', on: true },
+  ];
+  route('POST control', (_p, { body }) => {
+    const b = body as { action: string; id?: string; on?: boolean };
+    if (b.action === 'switches') return { switches: list() };
+    if (b.action === 'switch') {
+      heater = !!b.on;
+      return { result: `Dew heater ${b.on ? 'on' : 'off'}`, switches: list() };
+    }
+    return { ok: true };
+  });
+  stateSocket().push({ type: 'telescope', state: { connected: true } });
+  const g = ui.$('#grp-switches') as HTMLDetailsElement;
+  g.open = true;
+  g.dispatchEvent(new ui.window.Event('toggle'));
+  await until(() => !!ui.document.querySelector('[data-sw="lens_defog"]'), 'the switch rows');
+  const pressed = (id: string, v: '1' | '0') => ui.$(`[data-sw="${id}"] [data-on="${v}"]`).getAttribute('aria-pressed');
+  // not reported yet: neither pressed; reported: the one it is
+  assert.equal(pressed('lens_defog', '1'), 'false');
+  assert.equal(pressed('lens_defog', '0'), 'false');
+  assert.equal(pressed('ring_light', '1'), 'true');
+  calls.length = 0;
+  click('[data-sw="lens_defog"] [data-on="1"]');
+  await until(() => pressed('lens_defog', '1') === 'true', 'the heater shown on');
+  assert.deepEqual(calls.find((c) => (c.body as { action?: string })?.action === 'switch')?.body, { action: 'switch', id: 'lens_defog', on: true });
+  assert.match(toastText(), /Dew heater on/);
+});

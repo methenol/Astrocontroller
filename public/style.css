@@ -240,6 +240,15 @@ body.view-full .only-full, .view-main:fullscreen .only-full { display: inline-fl
 .ctl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; min-width: 0; }
 .ctl-row > * { min-width: 0; }
 .ctl-row button { flex: 1 1 auto; }
+.switch-list { display: flex; flex-direction: column; gap: 6px; }
+.switch-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.switch-row .sw-label { flex: 1 1 auto; min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.switch-row .sw-label .sw-unknown { color: var(--muted); font-size: 11.5px; margin-left: 4px; }
+.sw-seg { display: inline-flex; flex: 0 0 auto; }
+.sw-seg button { min-width: 52px; border-radius: 0; }
+.sw-seg button:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.sw-seg button:last-child { border-radius: 0 var(--radius) var(--radius) 0; margin-left: -1px; }
+.sw-seg button[aria-pressed="true"] { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
 .host-row input { flex: 1 1 10em; }
 .host-row button { flex: 0 0 auto; }
 #host-note { margin: 4px 0 0; }

@@ -8,6 +8,7 @@ import express from 'express';
 import { config, setTelescopeHost } from '../config.js';
 import { systemRoutes } from '../web/routes/system.js';
 import { mediaRoutes, ThumbCache } from '../web/routes/media.js';
+import { controlRoutes } from '../web/routes/control.js';
 import { jsonErrors } from '../web/http.js';
 import type { WebContext } from '../web/context.js';
 
@@ -121,5 +122,60 @@ describe('media routes', () => {
       config.paths.captures = before;
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('control routes: device switches', () => {
+  async function withControl(scope: Record<string, unknown>, fn: (post: (b: unknown) => Promise<{ status: number; body: Record<string, any> }>, events: string[]) => Promise<void>) {
+    const events: string[] = [];
+    const ctx = { scope: { label: 'Test scope', ...scope }, duty: { event: (t: string) => events.push(t) } } as unknown as WebContext;
+    const app = express();
+    app.use(express.json());
+    app.use('/api', controlRoutes(ctx));
+    app.use(jsonErrors);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/control`;
+    try {
+      await fn(async (b) => {
+        const res = await fetch(base, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
+        return { status: res.status, body: (await res.json()) as Record<string, any> };
+      }, events);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  }
+  const sw = (sets: string[]) => ({
+    list: async () => [{ id: 'lens_defog', label: 'Dew heater', hint: '', on: false }],
+    set: async (id: string, on: boolean) => {
+      sets.push(`${id} ${on}`);
+      return { result: 'Dew heater on', switches: [] };
+    },
+  });
+
+  test('lists and sets a switch, and tells the agent', async () => {
+    const sets: string[] = [];
+    await withControl({ capabilities: { switches: true }, switches: sw(sets) }, async (post, events) => {
+      const l = await post({ action: 'switches' });
+      assert.equal(l.status, 200);
+      assert.equal(l.body.switches[0].id, 'lens_defog');
+      const r = await post({ action: 'switch', id: 'lens_defog', on: true });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.result, 'Dew heater on');
+      assert.deepEqual(sets, ['lens_defog true']);
+      assert.match(events.join(), /dew heater on from the web UI/);
+    });
+  });
+
+  test('an unknown switch is a 404 and sends nothing; a driver without switches is a 501', async () => {
+    const sets: string[] = [];
+    await withControl({ capabilities: { switches: true }, switches: sw(sets) }, async (post) => {
+      assert.equal((await post({ action: 'switch', id: 'warp_drive', on: true })).status, 404);
+      assert.equal((await post({ action: 'switch', id: 'lens_defog' })).status, 400, 'on is required');
+      assert.deepEqual(sets, []);
+    });
+    await withControl({ capabilities: { switches: false } }, async (post) => {
+      assert.equal((await post({ action: 'switches' })).status, 501);
+    });
   });
 });

@@ -3,6 +3,7 @@ import { layoutBoot } from './shell.js';
 import { startVideo } from './video.js';
 import './telescope.js';
 import './controls.js';
+import './switches.js';
 import './duty.js';
 import './chat.js';
 import { startWeather } from './tonight.js';

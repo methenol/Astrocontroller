@@ -8,7 +8,9 @@ import { measureTele, starFocusSweep, sharpnessLine } from '../../media/focus.js
 import { measurePolarReport, withAstroBusyRecovery } from '../../mcp/tools/astro.js';
 import { assertSurveyAllowed, stopSurvey, surveyObstructions } from '../../media/horizon/survey.js';
 import { wireLines } from './wirelog.js';
-import type { Capabilities, GotoTarget, WebTelescope } from '../../web/telescope.js';
+import type { Capabilities, DeviceSwitches, GotoTarget, SwitchView, WebTelescope } from '../../web/telescope.js';
+import type { TelescopeState } from './controller/state.js';
+import type { PowerAction } from './controller/system.js';
 import type { ControlAction } from '../../web/routes/control.js';
 
 const LEVEL_PITCH_DEG = 90;
@@ -38,6 +40,7 @@ const CAPABILITIES: Capabilities = {
   sync: true,
   liveView: true,
   rgb: true,
+  switches: true,
   reboot: true,
   shutdown: true,
   album: true,
@@ -47,6 +50,42 @@ const CAPABILITIES: Capabilities = {
   wire: true,
   video: ['tele', 'wide', 'stack'],
 };
+
+type SwitchKey = keyof NonNullable<TelescopeState['switches']>;
+
+/** The Dwarf's switches: the two lights (the power commands) and the device switches (extras.ts). */
+export function dwarfSwitches(dwarf: Dwarf): DeviceSwitches {
+  const power = (on: PowerAction, off: PowerAction) => async (v: boolean) => {
+    await dwarf.power(v ? on : off);
+    return null;
+  };
+  const table: Array<{ id: string; key: SwitchKey; label: string; hint: string; set(on: boolean): Promise<{ confirmed: boolean } | null> }> = [
+    { id: 'ring_light', key: 'ringLight', label: 'Ring light', hint: 'The RGB light ring: turn it off for astro', set: power('rgb_on', 'rgb_off') },
+    { id: 'power_indicator', key: 'powerIndicator', label: 'Power indicator', hint: 'The power button light', set: power('indicator_on', 'indicator_off') },
+    { id: 'lens_defog', key: 'lensDefog', label: 'Dew heater', hint: 'The lens defogger heater', set: (on) => dwarf.extras.setLensDefog(on) },
+    { id: 'anti_tangle', key: 'antiTangle', label: 'Anti-tangle', hint: 'The electronic limit: stops the mount before the cable winds up', set: (on) => dwarf.extras.setAntiTangle(on) },
+    { id: 'auto_cooling', key: 'autoCooling', label: 'Auto cooling', hint: 'The firmware regulates the sensor temperature', set: (on) => dwarf.extras.setAutoCooling(on) },
+    { id: 'auto_shutdown', key: 'autoShutdown', label: 'Auto shutdown', hint: 'Power off when idle', set: (on) => dwarf.extras.setAutoShutdown(on) },
+    { id: 'power_sound', key: 'powerSound', label: 'Power sound', hint: 'The start-up chime (declared by the firmware but unused by the official app: it may not take)', set: (on) => dwarf.extras.setPowerSound(on) },
+    { id: 'do_not_disturb', key: 'doNotDisturb', label: 'Do not disturb', hint: 'No notifications while shooting (declared by the firmware but unused by the official app: it may not take)', set: (on) => dwarf.extras.setDoNotDisturb(on) },
+  ];
+  const list = async (): Promise<SwitchView[]> => {
+    const st = dwarf.extras.switches();
+    return table.map(({ id, key, label, hint }) => ({ id, label, hint, on: st[key] ?? null }));
+  };
+  return {
+    list,
+    async set(id, on) {
+      const sw = table.find((s) => s.id === id);
+      if (!sw) throw new Error(`no switch "${id}"`);
+      const r = await sw.set(on);
+      const what = `${sw.label} ${on ? 'on' : 'off'}`;
+      // the lights are fire-and-forget; the device switches say whether the telescope reported the change
+      const result = r === null ? `${what} sent` : r.confirmed ? what : `${what} sent; the telescope has not confirmed it`;
+      return { result, switches: await list() };
+    },
+  };
+}
 
 export function dwarfWeb(dwarf: Dwarf, hub: StreamHub): WebTelescope {
   const control = async (b: ControlAction): Promise<unknown> => {
@@ -146,6 +185,7 @@ export function dwarfWeb(dwarf: Dwarf, hub: StreamHub): WebTelescope {
     setHost: (host) => dwarf.setHost(host),
     control,
     goto,
+    switches: dwarfSwitches(dwarf),
     horizonSurvey: {
       start: (o) => surveyObstructions({ dwarf, hub }, o),
       stop: () => stopSurvey(dwarf),

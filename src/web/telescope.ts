@@ -40,6 +40,8 @@ export interface Capabilities {
   sync: boolean;
   liveView: boolean;
   rgb: boolean;
+  /** the device switches (lights, the dew heater, power behaviour): WebTelescope.switches */
+  switches: boolean;
   reboot: boolean;
   shutdown: boolean;
   /** the SD-card album, sessions on the card, transfers into the library */
@@ -56,6 +58,23 @@ export interface Capabilities {
    * compete for the camera.
    */
   singleView?: boolean;
+}
+
+/** A device switch as the UI shows it; `on` is null while the telescope has not said. */
+export interface SwitchView {
+  id: string;
+  label: string;
+  /** what it does, for the tooltip */
+  hint: string;
+  on: boolean | null;
+}
+
+/** The on/off switches the telescope has (each driver its own: the Dwarf's ring light, the Seestar's dew heater…). */
+export interface DeviceSwitches {
+  /** every switch with what the telescope last reported */
+  list(): Promise<SwitchView[]>;
+  /** set one; `result` says what happened (whether the telescope confirmed it, where it can) */
+  set(id: string, on: boolean): Promise<{ result: string; switches: SwitchView[] }>;
 }
 
 /** A GoTo the shared routes have resolved and checked (altitude, the Sun). */
@@ -92,6 +111,8 @@ export interface WebTelescope {
   /** a manual control the route has validated (and checked against `capabilities`) */
   control(b: ControlAction): Promise<unknown>;
   goto(t: GotoTarget): Promise<unknown>;
+  /** the device switches, where the driver has any (capabilities.switches) */
+  switches?: DeviceSwitches;
   /** the obstruction survey, where the driver can run one */
   /** rehearsal (the Seestar's): everything but the sky, and no mask saved — for checking the mechanics */
   horizonSurvey?: { start(o: { calibrate?: boolean; rehearsal?: boolean }): Promise<{ summary: string }>; stop(): Promise<unknown>; assertAllowed(o?: { rehearsal?: boolean }): void };

@@ -15,7 +15,7 @@ import { displayJpeg } from '../../mcp/tools/common.js';
 import { sharpnessLine, starSharpness } from '../../media/focus.js';
 import { decode, type FloatImage } from '../../media/images.js';
 import { body, route } from '../../web/http.js';
-import { unsupported, type Capabilities, type GotoTarget, type WebTelescope } from '../../web/telescope.js';
+import { unsupported, type Capabilities, type DeviceSwitches, type GotoTarget, type SwitchView, type WebTelescope } from '../../web/telescope.js';
 import type { ControlAction } from '../../web/routes/control.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
 import { bayerFits, SeestarCapture } from './capture.js';
@@ -54,6 +54,7 @@ const CAPABILITIES: Capabilities = {
   sync: true,
   liveView: true,
   rgb: true,
+  switches: true,
   reboot: true,
   shutdown: true,
   album: true,
@@ -173,6 +174,39 @@ function exposureMs(v: string | number | boolean): number {
   const ms = frac ? (1000 * +frac[1]!) / +frac[2]! : s.endsWith('ms') ? parseFloat(s) : parseFloat(s) * 1000;
   if (!Number.isFinite(ms) || ms <= 0) throw new Error(`exposure "${v}" is not a duration (seconds, e.g. 10, or a fraction, e.g. 1/100)`);
   return ms;
+}
+
+type Settings = Record<string, unknown>;
+const flag = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
+
+/**
+ * The Seestar's switches, read from get_setting: the dew heater (pi_output_set2, at device.ts's
+ * power), the indicator light (light_brightness 0 or 100), auto power-off and the beep.
+ */
+export function seestarSwitches(scope: Pick<Seestar, 'state' | 'settings' | 'setSetting' | 'setHeater' | 'setLightBrightness'>): DeviceSwitches {
+  const table: Array<{ id: string; label: string; hint: string; read(s: Settings): boolean | null; set(on: boolean): Promise<unknown> }> = [
+    { id: 'lens_defog', label: 'Dew heater', hint: 'Heats the lens against dew', read: (s) => flag(s.heater_enable), set: (on) => scope.setHeater(on) },
+    { id: 'indicator_light', label: 'Indicator light', hint: 'The status light on the arm: turn it off for astro', read: (s) => (typeof s.light_brightness === 'number' ? s.light_brightness > 0 : null), set: (on) => scope.setLightBrightness(on ? 100 : 0) },
+    { id: 'auto_shutdown', label: 'Auto power-off', hint: 'Power off when idle', read: (s) => flag(s.auto_power_off), set: (on) => scope.setSetting({ auto_power_off: on }) },
+    { id: 'power_sound', label: 'Beep', hint: 'The sounds the Seestar makes', read: (s) => (typeof s.beep_volume === 'string' ? s.beep_volume !== 'off' : null), set: (on) => scope.setSetting({ beep_volume: on ? 'backyard' : 'off' }) },
+  ];
+  const list = async (): Promise<SwitchView[]> => {
+    // offline: the switches are there, their states unknown
+    const s = scope.state.connected ? (((await scope.settings().catch(() => null)) ?? {}) as Settings) : {};
+    return table.map(({ id, label, hint, read }) => ({ id, label, hint, on: read(s) }));
+  };
+  return {
+    list,
+    async set(id, on) {
+      const sw = table.find((t) => t.id === id);
+      if (!sw) throw new Error(`no switch "${id}"`);
+      await sw.set(on);
+      const switches = await list();
+      const now = switches.find((t) => t.id === id)?.on;
+      const what = `${sw.label} ${on ? 'on' : 'off'}`;
+      return { result: now === on ? what : now === null ? `${what} sent` : `${what} sent; the Seestar still reports it ${now ? 'on' : 'off'}`, switches };
+    },
+  };
 }
 
 /** The live views, photo capture, storage and the horizon survey, shared by the web UI and the agent's tools. */
@@ -432,6 +466,7 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
     setHost: (host) => scope.setHost(host),
     control,
     goto,
+    switches: seestarSwitches(scope),
     routes,
     wireLines: (n, o) => scope.link.wireLines(n, o),
     horizonSurvey: {

@@ -37,6 +37,7 @@ const CONTROLS = [
 const SCREENS = [
   ['[data-tab="album"]', 'album'],
   ['#sessions-card', 'sessions'],
+  ['#grp-switches', 'switches'],
 ];
 
 /** True unless the driver says it cannot (an old server sends no capabilities: everything is on). */

@@ -112,8 +112,11 @@ export interface TelescopeState {
   /** Wide/guide encoder positions: the SDK's state schema predated them, the APK's carries them. */
   wideFocusPosition?: number;
   guideFocusPosition?: number;
-  /** Device switches, carried on the wire as `DeviceSwitchState` (0 off, 1 on). */
-  switches?: { antiTangle?: boolean; lensDefog?: boolean; autoCooling?: boolean; autoShutdown?: boolean; powerSound?: boolean; doNotDisturb?: boolean };
+  /**
+   * Device switches, carried on the wire as `DeviceSwitchState` (0 off, 1 on); the ring light and the
+   * power indicator come from their own notifications (`RgbState`, `PowerIndState`, 1 on).
+   */
+  switches?: { antiTangle?: boolean; lensDefog?: boolean; autoCooling?: boolean; autoShutdown?: boolean; powerSound?: boolean; doNotDisturb?: boolean; ringLight?: boolean; powerIndicator?: boolean };
   /** The device's own IMU attitude, in degrees, as it reports it (`CMD_NOTIFY_DEVICE_ATTITUDE`). */
   attitude?: { pitchDeg: number; yawDeg: number; rollDeg: number; at: number };
   motors: { rotationDeg?: number; pitchDeg?: number; homed?: boolean; updatedAt?: number };
@@ -230,6 +233,12 @@ export function applyNotification(st: TelescopeState, params: ParamCache, n: Not
     break;
   case 'shootingDoNotDisturbState':
     st.switches = { ...st.switches, doNotDisturb: deviceOn(d.state) };
+    break;
+  case 'rgbState':
+    st.switches = { ...st.switches, ringLight: deviceOn(d.state) };
+    break;
+  case 'powerIndicatorState':
+    st.switches = { ...st.switches, powerIndicator: deviceOn(d.state) };
     break;
   case 'deviceAttitude':
     st.attitude = { pitchDeg: d.pitch ?? 0, yawDeg: d.yaw ?? 0, rollDeg: d.roll ?? 0, at: n.ts };

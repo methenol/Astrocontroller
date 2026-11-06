@@ -38,13 +38,15 @@ export const ControlBody = z.discriminatedUnion('action', [
   z.object({ action: z.literal('setting'), camera, setting: z.string().min(1), value: z.union([z.string(), z.number(), z.boolean()]) }),
   z.object({ action: z.literal('settings'), camera }),
   z.object({ action: z.literal('rgb'), on: z.boolean().optional() }),
+  z.object({ action: z.literal('switches') }),
+  z.object({ action: z.literal('switch'), id: z.string().min(1).max(64), on: z.boolean() }),
   z.object({ action: z.literal('find'), name: z.string().default('') }),
   z.object({ action: z.literal('goto'), name: z.string().min(1), oneClick: z.boolean().optional() }),
   z.object({ action: z.literal('goto_sky'), name: z.string().trim().max(120).optional(), raHours: num.min(0).lt(24), decDeg: num.min(-90).max(90), oneClick: z.boolean().optional() }),
 ]);
 
-/** A control the driver carries out (GoTo and find are resolved here first). */
-export type ControlAction = Exclude<z.infer<typeof ControlBody>, { action: 'find' | 'goto' | 'goto_sky' }>;
+/** A control the driver carries out (GoTo and find are resolved here first; the switches go to scope.switches). */
+export type ControlAction = Exclude<z.infer<typeof ControlBody>, { action: 'find' | 'goto' | 'goto_sky' | 'switches' | 'switch' }>;
 
 /** The capability each driver action needs, and what the refusal calls it. */
 const NEEDS: Record<ControlAction['action'], [keyof Capabilities, string]> = {
@@ -110,6 +112,17 @@ export function controlRoutes({ scope, duty }: WebContext): Router {
           duty.event(`the user started a GoTo to ${t.label}${framing} from the Stellarium tab`, true);
           const go = t.kind === 'body' ? { kind: 'body' as const, body: t.body, label: t.label, oneClick } : { kind: 'position' as const, label: t.label, raHours: t.raHours, decDeg: t.decDeg, oneClick };
           return { result: await scope.goto(go), target: t.label };
+        }
+        case 'switches':
+        case 'switch': {
+          const sw = scope.capabilities.switches ? scope.switches : undefined;
+          if (!sw) throw unsupported(scope, 'Device switches');
+          if (b.action === 'switches') return { switches: await sw.list() };
+          const known = (await sw.list()).find((s) => s.id === b.id);
+          if (!known) throw notFound(`the ${scope.label} has no switch "${b.id}"`);
+          const r = await sw.set(b.id, b.on);
+          duty.event(`the user turned the ${known.label.toLowerCase()} ${b.on ? 'on' : 'off'} from the web UI`, true);
+          return r;
         }
         default: {
           const [cap, what] = NEEDS[b.action];

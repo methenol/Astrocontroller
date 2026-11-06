@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { Dwarf } from '../drivers/dwarf/device.js';
 import { Cmd } from '../drivers/dwarf/protocol.js';
 import { commandInfo, moduleIdFor } from '../drivers/dwarf/wire/index.js';
+import { dwarfSwitches } from '../drivers/dwarf/web.js';
 
 /**
  * The six device switches the official SDK never registered. What is under test is the recovered part:
@@ -125,5 +126,24 @@ describe('the device switches the SDK never registered', () => {
     assert.equal(dwarf.state.attitude?.pitchDeg, 12.5);
     assert.equal(dwarf.state.attitude?.yawDeg, 180);
     assert.equal(dwarf.state.attitude?.rollDeg, -3);
+  });
+  test('the web UI\'s switches: the ring light is sent as its power command and its notification is its state', async () => {
+    const RGB_ON = commandInfo('CMD_RGB_POWER_OPEN_RGB').id;
+    const NOTIFY_RGB = commandInfo('CMD_NOTIFY_RGB_STATE').id;
+    fake.on(RGB_ON, async (_req, f) => {
+      await f.notify(NOTIFY_RGB, { state: 1 });
+      return { code: 0 };
+    });
+    const sw = dwarfSwitches(dwarf);
+    const before = await sw.list();
+    assert.equal(before.find((s) => s.id === 'ring_light')?.on, null, 'nothing reported yet is unknown, not off');
+    assert.ok(before.some((s) => s.id === 'lens_defog'), 'the dew heater is one of them');
+    const seen = fake.nextRequest(RGB_ON);
+    const r = await sw.set('ring_light', true);
+    await seen;
+    assert.equal(r.result, 'Ring light on sent');
+    await new Promise((res) => setTimeout(res, 50));
+    assert.equal((await sw.list()).find((s) => s.id === 'ring_light')?.on, true);
+    await assert.rejects(sw.set('warp_drive', true), /no switch/);
   });
 });
