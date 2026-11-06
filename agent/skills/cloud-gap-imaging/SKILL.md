@@ -18,7 +18,7 @@ Goal: collect clean subs in the clear gaps without filling the stack with cloudy
 
 ## Loop
 1. When clear: `goto_target` (calibration needs stars, so only attempt in a gap), `focus_position action=infinity`, then astro autofocus if time allows, then `live_stacking action=start`.
-2. Run it as a duty (`duty action=start`); on each sample: `stacking_status`. If `rejected` rises quickly or the stack stops growing, check the wide view.
+2. This runs under the duty the owner started; on each sample: `stacking_status`. If `rejected` rises quickly or the stack stops growing, check the wide view.
 3. Cloud arriving: `live_stacking action=stop` (normal stop keeps the stack so far). Don't move the scope. The pointing stays valid if the mount isn't disturbed.
 4. Between gaps: on every sample sweep with `sky_check` toward the targets' part of the sky (several directions, not one patch), with a short `duty action=next_check in_s=60` so the next sweep comes soon. Start the moment stars show (~10+): GoTo + stacking in the same turn. Cloudy subs get rejected anyway.
 5. Gap returns: start stacking again. If stars look shifted or the target isn't centred, re-run `goto_target` first. Each start creates a new session folder on the SD card. That's fine: the user can stack them together later from the library.

@@ -92,9 +92,19 @@ test('one handler that throws never stops the messages after it', () => {
   assert.equal(text('#duty-text'), 'until 05:00 · next sample after this turn · 1 wake · 2 event(s) waiting');
   assert.equal(text('#btn-duty'), 'Stop duty');
   assert.equal(ui.$('#btn-duty-wake').hidden, false);
+  // the header shows that a duty is armed
+  assert.ok(ui.$('.topbar').classList.contains('duty-armed'));
+  assert.equal(ui.$('#chip-duty').hidden, false);
+  assert.equal(text('#chip-duty'), '● DUTY ARMED');
+  s.push({ type: 'duty', duty: { status: 'paused', pausedReason: 'paused by the user', wakes: 1 } });
+  assert.ok(!ui.$('.topbar').classList.contains('duty-armed'));
+  assert.ok(ui.$('.topbar').classList.contains('duty-paused'));
+  assert.equal(text('#chip-duty'), '❚❚ DUTY PAUSED');
   s.push({ type: 'duty', duty: { status: 'off', wakes: 3, endedReason: 'reached 05:00' } });
   assert.equal(text('#duty-state'), 'Duty off');
   assert.equal(text('#duty-text'), 'last: reached 05:00');
+  assert.ok(!ui.$('.topbar').classList.contains('duty-armed'));
+  assert.equal(ui.$('#chip-duty').hidden, true);
   assert.equal(ui.$('#btn-duty-pause').hidden, true);
 });
 

@@ -41,7 +41,6 @@ export function agentRoutes({ agent, duty }: WebContext): Router {
     '/agent/prompt',
     route(async (req) => {
       const b = body(req, PromptBody);
-      duty.userSpoke();
       await agent.prompt(b.text, b.images ?? [], promptMode(b.mode));
       return { ok: true };
     }),
@@ -57,8 +56,7 @@ export function agentRoutes({ agent, duty }: WebContext): Router {
   api.post(
     '/agent/abort',
     route(async () => {
-      // Stop means stop: no automatic wake right after it
-      duty.userStop();
+      // an interrupt ends the agent's turn only: a running duty carries on, and its next sample or an event wakes the agent
       await agent.abort();
     }),
   );

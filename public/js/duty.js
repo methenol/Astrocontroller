@@ -11,6 +11,16 @@ export function renderDuty(d) {
   state.duty = d;
   const bar = $('#duty-bar');
   bar.className = `duty-bar ${d.status}`;
+  // the header shows at a glance that a duty is armed (active) or held (paused)
+  const top = document.querySelector('.topbar');
+  top?.classList.toggle('duty-armed', d.status === 'active');
+  top?.classList.toggle('duty-paused', d.status === 'paused');
+  const chip = $('#chip-duty');
+  if (chip) {
+    chip.hidden = d.status === 'off';
+    chip.textContent = d.status === 'paused' ? '❚❚ DUTY PAUSED' : '● DUTY ARMED';
+    chip.title = d.objective ? `${d.status === 'paused' ? 'Duty paused' : 'On duty'}${d.untilLabel ? ` until ${d.untilLabel}` : ''}: ${d.objective}` : '';
+  }
   $('#duty-state').textContent = d.status === 'active' ? 'On duty' : d.status === 'paused' ? 'Duty paused' : 'Duty off';
   const parts = [];
   if (d.status !== 'off') {
@@ -20,7 +30,6 @@ export function renderDuty(d) {
     parts.push(`${d.wakes} wake${d.wakes === 1 ? '' : 's'}`);
   } else if (d.endedReason) parts.push(`last: ${d.endedReason}`);
   if (d.pendingEvents) parts.push(`${d.pendingEvents} event(s) waiting`);
-  if (d.heldByStop) parts.push('automatic wakes held until you write to the agent');
   $('#duty-text').textContent = parts.join(' · ');
   bar.title = d.objective ? `Objective: ${d.objective}` : '';
   $('#btn-duty').textContent = d.status === 'off' ? 'Start duty…' : 'Stop duty';

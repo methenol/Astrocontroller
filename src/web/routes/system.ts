@@ -83,7 +83,7 @@ export function systemRoutes(ctx: WebContext, onHostChanged: () => void): Router
           duty.resume();
           break;
         case 'stop':
-          duty.stop('user', 'from the web UI');
+          duty.stop('from the web UI');
           break;
         case 'wake':
           duty.wakeNow();

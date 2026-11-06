@@ -6,11 +6,13 @@
  * summary and stopped. This module is the controller's clock and sensors; the agent stays the
  * controller, deciding every action:
  *
- * - Duty: an objective from the user (or the agent on the user's request) with an optional end
- *   time ("until", e.g. astronomical dawn). While on duty, each time the agent's turn ends the next
- *   sample is scheduled (DUTY_INTERVAL_S, or what the agent asked for with duty next_check, 30 s to
- *   15 min); at that time the agent is woken with the objective and fresh measurements. It cannot
- *   end a duty before its end time; only the user can stop or pause it.
+ * - Duty: an objective from the user (the duty bar, the night plan, or a mode the user turned on)
+ *   with an optional end time ("until", e.g. astronomical dawn). While on duty, each time the
+ *   agent's turn ends the next sample is scheduled (DUTY_INTERVAL_S, or what the agent asked for
+ *   with duty next_check, 30 s to 15 min); at that time the agent is woken with the objective and
+ *   fresh measurements. The agent never starts, pauses or stops a duty: only the user does, and it
+ *   ends at its end time. Interrupting the agent (Esc in chat) only ends its turn; the duty runs on
+ *   and the next sample or event wakes it.
  * - Events: things the agent started that end on their own (a dark master, a transfer, processing,
  *   a stack the scope stopped) wake it as they happen, on duty or not. On duty, so do connection
  *   loss, low battery, charging and a hung camera service (duty/sensors.ts).
@@ -41,16 +43,15 @@ const WAKE_RETRY_MS = 60_000;
 /** Events kept while the agent cannot be woken; the oldest are dropped. */
 const MAX_EVENTS = 30;
 const TICK_MS = 1_000;
-const REPORT_CHARS = 300;
 
 export interface DutyState {
   status: 'off' | 'active' | 'paused';
   objective?: string;
   startedAt?: number;
-  startedBy?: 'user' | 'agent';
+  startedBy?: 'user';
   /** what started it on the owner's behalf when no one pressed Start (the plan's nightly run, Starfront's nights) */
   startedVia?: string;
-  /** end of the duty (ms); the agent cannot complete it earlier */
+  /** end of the duty (ms) */
   until?: number;
   untilLabel?: string;
   intervalS: number;
@@ -100,7 +101,7 @@ function savedDuty(raw: unknown): Partial<DutyState> | null {
   if (!STATUSES.has(o.status as DutyState['status'])) return null;
   const num = (k: string) => (typeof o[k] === 'number' && Number.isFinite(o[k]) ? (o[k] as number) : undefined);
   const str = (k: string) => (typeof o[k] === 'string' ? (o[k] as string) : undefined);
-  const by = o.startedBy === 'user' || o.startedBy === 'agent' ? o.startedBy : undefined;
+  const by = o.startedBy === 'user' ? o.startedBy : undefined;
   return {
     status: o.status as DutyState['status'],
     objective: str('objective'),
@@ -133,13 +134,6 @@ export class DutyLoop extends SafeEmitter {
   private delivering = false;
   /** The END wake, composed at the end time, that could not be delivered: sent as written once the agent can take it. */
   private finalPending: string | null = null;
-  /**
-   * The user pressed Stop: no automatic wake of any kind until they write to the agent again.
-   * Otherwise an event (or a duty's final wake) revived whatever was left in the agent's todo list:
-   * on 2026-10-04 it finished a wind-down the user had interrupted two hours earlier and shut the
-   * telescope down.
-   */
-  private userStopped = false;
   /** the next sample is the first of a new session or a new duty: say so, and that nothing earlier applies */
   private fresh = false;
   private readonly now: () => number;
@@ -214,24 +208,19 @@ export class DutyLoop extends SafeEmitter {
     this.emit('state', this.status());
   }
 
-  status(): DutyState & { pendingEvents: number; heldByStop: boolean } {
-    return { ...this.state, pendingEvents: this.events.length, heldByStop: this.userStopped };
+  status(): DutyState & { pendingEvents: number } {
+    return { ...this.state, pendingEvents: this.events.length };
   }
 
   // ---------------------------------------------------------------- control
   /** until: 'dawn' (astronomical dawn of the current/next night), 'none', 'HH:MM' local, or an ISO time. */
-  start(o: { objective: string; until?: string; intervalS?: number; by: 'user' | 'agent'; via?: string }): DutyState {
+  start(o: { objective: string; until?: string; intervalS?: number; by: 'user'; via?: string }): DutyState {
     const objective = o.objective.trim();
     if (!objective) throw new Error('objective required');
     const until = parseUntil(o.until, this.now(), () => {
       const loc = this.scope.requireLocation();
       return { lat: loc.lat, lon: loc.lon, elev: loc.elev };
     });
-    const prev = this.state;
-    if (o.by === 'agent' && prev.status === 'active' && prev.until && (!until || until.at < prev.until)) {
-      // the agent can extend a duty, never cut it short
-      throw new Error(`a duty is already active until ${prev.untilLabel}; the agent can only extend it (give an end time after that), or the user can change it in the web UI`);
-    }
     this.state = {
       status: 'active',
       objective,
@@ -242,14 +231,10 @@ export class DutyLoop extends SafeEmitter {
       untilLabel: until?.label,
       intervalS: clampInterval(o.intervalS ?? config.agent.dutyIntervalS),
       wakes: 0,
-      // the agent is starting it inside a turn: the first sample follows that turn's end
-      nextWakeAt: o.by === 'agent' ? undefined : this.now(),
+      nextWakeAt: this.now(),
     };
-    if (o.by === 'user') {
-      this.userStopped = false;
-      // the user is directing a new duty: the previous one's undelivered events and END steps no longer apply
-      this.dropPending();
-    }
+    // the user is directing a new duty: the previous one's undelivered events and END steps no longer apply
+    this.dropPending();
     log.info(`duty started by ${o.via ?? `the ${o.by}`}: "${objective}"${until ? ` until ${until.label}` : ''}`);
     this.agent.note('info', `Duty started${o.via ? ` by ${o.via}` : ''}${until ? ` until ${until.label}` : ''}: ${objective}`);
     this.save();
@@ -275,20 +260,6 @@ export class DutyLoop extends SafeEmitter {
     this.fresh = true;
   }
 
-  /** Stop pressed on the agent: pause the duty and hold every automatic wake. */
-  userStop(): void {
-    this.userStopped = true;
-    this.pause('you stopped the agent');
-    this.publish();
-  }
-
-  /** The user wrote to the agent: automatic wakes may resume. */
-  userSpoke(): void {
-    if (!this.userStopped) return;
-    this.userStopped = false;
-    this.publish();
-  }
-
   pause(reason: string): void {
     if (this.state.status !== 'active') return;
     Object.assign(this.state, { status: 'paused', pausedReason: reason, nextWakeAt: undefined });
@@ -304,14 +275,14 @@ export class DutyLoop extends SafeEmitter {
       throw new Error('the duty ended while paused (end time passed)');
     }
     Object.assign(this.state, { status: 'active', pausedReason: undefined, nextWakeAt: this.now() });
-    this.userStopped = false;
     this.agent.note('info', 'Duty resumed');
     this.save();
   }
 
-  stop(by: 'user' | 'agent', reason: string): void {
+  /** The user stops the duty (web UI). */
+  stop(reason: string): void {
     if (this.state.status === 'off') return;
-    this.end(`${by === 'user' ? 'stopped by the user' : 'completed by the agent'}: ${reason}`);
+    this.end(`stopped by the user: ${reason}`);
   }
 
   private end(reason: string): void {
@@ -329,17 +300,6 @@ export class DutyLoop extends SafeEmitter {
     this.state.requestReason = reason;
     this.save();
     return { inS: s, at: clock(this.now() + s * 1000) };
-  }
-
-  /** The agent says the objective is done. Refused before the duty's end time. */
-  complete(report: string): void {
-    if (this.state.status === 'off') throw new Error('no active duty');
-    if (this.state.until && this.now() < this.state.until) {
-      throw new Error(
-        `refused: this duty runs until ${this.state.untilLabel} (set by ${this.state.startedBy === 'user' ? 'the user' : "you on the user's request"}). Until then keep controlling: act on the measurements, and end your turn when everything is on track; you will be woken for the next sample. If you need something from the user, ask in chat; the duty continues meanwhile.`,
-      );
-    }
-    this.stop('agent', report.slice(0, REPORT_CHARS));
   }
 
   /** Wake now (UI button). */
@@ -390,7 +350,7 @@ export class DutyLoop extends SafeEmitter {
     if (this.deliverTimer) return;
     this.deliverTimer = setTimeout(() => {
       this.deliverTimer = null;
-      if (!this.agent.ready || this.agent.busy || this.userStopped) return; // delivered when the turn ends / the user writes
+      if (!this.agent.ready || this.agent.busy) return; // delivered when the turn ends
       void this.wake(this.finalPending !== null ? 'final' : this.state.status === 'active' ? 'event' : 'event-only');
     }, ms);
     this.deliverTimer.unref();
@@ -434,7 +394,7 @@ export class DutyLoop extends SafeEmitter {
   }
 
   private async wake(kind: WakeKind): Promise<void> {
-    if (this.delivering || this.userStopped) return;
+    if (this.delivering) return;
     this.delivering = true;
     // a retried END wake goes out as it was composed at the end time (its events are in it); later events wait
     const retryFinal = kind === 'final' ? this.finalPending : null;

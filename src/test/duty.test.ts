@@ -261,22 +261,17 @@ describe('DutyLoop', () => {
     assert.doesNotMatch(agent.prompts[0], /Moon/);
   });
 
-  test('the agent cannot end a duty before its end time', () => {
-    duty.start({ objective: 'x', until: new Date(now + 3600_000).toISOString(), by: 'user' });
-    assert.throws(() => duty.complete('done'), /refused: this duty runs until/);
+  test('an interrupted turn leaves the duty running, and the next sample wakes the agent', async () => {
+    duty.start({ objective: 'x', intervalS: 300, by: 'user' });
+    agent.set({ busy: true });
+    // the user interrupts: the turn ends, nothing is said to the duty
+    agent.set({ busy: false });
     assert.equal(duty.state.status, 'active');
-  });
-
-  test('the user\'s Stop holds every automatic wake until they write again', async () => {
-    duty.start({ objective: 'x', by: 'user' });
-    duty.userStop();
-    duty.event('transfer job 1 done');
-    now += 3600_000;
+    now += 300_000;
     duty.tick();
-    await new Promise((r) => setTimeout(r, 3100));
-    assert.equal(agent.prompts.length, 0);
-    duty.userSpoke();
-    assert.equal(duty.status().heldByStop, false);
+    await flush();
+    assert.equal(agent.prompts.length, 1);
+    assert.match(agent.prompts[0], /duty sample/);
   });
 
   test('events during a turn wait for it to end, then go out', async () => {

@@ -93,16 +93,16 @@ The Agent tab streams the agent's work as it happens:
 - **Talking to it mid-turn.**
   - **Enter** steers it: the message is delivered at its next step.
   - **Alt+Enter** queues a follow-up for when the turn ends. Queued messages show as chips you can remove.
-  - **Esc** stops it, and **↑** in an empty box recalls your last message.
+  - **Esc** interrupts the turn (a running duty carries on), and **↑** in an empty box recalls your last message.
 - **Automatic messages** (duty samples and events) are shown folded and marked as automatic.
 
 ### Duty loop
 
 An LLM turn ends when the model stops calling tools, and nothing happens after that until someone writes again. A **duty** keeps the agent working as a closed-loop controller without giving it a way to sleep:
-- Start one from the duty bar (objective, end time: astronomical dawn, a time, or none; sample interval), or the agent starts one with the `duty` tool when you give it an unattended objective.
+- Start one from the duty bar (objective, end time: astronomical dawn, a time, or none; sample interval) or by running tonight's plan. The agent never starts, pauses, stops or completes a duty; its `duty` tool only reads the duty and picks when the next sample comes.
 - Each time the agent's turn ends, the next **sample** is scheduled. At that time the agent is woken with the objective and fresh measurements (time to dawn, connection, battery, tracking, stacking progress, dark capture, transfers, processing, camera-service health).
 - **Events** wake it at once: a stack the scope ended itself, a dark master saved, a transfer or processing job finished, connection lost or back, low battery, charging, a hung camera service. Events about work the agent started reach it even without a duty.
-- The agent cannot complete a duty before its end time. You can pause, resume, stop or "wake now" from the duty bar, and pressing Stop on the agent pauses the duty.
+- A duty ends at its end time or when you stop it. You can pause, resume, stop or "wake now" from the duty bar. Interrupting the agent (Esc, or Stop in chat) only ends its turn: the duty keeps running, and the next sample or event wakes the agent if you have not written to it first.
 
 ### Telescope controls
 

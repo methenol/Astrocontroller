@@ -174,10 +174,9 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
         if (m?.type === 'prompt') {
           const p = PromptBody.safeParse(m);
           if (!p.success) throw new Error(p.error.issues[0] ? `${p.error.issues[0].path.join('.') || 'prompt'}: ${p.error.issues[0].message}` : 'invalid prompt');
-          duty.userSpoke();
           await agent.prompt(p.data.text, p.data.images ?? [], promptMode(p.data.mode));
         } else if (m?.type === 'abort') {
-          duty.userStop();
+          // an interrupt ends the agent's turn only: a running duty carries on
           await agent.abort();
         }
       } catch (err) {
