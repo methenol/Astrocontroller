@@ -6,7 +6,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { altAz } from '../astro/sky.js';
 import { horizonFor } from '../astro/horizon.js';
-import { clearsAt, recordBlocked, sightingLimit, sightingsFor, withSightings } from '../astro/sightings.js';
+import { clearsAt, nightStartAt, recordBlocked, sightingLimit, sightingsFor, withSightings } from '../astro/sightings.js';
 
 const SITE = { lat: 34.05, lon: -118.25, elev: 100 };
 const NOW = new Date('2026-10-12T05:00:00Z');
@@ -39,6 +39,24 @@ describe('blocked views', () => {
     assert.equal(sightingsFor({ lat: SITE.lat + 1, lon: SITE.lon }, NOW).length, 0, 'another site');
     assert.equal(sightingsFor(SITE, new Date(NOW.getTime() + 24 * 3600e3)).length, 0, 'gone by the next night');
     assert.ok(horizonFor(SITE, NOW)!.limit(60) > 35, 'the planner horizon carries it');
+  });
+
+  test("last night's sightings do not reach tonight's plan, even when it is solved by day", () => {
+    // Florida (UTC−5): a view blocked at 00:28 local, the plan solved again at 12:20 local the same day
+    const FL = { lat: 28.8, lon: -81.7 };
+    const seen = new Date('2026-11-07T05:28:00Z');
+    recordBlocked(FL, 'Mel 22', 113.7, 79.5, 'blurred', seen);
+    assert.equal(sightingsFor(FL, new Date('2026-11-07T06:30:00Z')).length, 1, 'the rest of that night keeps it');
+    assert.equal(sightingsFor(FL, new Date('2026-11-07T14:00:00Z')).length, 1, 'early morning is still that night');
+    assert.equal(sightingsFor(FL, new Date('2026-11-07T17:20:00Z')).length, 0, 'the 12:20 re-solve plans tonight: gone');
+    assert.equal(sightingsFor(FL, new Date('2026-11-08T00:30:00Z')).length, 0, 'and not at dusk either');
+  });
+
+  test('the night starts mid-morning, local solar time', () => {
+    // 10:00 solar time in Florida is about 15:27 UTC
+    const start = new Date(nightStartAt(-81.7, new Date('2026-11-08T03:00:00Z')));
+    assert.equal(start.toISOString().slice(0, 16), '2026-11-07T15:26');
+    assert.equal(nightStartAt(-81.7, new Date('2026-11-07T15:00:00Z')), start.getTime() - 24 * 3600e3, 'before it belongs to the night before');
   });
 
   test('a rising target blocked now is clear later, and the time is given', () => {

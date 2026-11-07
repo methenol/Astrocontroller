@@ -7,8 +7,11 @@
  * another target passing through that patch is blocked there too. Each sighting therefore raises
  * the site's horizon at that azimuth to just above the altitude that was blocked (obstructions
  * stand on the ground: what is behind them at that altitude is also behind them lower down), and
- * the planner works out from that horizon when each target is clear. A sighting is kept for one
- * night: a verdict caused by cloud or dew must not hold the sky back tomorrow.
+ * the planner works out from that horizon when each target is clear. A sighting is kept for the
+ * night it was seen in, which runs from one mid-morning (10:00 local solar time) to the next: a verdict caused by cloud, dew or a
+ * focus problem must not hold the sky back tomorrow — and the plan for tonight, solved during the
+ * day, must not inherit last night's verdicts (an age limit measured from the solve did exactly
+ * that: last night's 00:30 sighting was 12 hours old at a 12:20 re-solve and carved a hole in tonight's plan).
  */
 import path from 'node:path';
 import fs from 'node:fs';
@@ -20,8 +23,10 @@ import { distanceKm, SAME_SITE_KM, type Horizon } from './horizon.js';
 
 const log = logger('sightings');
 
-/** A sighting holds back its patch of sky this long: one night, not the next. */
-const KEEP_HOURS = 16;
+/** Upper bound on a sighting's life whatever the clock says (a stale file, a site far west of its timezone). */
+const KEEP_HOURS = 24;
+/** Local solar hour at which one night's sightings give way to the next night's. */
+const NIGHT_BOUNDARY_SOLAR_H = 10;
 /** The blocked altitude plus this: the frame was blocked, so its top edge is at least about this high. */
 const ALT_MARGIN_DEG = 1.5;
 /** Half the azimuth width a sighting covers at the horizon; it widens with 1/cos(alt), as a frame does. */
@@ -52,7 +57,24 @@ function loadAll(): Sighting[] {
   }
 }
 
-const live = (s: Sighting, now: Date) => now.getTime() - Date.parse(s.at) < KEEP_HOURS * 3600e3;
+/**
+ * The start of the night `now` belongs to at this longitude: the latest 10:00 local solar time at
+ * or before it. Views are judged in the dark, so a boundary in the full light of morning keeps 00:30
+ * and the dusk before it in the same night, while a plan for tonight solved any time from late
+ * morning on starts clean.
+ */
+export function nightStartAt(lon: number, now: Date): number {
+  const DAY = 24 * 3600e3;
+  // 10:00 local solar time in UTC: less the longitude's share of the day (15° an hour)
+  const boundary = (NIGHT_BOUNDARY_SOLAR_H - lon / 15) * 3600e3;
+  const t = now.getTime();
+  return Math.floor((t - boundary) / DAY) * DAY + boundary;
+}
+
+const live = (s: Sighting, now: Date) => {
+  const at = Date.parse(s.at);
+  return at <= now.getTime() + 60e3 && now.getTime() - at < KEEP_HOURS * 3600e3 && at >= nightStartAt(s.site.lon, now);
+};
 
 /** The sightings still in force at this site. */
 export function sightingsFor(site: { lat: number; lon: number }, now = new Date()): Sighting[] {
