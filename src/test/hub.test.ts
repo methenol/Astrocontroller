@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { childEnv, seestarKeyProblem, legacyProfile, ownedVar, ProfileStore, publicProfile, slugFor, type HubPaths, type ProfileInput } from '../hub/profiles.js';
+import { childEnv, editorSettings, ProfileInput as ProfileInputSchema, seestarKeyProblem, legacyProfile, ownedVar, ProfileStore, publicProfile, slugFor, type HubPaths, type ProfileInput } from '../hub/profiles.js';
 import { splitPrefixed } from '../hub/proxy.js';
+import { settingProblems } from '../config/settings.js';
 import { Instance, type InstanceStatus } from '../hub/instances.js';
 
 const tmpPaths = (): HubPaths => {
@@ -130,6 +131,35 @@ describe('profile process environment', () => {
   test('owned variables', () => {
     for (const k of ['TELESCOPE_DRIVER', 'OBSERVER_TIMEZONE', 'PLAN_DEVICE', 'SEESTAR_PASSWORD', 'STARFRONT_BUILDING']) assert.ok(ownedVar(k), k);
     for (const k of ['LLM_BASE_URL', 'SEESTAR_TUNNEL_HOST', 'SEESTAR_KEY_PATH', 'UNITS']) assert.ok(!ownedVar(k), k);
+  });
+});
+
+describe('profile settings', () => {
+  const input = (env: Record<string, string>) => ProfileInputSchema.safeParse({ name: 'Backyard', driver: 'dwarf', host: '', location: site, env });
+
+  test('a fractional Bortle class is a valid setting', () => {
+    assert.deepEqual(settingProblems({ PLAN_BORTLE: '6.6' }), []);
+    assert.ok(input({ PLAN_BORTLE: '6.6' }).success);
+  });
+
+  test('a value the process would refuse is refused when the profile is saved', () => {
+    for (const env of <Array<Record<string, string>>>[{ PLAN_BORTLE: 'abc' }, { PLAN_BORTLE: '12' }, { PLAN_MOUNT: 'dobsonian' }, { PLAN_GUIDED: 'maybe' }, { DUTY_INTERVAL_S: '5' }]) {
+      const r = input(env);
+      assert.ok(!r.success, JSON.stringify(env));
+      assert.match(r.error.issues[0].message, new RegExp(Object.keys(env)[0]));
+    }
+    assert.ok(input({ SOMETHING_ELSE: 'whatever', PLAN_FILTERS: 'Astro,Duo-Band' }).success, 'variables without a field pass as they are');
+  });
+
+  test('the editor gets each field with what an empty one inherits', () => {
+    const byKey = new Map(editorSettings({ PLAN_BORTLE: '7', LLM_MODEL: 'big-model', DUTY_INTERVAL_S: ' ' }).map((s) => [s.key, s]));
+    const bortle = byKey.get('PLAN_BORTLE')!;
+    assert.equal(bortle.inherited, '5', "the hub never hands its own PLAN_ values to a profile: an empty field is the built-in default");
+    assert.equal(bortle.fromEnv, '7', 'a new profile is filled out with the .env value');
+    assert.equal(byKey.get('LLM_MODEL')!.inherited, 'big-model', 'a shared variable follows .env');
+    assert.equal(byKey.get('LLM_MODEL')!.fromEnv, null);
+    assert.equal(byKey.get('DUTY_INTERVAL_S')!.inherited, '300', 'a blank .env value is no value');
+    assert.equal(byKey.get('PLAN_APERTURE_MM')!.inherited, '', 'no default: not set');
   });
 });
 

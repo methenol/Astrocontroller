@@ -96,9 +96,11 @@
         <button type="button" class="small-btn" id="btn-here">Use this device's location</button>
       </fieldset>
 
+      <div id="settings-fields"></div>
+
       <details class="field">
         <summary>More settings for this telescope</summary>
-        <label class="field">Variables (one NAME=value per line; they win over .env for this profile only)
+        <label class="field">Other variables (one NAME=value per line; they win over .env for this profile only)
           <textarea name="env" rows="5" spellcheck="false" placeholder="PLAN_BORTLE=4&#10;PLAN_DEVICE=seestar-s50&#10;LLM_MODEL=…"></textarea>
         </label>
         <p class="hint" id="paths"></p>

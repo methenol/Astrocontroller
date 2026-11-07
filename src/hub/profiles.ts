@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { validHost } from '../config/host.js';
 import { writeFileAtomic } from '../util/fs.js';
 import { DRIVER_IDS, type DriverId } from '../drivers/types.js';
+import { SETTINGS, settingProblems, type Setting } from '../config/settings.js';
 
 /** Slot n: the child's web port is portBase + n, its ZWO tunnel ports are the device's + n*1000. */
 export const MAX_SLOT = 33;
@@ -92,7 +93,11 @@ export const ProfileInput = z.object({
   env: z
     .record(z.string(), z.string())
     .default({})
-    .refine((e) => Object.keys(e).every((k) => ENV_NAME.test(k)), 'variable names are A-Z, 0-9 and _'),
+    .refine((e) => Object.keys(e).every((k) => ENV_NAME.test(k)), 'variable names are A-Z, 0-9 and _')
+    // a value the profile's process would refuse at start-up is refused here instead
+    .superRefine((e, ctx) => {
+      for (const message of settingProblems(e)) ctx.addIssue({ code: 'custom', message });
+    }),
 });
 export type ProfileInput = z.infer<typeof ProfileInput>;
 
@@ -251,6 +256,25 @@ function merge(prev: Profile | undefined, input: ProfileInput): Omit<Profile, 'i
 export function validate(p: Profile): void {
   if ((p.location.latitude === null) !== (p.location.longitude === null)) throw new Error('set both latitude and longitude, or neither');
   if (p.driver === 'seestar' && p.seestar.zwo && (!p.seestar.user || !p.seestar.password)) throw new Error('ZWO Telescope Network needs the account e-mail and password');
+}
+
+/**
+ * The settings the profile editor shows as fields, each with what a profile that leaves it empty
+ * runs with (`inherited`): the hub's own .env value for a shared variable (LLM_MODEL), the built-in
+ * default for a telescope's own one (PLAN_*: the hub never hands its .env value of those to a
+ * profile). `fromEnv` is the hub's .env value of a telescope's own variable, which a new profile is
+ * filled out with.
+ */
+export function editorSettings(base: NodeJS.ProcessEnv): Array<Setting & { inherited: string; fromEnv: string | null }> {
+  const val = (k: string): string | null => {
+    const v = base[k]?.trim();
+    return v ? v : null;
+  };
+  const str = (d: Setting['default']): string => (d === null ? '' : String(d));
+  return SETTINGS.map((s) => {
+    const owned = ownedVar(s.key);
+    return { ...s, inherited: owned ? str(s.default) : (val(s.key) ?? str(s.default)), fromEnv: owned ? val(s.key) : null };
+  });
 }
 
 // ---- the profile's process ----------------------------------------------------------------------

@@ -350,7 +350,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
       start: z.string().optional().describe('local time YYYY-MM-DDTHH:MM'),
       end: z.string().optional(),
       limit: z.number().int().min(1).max(50).optional(),
-      bortle: z.number().int().min(1).max(9).optional(),
+      bortle: z.number().min(1).max(9).optional(),
       filter: z.string().optional().describe('"none", or "duo-band" for the light-pollution filter'),
       ignore_rest: z.boolean().optional(),
       ignore_horizon: z.boolean().optional(),

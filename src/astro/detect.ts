@@ -68,14 +68,22 @@ const HA_BUCKET_TABLE: Record<BandClass, [Exclude<Bucket, 'UNKNOWN'>, Exclude<Bu
   line: ['EASY', 'NEEDS_INTEG'],
 };
 
+/** A Bortle class in 1…9; fractions (6.6, from a light-pollution map) are kept, not rounded. */
 const clampBortle = (bortle: number | undefined): number => {
-  const b = Math.round(Number(bortle));
-  return Number.isFinite(b) ? Math.min(9, Math.max(1, b)) : REFERENCE_BORTLE;
+  const b = Number(bortle);
+  return bortle !== undefined && bortle !== null && Number.isFinite(b) ? Math.min(9, Math.max(1, b)) : REFERENCE_BORTLE;
 };
 
-/** Tonight's sky brightness for a Bortle class (the reference class when it is not a number). */
+/**
+ * Tonight's sky brightness for a Bortle class (the reference class when it is not a number). A
+ * fractional class lands between its two neighbours, linearly in mag/arcsec².
+ */
 export function sqmFor(bortle: number | undefined): number {
-  return BORTLE_SQM[clampBortle(bortle)];
+  const b = clampBortle(bortle);
+  const lo = Math.floor(b);
+  const hi = Math.min(9, lo + 1);
+  const t = b - lo;
+  return t === 0 ? BORTLE_SQM[lo] : Math.round((BORTLE_SQM[lo] + t * (BORTLE_SQM[hi] - BORTLE_SQM[lo])) * 100) / 100;
 }
 
 /** mag/arcsec² the thresholds move for this Bortle class (0 at the reference class). */

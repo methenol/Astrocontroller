@@ -5,10 +5,11 @@ import { Env } from './config/env.js';
 import { HostOverride } from './config/host.js';
 import type { Units } from './util/units.js';
 import { DRIVER_IDS, type DriverId } from './drivers/types.js';
+import { REASONING_EFFORTS, S } from './config/settings.js';
 
 export { validHost } from './config/host.js';
 
-export const REASONING_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+export { REASONING_EFFORTS };
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 /**
  * How a request asks for thinking. All but one are dialects of chat completions; `openai-responses`
@@ -119,48 +120,48 @@ export const config = {
      */
     protocolHeader: env.oneOf<'sdk' | 'app'>('DWARF_PROTOCOL_HEADER', ['sdk', 'app'] as const, 'app'),
     /** stop a live stack that has rejected every frame (or taken none) for this many minutes; 0 = only notify */
-    stackAutoStopMin: env.num('STACK_AUTOSTOP_MIN', 10, { min: 0 }),
+    stackAutoStopMin: env.num('STACK_AUTOSTOP_MIN', S.STACK_AUTOSTOP_MIN.default, S.STACK_AUTOSTOP_MIN),
   },
   observer: {
     latitude: env.optNum('OBSERVER_LATITUDE', { min: -90, max: 90 }),
     longitude: env.optNum('OBSERVER_LONGITUDE', { min: -180, max: 180 }),
     elevationM: env.num('OBSERVER_ELEVATION_M', 0, { min: -500, max: 9000 }),
     timezone: env.timezone('OBSERVER_TIMEZONE', Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'),
-    minAltitudeDeg: env.num('PLAN_MIN_ALTITUDE_DEG', 25, { min: 0, max: 90 }),
+    minAltitudeDeg: env.num('PLAN_MIN_ALTITUDE_DEG', S.PLAN_MIN_ALTITUDE_DEG.default, S.PLAN_MIN_ALTITUDE_DEG),
  },
  /** metric | imperial: how weather is shown (temperatures, wind, precipitation); it is computed in metric */
  units: env.oneOf<Units>('UNITS', ['metric', 'imperial'] as const, 'metric'),
  /** What every planning surface judges a night against (see planDefaults). */
  plan: {
-  /** site sky class: Bortle 1 (dark) … 9 (inner city); the whole ladder of thresholds moves with it */
-  bortle: env.num('PLAN_BORTLE', 5, { min: 1, max: 9, int: true }),
+  /** site sky class: Bortle 1 (dark) … 9 (inner city), fractions allowed (6.6); the whole ladder of thresholds moves with it */
+  bortle: env.num('PLAN_BORTLE', S.PLAN_BORTLE.default, S.PLAN_BORTLE),
   /** one fixed glass for every target ('none', 'astro', 'duo-band', 'ha 7nm'…); empty = the scope's own filters, best per target */
-  filter: env.str('PLAN_FILTER', ''),
+  filter: env.str('PLAN_FILTER', S.PLAN_FILTER.default),
   /** the filters the scope switches between itself (the Dwarf 3's Astro and Duo-Band): each target is planned through the best of them */
   filters: env
-   .str('PLAN_FILTERS', 'Astro,Duo-Band')
+   .str('PLAN_FILTERS', S.PLAN_FILTERS.default)
    .split(',')
    .map((f) => f.trim())
    .filter(Boolean),
   /** clear aperture of the tele in mm — the optics number the scope cannot report, and the sky-limited sub needs */
-  apertureMm: env.optNum('PLAN_APERTURE_MM', { min: 1, max: 2000 }),
+  apertureMm: env.optNum('PLAN_APERTURE_MM', S.PLAN_APERTURE_MM),
   /** read noise in electrons; without it the sub advice is an honest range, not one number */
-  readNoiseE: env.optNum('PLAN_READ_NOISE_E', { min: 0.1, max: 50 }),
+  readNoiseE: env.optNum('PLAN_READ_NOISE_E', S.PLAN_READ_NOISE_E),
   /** the Dwarf head is alt-az; a wedge or a pier-mounted rig changes the trailing ceiling */
   mount: env.oneOf<'alt-az' | 'eq'>('PLAN_MOUNT', ['alt-az', 'eq'] as const, 'alt-az'),
-  guided: env.bool('PLAN_GUIDED', false),
+  guided: env.bool('PLAN_GUIDED', S.PLAN_GUIDED.default),
   /** arcsec per pixel; the app's own tele plate scale when unset */
-  plateScaleArcsecPerPx: env.optNum('PLAN_PLATE_SCALE_ARCSEC', { min: 0.05, max: 60 }),
+  plateScaleArcsecPerPx: env.optNum('PLAN_PLATE_SCALE_ARCSEC', S.PLAN_PLATE_SCALE_ARCSEC),
   /** the scope's spec file (devices/<id>.json) when the scope's own report should not pick it, e.g. seestar-s30-pro */
-  device: env.str('PLAN_DEVICE', ''),
+  device: env.str('PLAN_DEVICE', S.PLAN_DEVICE.default),
   /** the site's zenith sky brightness from a sky meter, mag/arcsec² (wins over measured subs and PLAN_BORTLE) */
-  skySqm: env.optNum('PLAN_SKY_SQM', { min: 16, max: 22.5 }),
+  skySqm: env.optNum('PLAN_SKY_SQM', S.PLAN_SKY_SQM),
   /** the swamp factor a sub should reach: sky noise² over read noise² (Deep Sky Detail's calculator recommends 10; 3–5 is the lenient school) */
-  swampFactor: env.num('PLAN_SWAMP_FACTOR', 10, { min: 1, max: 100 }),
+  swampFactor: env.num('PLAN_SWAMP_FACTOR', S.PLAN_SWAMP_FACTOR.default, S.PLAN_SWAMP_FACTOR),
   },
   llm: {
     baseUrl: env.url('LLM_BASE_URL', 'http://localhost:8000/v1'),
-    model: env.str('LLM_MODEL', 'qwen'),
+    model: env.str('LLM_MODEL', S.LLM_MODEL.default),
     apiKey: env.str('LLM_API_KEY', 'none'),
     contextWindow: env.num('LLM_CONTEXT_WINDOW', 131072, { min: 1024, int: true }),
     maxTokens: env.num('LLM_MAX_TOKENS', 16384, { min: 1, int: true }),
@@ -222,9 +223,9 @@ export const config = {
   agent: {
     enabled: env.bool('AGENT_ENABLED', true),
     /** Wake the agent to park, transfer and shut down when the telescope is plugged in to charge with sessions still on its SD card. */
-    promptOnCharge: env.bool('PROMPT_TRANSFER_ON_CHARGE', false),
+    promptOnCharge: env.bool('PROMPT_TRANSFER_ON_CHARGE', S.PROMPT_TRANSFER_ON_CHARGE.default),
     /** Duty loop: default time between automatic wakes while on duty (the agent can pick 30 s–15 min per wake). */
-    dutyIntervalS: env.num('DUTY_INTERVAL_S', 300, { min: 30, max: 900 }),
+    dutyIntervalS: env.num('DUTY_INTERVAL_S', S.DUTY_INTERVAL_S.default, S.DUTY_INTERVAL_S),
     command: env.str('OMP_COMMAND', 'omp'),
     mcpUrl: env.url('MCP_URL', ''),
   },

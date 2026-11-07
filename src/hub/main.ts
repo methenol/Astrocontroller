@@ -22,7 +22,7 @@ import { z } from 'zod';
 import { errMsg, logger } from '../log.js';
 import { body, jsonErrors, notFound, rejectCrossSite, route } from '../web/http.js';
 import { Instance, type InstanceSpec } from './instances.js';
-import { childEnv, seestarKeyPath, seestarKeyProblem, usesSeestarKey, legacyProfile, ProfileInput, ProfileStore, profileDataDir, publicProfile, type HubPaths, type Profile } from './profiles.js';
+import { childEnv, editorSettings, seestarKeyPath, seestarKeyProblem, usesSeestarKey, legacyProfile, ProfileInput, ProfileStore, profileDataDir, publicProfile, type HubPaths, type Profile } from './profiles.js';
 import { guard, proxyRequest, proxyUpgrade, refuseUpgrade, splitPrefixed } from './proxy.js';
 import { TunnelManager } from './tunnels.js';
 
@@ -128,7 +128,7 @@ const api = express.Router();
 api.use(express.json({ limit: '256kb' }));
 api.use(rejectCrossSite);
 
-api.get('/profiles', route(async () => ({ profiles: store.all().map(view), tunnelManager: tunnels.enabled })));
+api.get('/profiles', route(async () => ({ profiles: store.all().map(view), tunnelManager: tunnels.enabled, settings: editorSettings(env) })));
 
 api.post(
   '/profiles',

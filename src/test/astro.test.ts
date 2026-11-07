@@ -338,6 +338,14 @@ describe('detectability', () => {
     assert.equal(sqmFor(3), 21.8);
     assert.equal(sqmFor(99), 17.5, 'Bortle 9 is the worst sky there is');
   });
+
+  test('a fractional Bortle class lands between its neighbours', () => {
+    assert.equal(sqmFor(6.6), 18.9, '6.6 is 60% of the way from Bortle 6 (19.2) to 7 (18.7)');
+    assert.equal(sqmFor(6), 19.2);
+    assert.equal(sqmFor(8.5), 17.8);
+    assert.equal(sqmFor(0.4), 22, 'below 1 is clamped to the darkest class');
+    assert.ok(sqmFor(4.5) < sqmFor(4) && sqmFor(4.5) > sqmFor(5));
+  });
 });
 
 describe('sub-exposure', () => {

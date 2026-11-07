@@ -118,6 +118,11 @@ export class Env {
     return {};
   }
 
+  /** Every problem found so far. */
+  problemList(): string[] {
+    return [...this.problems];
+  }
+
   /** Throw once with every problem found, if any. */
   check(): void {
     if (this.problems.length) throw new Error(`configuration problems:\n  - ${this.problems.join('\n  - ')}`);

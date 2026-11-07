@@ -211,7 +211,7 @@ export function registerPlanningTools(all: ToolFn, o: PlanningContext): void {
       start: z.string().optional().describe('local time YYYY-MM-DDTHH:MM; default astronomical dusk (or now)'),
       end: z.string().optional().describe('local time; default astronomical dawn'),
       limit: z.number().int().min(1).max(50).optional(),
-      bortle: z.number().int().min(1).max(9).optional().describe('judge against this sky class instead of PLAN_BORTLE (1 dark … 9 inner city)'),
+      bortle: z.number().min(1).max(9).optional().describe('judge against this sky class instead of PLAN_BORTLE (1 dark … 9 inner city)'),
       filter: z.string().optional().describe('plan every target through this one glass instead of the scope\'s own filters ("none", "astro", "duo-band", "ha 7nm", "oiii"); omit to have each target planned through the best of PLAN_FILTERS (the Dwarf 3\'s Astro / Duo-Band), named in suggestedFilter'),
       ignore_rest: z.boolean().optional().describe('true to rank on the sky alone, ignoring captures and recent suggestions (answers "what is up tonight", not "what should I shoot")'),
       ignore_horizon: z.boolean().optional().describe("true to plan against the minimum altitude alone, ignoring this site's mapped obstructions (map_obstructions)"),

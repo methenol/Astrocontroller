@@ -16,6 +16,7 @@ import { state, isPanelActive } from './state.js';
 import { showScreen } from './shell.js';
 import { draft } from './chat.js';
 import { imagingRequest } from './tonight.js';
+import { findInProgram, programFormHtml, wireProgramForms } from './program-add.js';
 
 const VENDOR = 'vendor/stellarium';
 const SKY = `${VENDOR}/skydata`;
@@ -591,15 +592,53 @@ function describe(obj) {
   }
   const vmag = obj.getInfo('vmag');
   const pos = vecRaDec(v);
-  return { name: catalog ?? (named ? clean(named) : des[0] ? clean(des[0]) : ''), display, aka: catalog && named ? clean(catalog) : '', type, vmag: Number.isFinite(vmag) ? vmag : null, ...pos, obj };
+  // the Sun, the Moon, planets, asteroids and comets move: no fixed position for the program
+  const moving = SOLAR_SYSTEM.test(String(obj.type ?? ''));
+  return { name: catalog ?? (named ? clean(named) : des[0] ? clean(des[0]) : ''), display, aka: catalog && named ? clean(catalog) : '', type, vmag: Number.isFinite(vmag) ? vmag : null, moving, ...pos, obj };
 }
+
+/** Stellarium Web Engine's object types for solar-system bodies (Sun, Moon, planets, minor planets, comets). */
+const SOLAR_SYSTEM = /^(Sun|Moo|Pla|MPl|Com|SSO|Ast)$/;
 
 function onSelection() {
   const obj = stel.core.selection;
   sel = obj ? describe(obj) : framing ? sel : null;
   lastCard = 0;
   renderCard();
+  closeProgramForm();
 }
+
+// ---------------------------------------------------------------- add to program
+
+/** What the program gets: the composed frame's centre in Frame mode (when off the object), otherwise the selection. */
+function programTarget() {
+  const a = aim();
+  if (!a) return null;
+  const custom = framing && (!a.name || a.offset > 0.05);
+  return { name: a.name, display: a.display, raHours: a.raHours, decDeg: a.decDeg, custom };
+}
+
+function closeProgramForm() {
+  const box = $('#sky-prog');
+  box.hidden = true;
+  box.replaceChildren();
+  $('#sky-prog-btn').setAttribute('aria-expanded', 'false');
+}
+
+async function openProgramForm() {
+  const box = $('#sky-prog');
+  const t = programTarget();
+  if (!t) return;
+  $('#sky-prog-btn').setAttribute('aria-expanded', 'true');
+  box.hidden = false;
+  box.innerHTML = '<span class="muted small">checking the program…</span>';
+  const entry = t.custom ? null : await findInProgram(t.name, t.display);
+  if (box.hidden) return; // closed while it looked
+  const why = sel?.moving && !framing ? `${sel.display} moves across the sky: the program plans fixed positions (ask the agent to image it instead)` : '';
+  box.innerHTML = `${t.custom ? `<span class="muted small">A custom target at the frame centre${t.name ? ` (named ${esc(t.name)})` : ''}.</span>` : ''}${why ? `<span class="muted small">${esc(why)}</span>` : ''}${programFormHtml(entry, { disabled: why, compact: true })}`;
+}
+
+wireProgramForms($('#sky-prog'), () => programTarget(), () => openProgramForm());
 
 const fmtRa = (h) => {
   const s = Math.round((((h % 24) + 24) % 24) * 3600);
@@ -767,9 +806,11 @@ $('#sky-time').onchange = (e) => {
 for (const [id, h] of [['#sky-back', -1], ['#sky-fwd', 1]]) $(id).onclick = () => stel && setTime(skyTime() + h * 3600_000);
 $('#sky-goto').onclick = (e) => gotoAim(e.currentTarget);
 $('#sky-agent').onclick = askAgent;
+$('#sky-prog-btn').onclick = () => ($('#sky-prog').hidden ? openProgramForm() : closeProgramForm());
 $('#sky-frame').onclick = () => stel && setFraming(!framing);
 $('#sky-scope').onclick = () => stel && centerOnScope();
 $('#sky-card-close').onclick = () => {
+  closeProgramForm();
   if (framing) setFraming(false);
   if (stel) stel.core.selection = null;
   sel = null;

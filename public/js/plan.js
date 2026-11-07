@@ -141,7 +141,13 @@ function renderHead() {
 
 const ROW = { axis: 18, sky: 12, moon: 8, gap: 6, blocks: 36, chart: 120 };
 
+/** The timeline's time scale as last drawn (for dragging a block's edges). */
+let scale = null;
+/** A block being dragged by an edge (resize) or by its body (move): { id, edge: 'start' | 'end' | 'move', start, end, moved } */
+let drag = null;
+
 function renderTimeline() {
+  if (drag) return; // the drag redraws its own block; the plan is drawn again when it lets go
   const p = last.plan;
   const el = $('#np-timeline');
   const W = Math.max(320, el.clientWidth || 600);
@@ -175,10 +181,10 @@ function renderTimeline() {
   for (const b of p.blocks) {
     const a = x(b.start);
     const w = Math.max(1, x(b.end) - a);
-    const cls = `np-block ${b.kind}${b.past ? ' past' : ''}${b.id === selected ? ' sel' : ''}${b.target?.source === 'filler' ? ' filler' : ''}`;
+    const cls = `np-block ${b.kind}${b.past ? ' past' : ''}${b.id === selected ? ' sel' : ''}${b.target?.source === 'filler' ? ' filler' : ''}${b.pinned ? ' pinned' : ''}`;
     const fill = b.kind === 'target' ? colour(b.target.key, b.target.source) : b.kind === 'weather' ? 'url(#np-hatch)' : '#111827';
     const label = b.kind === 'target' ? b.target.displayName : b.kind === 'weather' ? 'cloud' : '';
-    const title = b.kind === 'target' ? `${b.target.displayName} ${hm(b.start)}–${hm(b.end)}: ~${b.expectedMin} min${b.clouds ? ` (clouds forecast ${b.clouds.sky}/100: advisory, check the sky)` : ''}` : `${hm(b.start)}–${hm(b.end)}: ${b.reason}`;
+    const title = b.kind === 'target' ? `${b.target.displayName} ${hm(b.start)}–${hm(b.end)}${b.pinned ? ' (pinned)' : ''}: ~${b.expectedMin} min${b.clouds ? ` (clouds forecast ${b.clouds.sky}/100: advisory, check the sky)` : ''}` : `${hm(b.start)}–${hm(b.end)}: ${b.reason}`;
     // the forecast's cloudy slots shaded grey over the block: the target stays planned in case the sky is better than forecast
     const shade = b.kind === 'target' && b.clouds
       ? p.slots.filter((s) => s.cloudy && s.t + SLOT_MS > b.start && s.t < b.end).map((s) => {
@@ -186,7 +192,18 @@ function renderTimeline() {
           return `<rect x="${sa}" y="${yBlocks}" width="${Math.max(0.5, x(Math.min(s.t + SLOT_MS, b.end)) - sa)}" height="${ROW.blocks}" class="np-cloud"/>`;
         }).join('')
       : '';
-    parts.push(`<g class="${cls}" data-block="${esc(b.id)}" tabindex="0" role="button" aria-label="${esc(title)}"><rect x="${a}" y="${yBlocks}" width="${w}" height="${ROW.blocks}" rx="5" fill="${fill}"/>${b.overheadMin && b.kind === 'target' ? `<rect x="${a}" y="${yBlocks}" width="${Math.min(w, x(b.start + b.overheadMin * 60e3) - a)}" height="${ROW.blocks}" rx="5" class="np-ovh"/>` : ''}${shade}${w > 36 ? `<text x="${a + 6}" y="${yBlocks + 15}" class="np-btext">${esc(label)}</text><text x="${a + 6}" y="${yBlocks + 29}" class="np-bsub">${b.kind === 'target' ? esc(`${hm(b.start)} · ${dur(b.expectedMin)}`) : ''}</text>` : ''}<title>${esc(title)}</title></g>`);
+    parts.push(`<g class="${cls}" data-block="${esc(b.id)}" tabindex="0" role="button" aria-label="${esc(title)}"><rect x="${a}" y="${yBlocks}" width="${w}" height="${ROW.blocks}" rx="5" fill="${fill}"/>${b.overheadMin && b.kind === 'target' ? `<rect x="${a}" y="${yBlocks}" width="${Math.min(w, x(b.start + b.overheadMin * 60e3) - a)}" height="${ROW.blocks}" rx="5" class="np-ovh"/>` : ''}${shade}${w > 36 ? `<text x="${a + 6}" y="${yBlocks + 15}" class="np-btext">${esc(label)}</text><text x="${a + 6}" y="${yBlocks + 29}" class="np-bsub">${b.kind === 'target' ? esc(`${hm(b.start)} · ${dur(b.expectedMin)}${b.pinned ? ' · pinned' : ''}`) : ''}</text>` : ''}<title>${esc(title)}</title></g>`);
+  }
+  // the selected target block's edges: drag them to pin it to a longer (or shorter) time
+  const sb = p.blocks.find((b) => b.id === selected && b.kind === 'target' && !b.past);
+  if (sb) {
+    const hy = yBlocks - 3;
+    const hh = ROW.blocks + 6;
+    for (const edge of ['start', 'end']) {
+      const ex = x(edge === 'start' ? Math.max(sb.start, Date.now()) : sb.end);
+      const label = edge === 'start' ? `Drag to start ${sb.target.displayName} earlier or later` : `Drag to end ${sb.target.displayName} earlier or later`;
+      parts.push(`<g class="np-handle" data-handle="${edge}" data-hblock="${esc(sb.id)}" tabindex="0" role="slider" aria-label="${esc(label)}" aria-valuetext="${esc(hm(edge === 'start' ? sb.start : sb.end))}"><rect class="np-handle-hit" x="${ex - 9}" y="${hy}" width="18" height="${hh}"/><rect class="np-handle-bar" x="${ex - 2.5}" y="${hy}" width="5" height="${hh}" rx="2"/><title>${esc(label)} (10-minute steps)</title></g>`);
+    }
   }
   // altitude: every scheduled or program target, bold where it is scheduled
   const minAlt = last.settings?.minAltitude ?? state.config?.minAltitude ?? 0;
@@ -206,6 +223,7 @@ function renderTimeline() {
   }
   const now = Date.now();
   if (now >= t0 && now <= t1) parts.push(`<line class="np-nowline" x1="${x(now)}" x2="${x(now)}" y1="${ySky - 4}" y2="${H - 12}"/><text class="np-tick now" x="${x(now)}" y="${H - 2}" text-anchor="middle">now</text>`);
+  scale = { t0, t1, W, l: pad.l, r: pad.r, yBlocks };
   el.innerHTML = `<svg class="np-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tonight's plan as a timeline"><defs><pattern id="np-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#1a2436"/><line x1="0" y1="0" x2="0" y2="6" stroke="#334155" stroke-width="3"/></pattern><pattern id="np-cloudhatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="rgba(148,163,184,.45)"/><line x1="0" y1="0" x2="0" y2="6" stroke="rgba(100,116,139,.7)" stroke-width="2"/></pattern></defs>${parts.join('')}</svg>`;
   const keys = [...scheduled.keys()];
   $('#np-legend').innerHTML = keys.length
@@ -231,11 +249,12 @@ function renderDetail() {
     return;
   }
   const t = b.target;
+  const pin = b.pinned ? pinFor(t.key) : null;
   const alts = b.alternates.length
     ? `<table class="plan-table"><tr><th>Instead</th><th>Where</th><th>Usable</th><th></th></tr>${b.alternates.map((a) => `<tr><td><b>${esc(a.displayName)}</b><small>${esc(a.source)}</small></td><td>${esc(a.quadrant)}, alt ${esc(a.alt)}°<small>az ${esc(a.az)}°</small></td><td>${esc(dur(a.usableMin))}</td><td><button class="ghost" data-pin="${esc(a.gotoName)}" data-from="${b.past ? '' : Math.max(b.start, Date.now())}" data-until="${b.end}" title="Put ${esc(a.displayName)} in this block instead">Use</button><button class="ghost" data-sky="${esc(a.gotoName)}" data-display="${esc(a.displayName)}" data-ra="${esc(a.raHours)}" data-dec="${esc(a.decDeg)}">Sky</button></td></tr>`).join('')}</table>`
     : '<p class="muted small">No alternates usable for this whole block.</p>';
   el.innerHTML = `
-    <div class="row-head"><h3>${esc(t.displayName)}</h3><span class="badge ${t.source === 'program' ? 'done' : ''}">${esc(t.source)}</span>${b.pinned ? '<span class="badge waiting">pinned</span>' : ''}${b.past ? '<span class="badge">past</span>' : ''}<span class="spacer"></span><button class="ghost" data-close>Close</button></div>
+    <div class="row-head"><h3>${esc(t.displayName)}</h3><span class="badge ${t.source === 'program' ? 'done' : ''}">${esc(t.source)}</span>${b.pinned ? `<span class="badge waiting" title="${esc(pin ? `pinned ${pinTimes(pin)}` : 'pinned')}">pinned${pin ? ` ${esc(pinTimes(pin))}` : ''}</span>` : ''}${b.past ? '<span class="badge">past</span>' : ''}<span class="spacer"></span><button class="ghost" data-close>Close</button></div>
     <div class="status-grid">
       <div><span>Time</span>${esc(hm(b.start))}–${esc(hm(b.end))} (${esc(dur((b.end - b.start) / 60e3))})</div>
       <div><span>Expected integration</span>${esc(dur(b.expectedMin))}${b.overheadMin ? ` after ${esc(b.overheadMin)} min switch` : ''}</div>
@@ -253,6 +272,7 @@ function renderDetail() {
     <p class="small">${esc(b.reason)}</p>
     ${t.notes ? `<p class="small"><b>Note:</b> ${esc(t.notes)}</p>` : ''}
     <div class="ctl-row np-actions">
+      ${pin ? `<button class="ghost" data-release="${esc(pin.id)}" data-unpin="${esc(t.displayName)}" title="Pinned ${esc(pinTimes(pin))}: unpin it and let the solver plan this time again">Unpin</button>` : ''}
       <button class="ghost" data-sky="${esc(t.gotoName)}" data-display="${esc(t.displayName)}" data-ra="${esc(t.raHours)}" data-dec="${esc(t.decDeg)}">Show in Stellarium</button>
       ${b.past ? '' : `<button class="ghost" data-obscured="${esc(t.gotoName)}" data-cause="obstruction" title="Blocked by a tree or building now: held until its path takes it clear (rising out of it in the east; for the night when it is setting behind it in the west)">Obstructed now</button>
       <button class="ghost" data-obscured="${esc(t.gotoName)}" data-cause="cloud" title="Clouded: held for 45 min, then tried again">Clouded</button>
@@ -260,15 +280,36 @@ function renderDetail() {
       ${t.source === 'filler' ? `<button class="ghost" data-rest="${esc(t.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(t.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Don't suggest again</button><button class="ghost" data-add="${esc(t.gotoName)}" data-goal="" title="Make it a program target">Add to program</button>` : ''}
       <button class="ghost" data-image="${esc(t.gotoName)}">Ask the agent</button>`}
     </div>
+    ${b.past ? '' : '<p class="muted small">Drag this block on the schedule to move it, or its left or right edge to make it longer or shorter: it is pinned to the new time (10-minute steps; arrow keys on the focused block or edge).</p>'}
     <h4 class="np-h4">Alternates for this block</h4>${alts}`;
 }
 
 // ---------------------------------------------------------------- holds
 
+/** Tonight's pins that have not ended yet. */
+const livePins = () => (last?.plan?.holds ?? []).filter((h) => h.kind === 'pin' && (h.until == null || h.until > Date.now()));
+const pinFor = (key) => livePins().find((h) => h.target === key) ?? null;
+const pinTimes = (h) => `${hm(h.from)}–${h.until ? hm(h.until) : 'end of night'}`;
+
+/** The pins, right under the schedule: what is pinned when, and a way to unpin it. */
+function renderPins() {
+  const el = $('#np-pins');
+  const pins = livePins();
+  el.hidden = !pins.length;
+  el.innerHTML = pins.length
+    ? `<span class="muted">Pinned:</span> ${pins.map((h) => `<span class="np-pin"><b>${esc(h.displayName ?? h.target)}</b> ${esc(pinTimes(h))}${h.by === 'agent' ? ' <span class="muted">(agent)</span>' : ''}<button type="button" class="ghost" data-release="${esc(h.id)}" data-unpin="${esc(h.displayName ?? '')}" title="Unpin: the solver plans this time again">Unpin</button></span>`).join('')}`
+    : '';
+}
+
 function renderHolds() {
+  renderPins();
   const holds = (last?.plan?.holds ?? []).filter((h) => h.until == null || h.until > Date.now());
   $('#np-holds').innerHTML = holds.length
-    ? holds.map((h) => `<div class="sess"><span class="badge waiting">${esc(h.kind === 'sky' ? `${h.quadrant} sky` : h.kind)}</span><b>${esc(h.displayName ?? '')}</b><span class="muted small">${h.until ? `until ${esc(hm(h.until))}` : 'for the night'} · ${esc(h.reason)}${h.note ? ` · ${esc(h.note)}` : ''} · ${esc(h.by)}</span><span class="spacer"></span><button class="ghost" data-release="${esc(h.id)}">Lift</button></div>`).join('')
+    ? [...holds].sort((a, b) => (a.kind === 'pin' ? 0 : 1) - (b.kind === 'pin' ? 0 : 1) || a.from - b.from).map((h) => {
+        const pin = h.kind === 'pin';
+        const when = pin ? `pinned ${pinTimes(h)}` : h.until ? `until ${hm(h.until)}` : 'for the night';
+        return `<div class="sess"><span class="badge ${pin ? 'done' : 'waiting'}">${esc(h.kind === 'sky' ? `${h.quadrant} sky` : pin ? 'pinned' : h.kind)}</span><b>${esc(h.displayName ?? '')}</b><span class="muted small">${esc(when)} · ${esc(h.reason)}${h.note ? ` · ${esc(h.note)}` : ''} · ${esc(h.by)}</span><span class="spacer"></span><button class="ghost" data-release="${esc(h.id)}"${pin ? ` data-unpin="${esc(h.displayName ?? '')}"` : ''}>${pin ? 'Unpin' : 'Lift'}</button></div>`;
+      }).join('')
     : '<p class="muted small">No holds: every target is available to the plan.</p>';
 }
 
@@ -566,6 +607,151 @@ $('#np-add').onsubmit = async (e) => {
 };
 $('#np-add-name').addEventListener('input', (e) => searchTargets(e.target.value));
 
+// ---------------------------------------------------------------- drag a block's edges
+
+const snap = (t) => Math.round(t / SLOT_MS) * SLOT_MS;
+
+/** The time under the pointer, from the timeline as drawn (the SVG may be scaled to fit). */
+function timeAt(svg, clientX) {
+  const r = svg.getBoundingClientRect();
+  const px = ((clientX - r.left) * scale.W) / (r.width || scale.W);
+  return scale.t0 + ((px - scale.l) / (scale.W - scale.l - scale.r)) * (scale.t1 - scale.t0);
+}
+
+/** The range a dragged edge may take: inside tonight's window, never before now, at least one slot long. */
+function dragged(t) {
+  const now = Date.now();
+  const lo = Math.max(scale.t0, snap(now) > now ? snap(now) - SLOT_MS : snap(now));
+  if (drag.edge === 'move') {
+    // the whole block slides: same length, inside the night, never starting before now
+    const len = drag.orig.end - drag.orig.start;
+    const start = Math.min(scale.t1 - len, Math.max(lo, snap(drag.orig.start + (t - drag.grabT))));
+    return { start, end: start + len };
+  }
+  if (drag.edge === 'start') return { start: Math.min(drag.end - SLOT_MS, Math.max(lo, snap(t))), end: drag.end };
+  return { start: drag.start, end: Math.max(Math.max(drag.start, now) + SLOT_MS, Math.min(scale.t1, snap(t))) };
+}
+
+/** Redraw only the dragged block and its handles, with the new times. */
+function previewDrag() {
+  const svg = $('#np-timeline svg');
+  if (!svg) return;
+  const x = (t) => scale.l + ((t - scale.t0) / (scale.t1 - scale.t0)) * (scale.W - scale.l - scale.r);
+  const g = svg.querySelector(`[data-block="${CSS.escape(drag.id)}"]`);
+  const box = g?.querySelector('rect');
+  if (box) {
+    box.setAttribute('x', x(drag.start));
+    box.setAttribute('width', Math.max(1, x(drag.end) - x(drag.start)));
+  }
+  for (const t of g?.querySelectorAll('text') ?? []) t.setAttribute('x', x(drag.start) + 6);
+  const sub = g?.querySelector('.np-bsub');
+  if (sub) sub.textContent = `${hm(drag.start)}–${hm(drag.end)} · ${dur((drag.end - drag.start) / 60e3)}`;
+  for (const h of svg.querySelectorAll('[data-handle]')) {
+    const ex = x(h.dataset.handle === 'start' ? Math.max(drag.start, Date.now()) : drag.end);
+    h.querySelector('.np-handle-hit').setAttribute('x', ex - 9);
+    h.querySelector('.np-handle-bar').setAttribute('x', ex - 2.5);
+  }
+  $('#np-drag-tip').textContent = `${drag.name}: ${hm(drag.start)}–${hm(drag.end)} (${dur((drag.end - drag.start) / 60e3)}) — let go to pin it`;
+  $('#np-drag-tip').hidden = false;
+}
+
+/** Pin the block's target to its new times; the rest of the night is solved around it. */
+async function commitDrag(d) {
+  const b = last?.plan?.blocks.find((x) => x.id === d.id);
+  if (!b) return;
+  if (d.start === b.start && d.end === b.end) return;
+  const from = Math.max(d.start, Date.now());
+  const r = await apiToast('plan/hold', { action: 'pin', target: b.target.gotoName, from, until: d.end });
+  if (!r) return;
+  toast(`${r.displayName ?? b.target.displayName} pinned ${hm(r.from ?? from)}–${hm(r.until ?? d.end)}: the rest of the night is solved around it`);
+  await loadPlan();
+  // block ids are positions in the plan: select the target's block that now holds the pin
+  const nb = last?.plan?.blocks.find((x) => x.target?.key === b.target.key && x.start < d.end && x.end > from);
+  selected = nb?.id ?? null;
+  renderTimeline();
+  renderDetail();
+}
+
+/** Pixels the pointer must travel before a press on the selected block becomes a move (a tap stays a tap). */
+const MOVE_THRESHOLD_PX = 4;
+
+$('#np-timeline').addEventListener('pointerdown', (e) => {
+  if (!scale || e.button > 0) return;
+  // the selected (not yet past) target block itself: slide it left or right
+  const g = e.target.closest('[data-block]');
+  if (g && !e.target.closest('[data-handle]')) {
+    const b = last?.plan?.blocks.find((x) => x.id === g.dataset.block);
+    if (!b || b.id !== selected || b.kind !== 'target' || b.past) return;
+    const svg = $('#np-timeline svg');
+    drag = { id: b.id, edge: 'move', start: b.start, end: b.end, orig: { start: b.start, end: b.end }, grabT: timeAt(svg, e.clientX), x0: e.clientX, armed: false, name: b.target.displayName, moved: false, pointer: e.pointerId };
+    g.setPointerCapture(e.pointerId);
+    return;
+  }
+  const h = e.target.closest('[data-handle]');
+  if (!h) return;
+  const b = last?.plan?.blocks.find((x) => x.id === h.dataset.hblock);
+  if (!b) return;
+  e.preventDefault();
+  h.setPointerCapture(e.pointerId);
+  drag = { id: b.id, edge: h.dataset.handle, start: b.start, end: b.end, name: b.target.displayName, moved: false, pointer: e.pointerId };
+});
+$('#np-timeline').addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.pointer) return;
+  if (drag.edge === 'move' && !drag.armed) {
+    if (Math.abs(e.clientX - drag.x0) < MOVE_THRESHOLD_PX) return;
+    drag.armed = true;
+    $('#np-timeline').classList.add('moving');
+  }
+  const svg = $('#np-timeline svg');
+  const next = dragged(timeAt(svg, e.clientX));
+  if (next.start === drag.start && next.end === drag.end) return;
+  Object.assign(drag, next, { moved: true });
+  previewDrag();
+});
+const endDrag = (e) => {
+  if (!drag || e.pointerId !== drag.pointer) return;
+  const d = drag;
+  drag = null;
+  $('#np-drag-tip').hidden = true;
+  $('#np-timeline').classList.remove('moving');
+  // a tap is left alone, so its click still selects or deselects the block
+  if (!d.moved) return;
+  if (e.type === 'pointercancel') return renderTimeline();
+  // the click that follows a drag must not toggle the selection
+  const swallow = (ev) => ev.stopPropagation();
+  window.addEventListener('click', swallow, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 0);
+  renderTimeline();
+  commitDrag(d);
+};
+$('#np-timeline').addEventListener('pointerup', endDrag);
+$('#np-timeline').addEventListener('pointercancel', endDrag);
+// the keyboard: arrows move a focused edge by one slot
+$('#np-timeline').addEventListener('keydown', (e) => {
+  if (!scale || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  const g = e.target.closest('[data-block]');
+  if (g && g.dataset.block === selected) {
+    const b = last?.plan?.blocks.find((x) => x.id === selected);
+    if (!b || b.kind !== 'target' || b.past) return;
+    e.preventDefault();
+    drag = { id: b.id, edge: 'move', start: b.start, end: b.end, orig: { start: b.start, end: b.end }, grabT: 0 };
+    const next = dragged(e.key === 'ArrowLeft' ? -SLOT_MS : SLOT_MS);
+    drag = null;
+    commitDrag({ id: b.id, ...next });
+    return;
+  }
+  const h = e.target.closest('[data-handle]');
+  if (!h) return;
+  const b = last?.plan?.blocks.find((x) => x.id === h.dataset.hblock);
+  if (!b) return;
+  e.preventDefault();
+  drag = { id: b.id, edge: h.dataset.handle, start: b.start, end: b.end };
+  const cur = h.dataset.handle === 'start' ? b.start : b.end;
+  const next = dragged(cur + (e.key === 'ArrowLeft' ? -SLOT_MS : SLOT_MS));
+  drag = null;
+  commitDrag({ id: b.id, ...next });
+});
+
 // ---------------------------------------------------------------- events
 
 $('#panel-plan').addEventListener('click', async (e) => {
@@ -615,7 +801,7 @@ $('#panel-plan').addEventListener('click', async (e) => {
     if (r) toast(`${r.displayName} pinned ${hm(r.from)}–${hm(r.until)}`);
     loadPlan();
   } else if (d.release) {
-    if (await busy(b, () => apiToast('plan/hold', { action: 'release', id: d.release }))) toast('Hold lifted');
+    if (await busy(b, () => apiToast('plan/hold', { action: 'release', id: d.release }))) toast(d.unpin !== undefined ? `${d.unpin || 'Target'} unpinned: the solver plans that time again` : 'Hold lifted');
     loadPlan();
   } else if (d.skyhold) {
     const min = Number(prompt(`Cloud in the ${d.skyhold}: keep the plan out of that part of the sky for how many minutes?`, '60'));
@@ -669,6 +855,7 @@ const reloadSoon = () => {
   reloadTimer = setTimeout(() => isPanelActive('plan') && loadPlan(), RELOAD_MS);
 };
 on('plan-changed', reloadSoon);
+on('program-changed', () => isPanelActive('plan') && loadProgram());
 on('duty', () => isPanelActive('plan') && last && renderHead());
 on('tab', (name) => {
   if (name !== 'plan') return;

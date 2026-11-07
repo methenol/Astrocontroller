@@ -9,6 +9,7 @@ import { on } from './bus.js';
 import { state } from './state.js';
 import { draft } from './chat.js';
 import { imagingRequest } from './tonight.js';
+import { findInProgram, programFormHtml, wireProgramForms } from './program-add.js';
 
 const GROUPS = [
   ['galaxy', 'galaxies'], ['nebula', 'nebulae'], ['emission', 'emission nebulae'], ['reflection', 'reflection nebulae'], ['dark', 'dark nebulae'],
@@ -208,6 +209,7 @@ async function detail(id, el) {
   el.innerHTML = '<span class="muted small">loading…</span>';
   try {
     const d = await api(`catalog/object?id=${encodeURIComponent(id)}`);
+    const entry = await findInProgram(d.id, d.gotoName, d.name);
     const t = d.tonight;
     const size = fmtSize(d);
     const tonight = t
@@ -233,11 +235,28 @@ async function detail(id, el) {
         <button type="button" class="primary" data-db-goto="${esc(d.id)}" data-label="${esc(d.gotoName)}"${low ? ' disabled title="below the horizon"' : ''}>GoTo ${esc(d.gotoName)}</button>
         <button type="button" data-db-agent="${esc(d.gotoName)}">Ask the agent to image it</button>
         <button type="button" class="ghost" data-sky="${esc(d.gotoName)}" data-ra="${esc(d.raHours ?? '')}" data-dec="${esc(d.decDeg ?? '')}">View in Stellarium</button>
-      </div>`;
+      </div>
+      ${programFormHtml(entry)}`;
+    el.dataset.target = JSON.stringify({ name: d.id, display: d.gotoName, raHours: d.raHours, decDeg: d.decDeg });
   } catch (e) {
     el.innerHTML = `<span class="muted small">${esc(e.message)}</span>`;
   }
 }
+
+wireProgramForms(
+  $('#db-results'),
+  (form) => {
+    try {
+      return JSON.parse(form.closest('.db-detail')?.dataset.target ?? 'null');
+    } catch {
+      return null;
+    }
+  },
+  () => {
+    const el = db.open && $(`.db-item[data-id="${CSS.escape(db.open)}"] .db-detail`);
+    if (el) detail(db.open, el);
+  },
+);
 
 $('#db-results').addEventListener('click', async (e) => {
   const go = e.target.closest('[data-db-goto]');

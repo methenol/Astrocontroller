@@ -2,7 +2,8 @@
  * Events between the screens, so no module has to know which others react:
  *   'telescope' state · 'config' config · 'screen' name · 'tab' name (a tab was opened by the user)
  *   'view' (the live view's visibility or sources changed) · 'album-changed'
- *   'socket' up (the state socket opened or closed) · 'duty' status · 'plan-changed' · 'journal-changed' night
+ *   'socket' up (the state socket opened or closed) · 'duty' status · 'plan-changed'
+ *   'program-changed' target (added from the Database or Stellarium) · 'journal-changed' night
  * A throwing listener is reported and never stops the others.
  */
 const listeners = new Map();

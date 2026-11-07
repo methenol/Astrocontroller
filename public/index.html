@@ -327,8 +327,10 @@
       <div class="card" id="np-head">plan loading…</div>
       <div class="card np-timeline-card">
         <div id="np-timeline" class="np-timeline"></div>
+        <div id="np-drag-tip" class="np-drag-tip small" role="status" hidden></div>
         <div id="np-legend" class="np-legend muted small"></div>
-        <div class="muted small">Tap a block for its details, alternates and holds. Sky: forecast (green good, amber fair, red out); moon: when it is up; lines: each target's altitude, bold where it is scheduled; dashed: the minimum altitude.</div>
+        <div id="np-pins" class="np-pins small" hidden></div>
+        <div class="muted small">Tap a block for its details, alternates and holds; drag the selected block to move it, or its left or right edge to make it longer or shorter: it is pinned to the new time. Sky: forecast (green good, amber fair, red out); moon: when it is up; lines: each target's altitude, bold where it is scheduled; dashed: the minimum altitude.</div>
       </div>
       <div class="card" id="np-detail" hidden></div>
       <div class="card" id="np-program-card">
@@ -373,7 +375,7 @@
         <div id="np-memory" class="np-memory"></div>
       </div>
       <div class="card" id="np-holds-card">
-        <div class="row-head"><h3>Holds tonight</h3><span class="spacer"></span><span class="muted small">cloud in the</span><button type="button" class="ghost" data-skyhold="N">N</button><button type="button" class="ghost" data-skyhold="E">E</button><button type="button" class="ghost" data-skyhold="S">S</button><button type="button" class="ghost" data-skyhold="W">W</button></div>
+        <div class="row-head"><h3>Pins and holds tonight</h3><span class="spacer"></span><span class="muted small">cloud in the</span><button type="button" class="ghost" data-skyhold="N">N</button><button type="button" class="ghost" data-skyhold="E">E</button><button type="button" class="ghost" data-skyhold="S">S</button><button type="button" class="ghost" data-skyhold="W">W</button></div>
         <div id="np-holds"></div>
       </div>
       <details class="card" id="np-settings-card">
@@ -466,7 +468,9 @@
           <div class="ctl-row">
             <button type="button" class="primary" id="sky-goto">GoTo</button>
             <button type="button" id="sky-agent">Ask the agent to image it</button>
+            <button type="button" id="sky-prog-btn" aria-expanded="false" aria-controls="sky-prog">Add to program…</button>
           </div>
+          <div id="sky-prog" hidden></div>
         </div>
       </div>
       <details class="card sky-opts" id="sky-opts">

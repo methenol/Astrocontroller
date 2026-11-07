@@ -5,7 +5,7 @@ const $ = (s) => document.querySelector(s);
 const POLL_MS = 3000;
 const SELECTED_KEY = 'astro.hub.selected';
 
-const state = { profiles: [], selected: null, managing: false, editing: null, loaded: false };
+const state = { profiles: [], settings: [], selected: null, managing: false, editing: null, loaded: false };
 
 // ---- helpers ---------------------------------------------------------------------------------------
 
@@ -317,6 +317,7 @@ async function refresh() {
   try {
     const r = await api('profiles');
     state.profiles = r.profiles;
+    state.settings = r.settings ?? [];
     state.loaded = true;
     if (state.selected && !byId(state.selected)) state.selected = null;
     render();
@@ -436,6 +437,83 @@ async function loadBuildings() {
   sel.value = String(want);
 }
 
+// ---- the profile's settings: one field per variable the hub knows (src/config/settings.ts) ----
+
+const SETTING_PREFIX = 'set:';
+const SF = (key) => F(SETTING_PREFIX + key);
+const hasField = (key) => state.settings.some((s) => s.key === key);
+
+function rangeText(s) {
+  if (s.min !== undefined && s.max !== undefined) return `${s.min}–${s.max}`;
+  if (s.min !== undefined) return `≥ ${s.min}`;
+  if (s.max !== undefined) return `≤ ${s.max}`;
+  return '';
+}
+
+function settingField(s) {
+  const name = SETTING_PREFIX + s.key;
+  const unit = s.unit ? ` (${s.unit})` : '';
+  const hint = el('span', { class: 'hint' }, s.hint, s.kind === 'number' && rangeText(s) ? ` Range ${rangeText(s)}.` : '', el('code', { class: 'var' }, s.key));
+  if (s.kind === 'bool') {
+    return el('div', { class: 'setting wide' }, el('label', { class: 'choice' }, el('input', { type: 'checkbox', name }), ` ${s.label}`), hint);
+  }
+  let input;
+  if (s.kind === 'choice') {
+    input = el('select', { name }, s.choices.map((c) => el('option', { value: c }, c)));
+  } else if (s.kind === 'number') {
+    input = el('input', { name, type: 'number', inputmode: 'decimal', min: s.min, max: s.max, step: s.step ?? 'any', placeholder: s.inherited === '' ? 'not set' : '' });
+  } else {
+    const list = s.suggest?.length ? `dl-${s.key}` : undefined;
+    input = el('input', { name, autocomplete: 'off', spellcheck: 'false', list, placeholder: s.inherited === '' ? 'empty' : '' });
+    if (list) return el('label', { class: 'field setting' }, `${s.label}${unit}`, input, el('datalist', { id: list }, s.suggest.map((v) => el('option', { value: v }))), hint);
+  }
+  return el('label', { class: 'field setting' }, `${s.label}${unit}`, input, hint);
+}
+
+function renderSettingFields() {
+  const box = $('#settings-fields');
+  const groups = new Map();
+  for (const s of state.settings) {
+    if (!groups.has(s.group)) groups.set(s.group, []);
+    groups.get(s.group).push(s);
+  }
+  box.replaceChildren(...[...groups].map(([group, list]) => el('fieldset', { class: 'field' }, el('legend', {}, group), el('div', { class: 'grid2' }, list.map(settingField)))));
+}
+
+/** Fill each field with what the profile runs with: its own value, else (a new profile) the hub's .env value, else what it inherits. */
+function fillSettings(p) {
+  for (const s of state.settings) {
+    const own = p?.env?.[s.key];
+    const v = own ?? (!p && s.fromEnv != null ? s.fromEnv : null) ?? s.inherited;
+    const input = SF(s.key);
+    if (s.kind === 'bool') input.checked = /^(1|true|yes|on)$/i.test(String(v));
+    else input.value = v;
+  }
+}
+
+const sameValue = (s, a, b) => {
+  if (s.kind === 'number') return a === '' ? b === '' : b !== '' && Number(a) === Number(b);
+  if (s.kind === 'bool') return /^(1|true|yes|on)$/i.test(a) === /^(1|true|yes|on)$/i.test(b);
+  return a === b;
+};
+
+/** The variables the fields set: only those that differ from what the profile would inherit, so the rest keep following it. */
+function readSettings() {
+  const env = {};
+  for (const s of state.settings) {
+    const input = SF(s.key);
+    const v = s.kind === 'bool' ? String(input.checked) : String(input.value).trim().replace(/^(-?\d+),(\d+)$/, '$1.$2');
+    if (s.kind === 'number' && v !== '') {
+      const n = Number(v);
+      const bad = !Number.isFinite(n) || (s.int && !Number.isInteger(n)) || (s.min !== undefined && n < s.min) || (s.max !== undefined && n > s.max);
+      if (bad) throw new Error(`${s.label} must be ${s.int ? 'a whole number' : 'a number'}${rangeText(s) ? ` in ${rangeText(s)}` : ''} (got "${v}")`);
+    }
+    if (s.kind === 'bool' ? sameValue(s, v, s.inherited || 'false') : v === '' || sameValue(s, v, s.inherited)) continue;
+    env[s.key] = v;
+  }
+  return env;
+}
+
 function openEditor(p) {
   zones();
   state.editing = p ?? null;
@@ -463,7 +541,9 @@ function openEditor(p) {
   F('longitude').value = l.longitude ?? '';
   F('elevationM').value = l.elevationM ?? '';
   F('timezone').value = l.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
-  F('env').value = Object.entries(p?.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n');
+  renderSettingFields();
+  fillSettings(p);
+  F('env').value = Object.entries(p?.env ?? {}).filter(([k]) => !hasField(k)).map(([k, v]) => `${k}=${v}`).join('\n');
   $('#paths').textContent = p ? `Data folder (agent home, workspace, sessions): ${p.dataPath} · Library: ${p.libraryPath}` : 'Each profile gets its own data folder (agent home, notes, skills, sessions) and library folder.';
   syncForm();
   $('#edit').showModal();
@@ -484,8 +564,11 @@ function readForm() {
     if (!line || line.startsWith('#')) continue;
     const i = line.indexOf('=');
     if (i <= 0) throw new Error(`"${line}" is not NAME=value`);
-    env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    const key = line.slice(0, i).trim();
+    if (hasField(key)) throw new Error(`${key} has its own field above: set it there`);
+    env[key] = line.slice(i + 1).trim();
   }
+  Object.assign(env, readSettings());
   const latitude = numOrNull(F('latitude').value, 'Latitude');
   const longitude = numOrNull(F('longitude').value, 'Longitude');
   if ((latitude === null) !== (longitude === null)) throw new Error('Set both latitude and longitude, or neither');

@@ -580,6 +580,20 @@ label.file { cursor: pointer; border: 1px solid var(--line); border-radius: 9px;
 .np-block.past { opacity: .45; }
 .np-block.filler rect:first-child { opacity: .75; }
 .np-block.sel rect:first-child { stroke: #fff; stroke-width: 2; }
+.np-block.pinned rect:first-child { stroke: #fbbf24; stroke-width: 1.5; stroke-dasharray: 4 3; }
+.np-block.pinned.sel rect:first-child { stroke: #fff; stroke-width: 2; stroke-dasharray: 5 3; }
+.np-handle { cursor: ew-resize; touch-action: none; }
+.np-block.target.sel:not(.past) { cursor: grab; touch-action: none; }
+.np-timeline.moving, .np-timeline.moving .np-block { cursor: grabbing; }
+.np-handle-hit { fill: transparent; }
+.np-handle-bar { fill: #fff; stroke: rgba(0, 0, 0, .6); stroke-width: 1; }
+.np-handle:hover .np-handle-bar, .np-handle:focus-visible .np-handle-bar { fill: var(--accent); }
+.np-handle:focus { outline: none; }
+.np-timeline { position: relative; }
+.np-drag-tip { margin: 4px 0 0; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(11, 13, 18, .9); width: fit-content; max-width: 100%; }
+.np-pins { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 6px 0; }
+.np-pin { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 8px; border: 1px dashed #fbbf24; border-radius: 999px; }
+.np-pin button { min-height: 28px; padding: 0 8px; font-size: 12px; }
 .np-block:focus { outline: none; }
 .np-block:focus-visible rect:first-child { stroke: var(--accent); stroke-width: 2; }
 .np-ovh { fill: rgba(0, 0, 0, .35); pointer-events: none; }
@@ -724,6 +738,13 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
 .db-aliases span { font-size: 12px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
 .db-actions { flex-wrap: wrap; }
 .db-load { align-self: center; }
+.prog-add { display: flex; flex-direction: column; gap: 6px; margin: 0; padding-top: 8px; border-top: 1px solid var(--line); }
+.prog-add-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.prog-add-row label { display: inline-flex; align-items: center; gap: 6px; }
+.prog-add-row select, .prog-add-row input { min-height: 38px; font-size: 14px; }
+.prog-add-row input[type=number] { width: 4.5em; padding: 0 6px; }
+.prog-add.compact .prog-add-row select, .prog-add.compact .prog-add-row input, .prog-add.compact button { min-height: 34px; font-size: 13px; }
+#sky-prog { display: flex; flex-direction: column; gap: 4px; margin-right: -32px; }
 .db-src { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 6px; }
 @media (max-width: 699px) {
   .db-filters select { flex-basis: calc(50% - 3px); }
