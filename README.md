@@ -57,7 +57,7 @@ The planning side is where the maths lives. The goal is to turn a list of things
 - **Browse the sky**: a Database tab over the merged catalog with altitude curves and "up tonight" filters, and a bundled Stellarium planetarium with your horizon, your frame, the night plan drawn on the sky, and GoTo from the map.
 - **Decide whether the scope can stay out**: a Weather tab with an hour-by-hour safety report and a **Rain Guard** that watches the 15-minute forecast around your site and sounds an alarm on your phone.
 - **Manage the data**: transfer sessions off the scope into a library laid out the way processing expects, free the card safely (only what is already copied), see every image the agent looked at.
-- **Process automatically** by pairing with [AstroPhoto Studio](https://github.com/methenol/AstroPhoto-Studio): each transferred session is queued, multi-night stacks of the same target, camera and filter can be pooled, and results land next to the raws.
+- **Process automatically** by pairing with [AstroPhoto Studio](https://github.com/methenol/AstroPhoto-Studio), my companion processing project: each transferred session is queued, multi-night stacks of the same target, camera and filter can be pooled, and results land next to the raws.
 - **Run several telescopes** from one container, each with its own agent, plan, site, library and skills.
 - **Use it from a phone at the scope**: the UI is mobile-first, installable, keyboard-safe, and has a night mode.
 
@@ -200,7 +200,7 @@ The tunnel runs as a second container (`COMPOSE_PROFILES=seestar`). It stays idl
 
 ### Pairing with AstroPhoto Studio
 
-[AstroPhoto Studio](https://github.com/methenol/AstroPhoto-Studio) is a separate project that calibrates, grades, stacks and restores the raw subs. Astrocontroller's library mirrors the telescope's own `Astronomy` layout, which is what the Studio reads. Set `ASTROPHOTO_URL` to the server (a GPU box, often over Tailscale) and pick a profile with `ASTROPHOTO_PROFILE`. With `ASTROPHOTO_AUTO_PROCESS=true`, every finished transfer is queued through a persistent outbox: if the server already sees the session (shared NAS, `ASTROPHOTO_LIBRARY_PATH`) nothing is uploaded, otherwise the subs and calibration masters go up resumably. `ASTROPHOTO_POOL_SESSIONS=true` stacks each new night with the earlier nights of the same target, camera, scope and filter. Results are copied back into `<session>/processed/`. Items wait in the outbox while the server is unreachable, so a field session needs nothing special.
+[AstroPhoto Studio](https://github.com/methenol/AstroPhoto-Studio) is my companion project: a separate server that calibrates, grades, stacks and restores the raw subs. The two are built to work together, but each runs on its own. Astrocontroller's library mirrors the telescope's own `Astronomy` layout, which is what the Studio reads. Set `ASTROPHOTO_URL` to the server (a GPU box, often over Tailscale) and pick a profile with `ASTROPHOTO_PROFILE`. With `ASTROPHOTO_AUTO_PROCESS=true`, every finished transfer is queued through a persistent outbox: if the server already sees the session (shared NAS, `ASTROPHOTO_LIBRARY_PATH`) nothing is uploaded, otherwise the subs and calibration masters go up resumably. `ASTROPHOTO_POOL_SESSIONS=true` stacks each new night with the earlier nights of the same target, camera, scope and filter. Results are copied back into `<session>/processed/`. Items wait in the outbox while the server is unreachable, so a field session needs nothing special.
 
 ## Everyday use
 
@@ -251,7 +251,6 @@ This project stands on other people's work. Please keep these notices if you cop
 - **[OpenNGC](https://github.com/mattiaverga/OpenNGC)** by **Mattia Verga** (CC-BY-SA 4.0) and the **VizieR** catalogues (Sharpless, LBN, Cederblad, RCW, van den Bergh, Barnard, LDN, Strasbourg-ESO and MASH planetary nebulae, Green SNRs, Dias open clusters, Harris globulars, RC3, Arp, Hickson, Abell, the Bright Star Catalogue) and the IAU star names make up the object catalog. `catalog/sources.json` carries every citation.
 - **[Open-Meteo](https://open-meteo.com)** and **[7Timer!](https://www.7timer.info)** for the forecast; **RainViewer** radar, **NASA GIBS** satellite imagery and **Esri**'s dark basemap in the Weather tab; **SIMBAD**, **Wikipedia** and **NASA** imagery for the agent's research tools; **Starfront Observatories**' roof API for autonomous nights.
 - The DWARFLAB **Help Center** pages in `agent/reference/dwarflab-help/` are copies of DWARFLAB's own documentation, kept for the agent to consult, with their source URLs.
-- **[AstroPhoto Studio](https://github.com/methenol/AstroPhoto-Studio)** by **methenol**, the processing side this pairs with.
 
 Astrocontroller is not affiliated with, endorsed by, or supported by DWARFLAB, ZWO, Starfront Observatories or any of the projects above. Product and company names belong to their owners. You are driving a telescope with software written largely by an AI and tested on one person's hardware: use it at your own risk, keep an eye on it the first few nights, and arm the Rain Guard.
 
