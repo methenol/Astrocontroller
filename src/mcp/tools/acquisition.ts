@@ -7,6 +7,10 @@
  * - acquisition_measure: this rig's own numbers from its raw frames — the sensor (darks), the sky,
  *   the conversion gain and the stars (lights), a running session checked against what the plan
  *   expects — kept in <data>/acquisition.json, which the plan then uses instead of the spec.
+ * - sub_length: Deep Sky Detail's sub-length analysis of one light sub against a reference (a dark
+ *   master of its settings fetched from the telescope, a bias the owner took, or the stored read
+ *   noise): the swamp factor the sub reaches, the sub efficiency, the minimum sub for the factor
+ *   wanted — stored, and from then on part of acquisition_plan's own calculation.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,12 +20,13 @@ import { errMsg } from '../../log.js';
 import * as sky from '../../astro/sky.js';
 import * as weather from '../../astro/weather.js';
 import { targetKey } from '../../astro/rest.js';
-import { adviseFor, targetInfo, zenithSky, type FactsSource } from '../../astro/acquisition/index.js';
-import { BG_MAX_FRAC, magForRate } from '../../astro/acquisition/advise.js';
+import { adviseFor, targetInfo, zenithSky, type DarkFrameRef, type FactsSource } from '../../astro/acquisition/index.js';
+import { BG_MAX_FRAC, electronRate, magForRate } from '../../astro/acquisition/advise.js';
+import { analyzeSubLength, efficiencyOf, efficiencyVerdict, referenceNoise, DEFAULT_SWAMP, type Channel, type SubLengthResult } from '../../astro/acquisition/sublength.js';
 import { loadDevices, resolveRig, rigFilter, userDevicesDir, type Rig } from '../../astro/acquisition/devices.js';
 import { cadence, clipLevel, frameStats, measureLights, measureSensor, readRaw, stampOfName, type RawFrame } from '../../astro/acquisition/measure.js';
-import { moonToward, zenithFromMeasured } from '../../astro/acquisition/skyglow.js';
-import { deviceKey, forget, recordSeeing, recordSensor, recordSky, sensorProfile, siteSeeing, siteSky, storeView } from '../../astro/acquisition/store.js';
+import { moonToward, skyBrightness, zenithFromMeasured } from '../../astro/acquisition/skyglow.js';
+import { deviceKey, forget, latestSubLength, recordSeeing, recordSensor, recordSky, recordSubLength, sensorProfile, siteSeeing, siteSky, storeView, subLengthSamples } from '../../astro/acquisition/store.js';
 import { deviceLibrary } from '../../library/device-library.js';
 import { isTransferred, parseSessionFolder, sessionLocalDir } from '../../library/sessions.js';
 import { analyze, decode } from '../../media/images.js';
@@ -47,6 +52,9 @@ const SOFT_FACTOR = 1.6;
 const CLIPPED_PCT = 0.5;
 /** check: read noise counts as paid once the sky's electrons per sub reach this many × RN² */
 const SKY_LIMITED_K = 5;
+/** sub_length: lights analysed at most, and reference frames fetched from the scope at most */
+const MAX_SUBLENGTH_LIGHTS = 3;
+const MAX_REFERENCE = 2;
 
 export interface AcquisitionContext {
   site(): sky.Site;
@@ -54,15 +62,36 @@ export interface AcquisitionContext {
   night?: NightServices | null;
   /** a session on the scope's storage as fetchable device paths, oldest first (the Seestar's) */
   sessionSubs?(folder: string): Promise<string[]>;
+  /** the dark and bias frames on the scope's storage (the Dwarf's CALI_FRAME, the Seestar's darklibrary) */
+  darkFrames?(): Promise<DarkFrameRef[]>;
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 const isLightName = (n: string) => /\.fits?$/i.test(n) && !/^failed_|stack|master|dark|flat|bias/i.test(n);
 
+const bytesOf = (p: string): Promise<Buffer> => (p.startsWith('device:') ? deviceLibrary().album.fetch(p.slice('device:'.length), DEVICE_FILE_MAX_BYTES) : fs.promises.readFile(resolveLocalPath(p)));
+
+/**
+ * The reference frames on the scope for a sub: darks of its exposure and gain — two single frames
+ * when it has them (their pair difference is the read noise), else the master nearest in sensor
+ * temperature — or, failing a dark of that length, a bias of its gain.
+ */
+function pickReference(all: DarkFrameRef[], want: { exposureS: number; gain?: number; tempC?: number }): DarkFrameRef[] {
+  const gainOk = (d: DarkFrameRef) => want.gain === undefined || d.gain === undefined || d.gain === want.gain;
+  const byTemp = (a: DarkFrameRef, b: DarkFrameRef) => Math.abs((a.tempC ?? 0) - (want.tempC ?? a.tempC ?? 0)) - Math.abs((b.tempC ?? 0) - (want.tempC ?? b.tempC ?? 0));
+  const sameExp = all.filter((d) => d.kind === 'dark' && gainOk(d) && d.exposureS !== undefined && Math.abs(d.exposureS - want.exposureS) <= 0.01 * want.exposureS);
+  const singles = sameExp.filter((d) => d.stackCount === 1).sort(byTemp);
+  if (singles.length >= 2) return singles.slice(0, MAX_REFERENCE);
+  const masters = sameExp.filter((d) => d.stackCount !== 1).sort(byTemp);
+  if (masters.length) return [masters[0]];
+  if (singles.length) return singles;
+  const bias = all.filter((d) => d.kind === 'bias' && gainOk(d) && (d.gain !== undefined || want.gain === undefined)).sort(byTemp);
+  return bias.slice(0, MAX_REFERENCE);
+}
+
 /** Raw frames from library paths, device paths (device:…), a library folder, or a session (local when transferred, else on the scope). */
 async function loadFrames(ctx: AcquisitionContext, o: { files?: string[]; session?: string; count: number; newest: boolean }): Promise<{ frames: RawFrame[]; bytes: Buffer[]; names: string[] }> {
-  const bytesOf = (p: string): Promise<Buffer> => (p.startsWith('device:') ? deviceLibrary().album.fetch(p.slice('device:'.length), DEVICE_FILE_MAX_BYTES) : fs.promises.readFile(resolveLocalPath(p)));
   let list: string[] = [];
   if (o.files?.length) {
     for (const f of o.files) {
@@ -335,6 +364,23 @@ export function registerAcquisitionTools(tool: ToolFn, ctx: AcquisitionContext):
       const range = sensor.saturationAdu - sensor.blackAdu;
       const bgFrac = median(all.map((l, i) => ({ l, i })).filter(({ l }) => !l.outlier).map(({ l, i }) => (stats[i].median - blackAt(l.exposureS, frames[i])) / range));
       const skyE = eSky * subS;
+      // the sub against the read noise, from the frames' own scatter (total noise² − RN²): sub_length's swamp factor
+      const totalSigmaAdu = median(stats.filter((_, i) => !all[i].outlier).map((s) => s.sigma));
+      const skyNoiseAdu = Math.sqrt(Math.max(0, totalSigmaAdu ** 2 - rnAdu ** 2));
+      const swamp = rnAdu > 1e-9 ? skyNoiseAdu ** 2 / rnAdu ** 2 : Infinity;
+      const swampWanted = config.plan.swampFactor;
+      const eff = efficiencyOf(skyNoiseAdu, rnAdu);
+      const subLength = {
+        swamp: r2(swamp),
+        wanted: swampWanted,
+        efficiencyPct: Math.round(eff.efficiency * 1000) / 10,
+        extraIntegration: r2(eff.extraIntegration),
+        minSubForWantedS: swamp > 1e-9 && Number.isFinite(swamp) ? Math.round((swampWanted / swamp) * subS) : null,
+        readNoise: `${r2(rnAdu)} ADU (${sensor.source.readNoise})`,
+        verdict: efficiencyVerdict(eff.efficiency),
+        note: 'from the frames\' own scatter against the stored read noise; sub_length fits the background properly against a reference frame',
+        stored: latestSubLength(devKey, filter.name, gain) ? 'a sub_length analysis of this filter and gain is stored and in the plan' : 'no sub_length analysis of this filter and gain yet',
+      };
       const measured = {
         frames: frames.map((f) => f.name),
         subS,
@@ -355,6 +401,7 @@ export function registerAcquisitionTools(tool: ToolFn, ctx: AcquisitionContext):
         moon: moon ? `${Math.round(moon.altDeg)}° alt, ${Math.round(moon.sepDeg)}° away` : null,
         stars,
         cadence: cadence(names.map((n) => ({ at: stampOfName(n), exposureS: subS }))),
+        subLength,
       };
       if (a.action === 'sky') return text({ device: devKey, measured, siteSky: zenithSky(), nowUsed: sensorLine(resolveRig(facts), gain) });
 
@@ -373,10 +420,192 @@ export function registerAcquisitionTools(tool: ToolFn, ctx: AcquisitionContext):
       if (stars.roundness !== undefined && stars.count >= 10 && stars.roundness < ROUND_MIN) verdict.push(`SHORTEN or check tracking: stars are elongated (roundness ${r2(stars.roundness)}) — ${rig.mount === 'alt-az' ? 'field rotation or wind' : 'drift, balance or wind'}${lower ? `; ${lower}s` : ''}`);
       if (baseline && stars.fwhmArcsec !== undefined && stars.count >= 10 && stars.fwhmArcsec > SOFT_FACTOR * baseline.fwhmArcsec) verdict.push(`REFOCUS: stars are ${r2(stars.fwhmArcsec)}″ against ${r2(baseline.fwhmArcsec)}″ usual for this rig (${baseline.samples} samples)`);
       if (!verdict.length && higher && skyE < SKY_LIMITED_K * sensor.readNoiseE ** 2 && (bgFrac * higher) / subS <= BG_MAX_FRAC) {
-        verdict.push(`LENGTHEN to ${higher}s if the mount holds it (acquisition_plan advise says): the sky gives ${r2(skyE)} e⁻ per sub, under ${SKY_LIMITED_K}×RN² = ${r2(SKY_LIMITED_K * sensor.readNoiseE ** 2)} — read noise still costs SNR, and the background would be ${Math.round((bgFrac * higher * 100) / subS)}%`);
+        verdict.push(`LENGTHEN to ${higher}s if the mount holds it (acquisition_plan advise says): the sky gives ${r2(skyE)} e⁻ per sub, under ${SKY_LIMITED_K}×RN² = ${r2(SKY_LIMITED_K * sensor.readNoiseE ** 2)} — read noise still costs SNR (swamp ${r2(swamp)}× of ${swampWanted} wanted, sub efficiency ${subLength.efficiencyPct}%), and the background would be ${Math.round((bgFrac * higher * 100) / subS)}%`);
       }
       if (!verdict.length) verdict.push(`KEEP: background ${Math.round(bgFrac * 100)}% of the range, nothing clipping beyond stars, stars round and sharp`);
       return text({ device: devKey, verdict, measured, rules: `background ≤ ${BG_MAX_FRAC * 100}% of the range; clipped ≤ ${CLIPPED_PCT}% of the frame; roundness ≥ ${ROUND_MIN}; FWHM ≤ ${SOFT_FACTOR}× this rig's usual${baseline ? '' : ' (no baseline yet: three sky/check cohorts make one)'}` });
+    },
+  );
+
+  tool(
+    'sub_length',
+    "Deep Sky Detail's Sub Length Calculator (the method of its Shiny app, Windows build and Siril script) run on THIS telescope's own raw sub, deterministically: fits the sub's sky background with an exponentially modified Gaussian (sigma = the sky's noise, tau = the skew of nebulosity and gradients), reads the read noise and offset off a reference frame, and reports the swamp factor the sub reaches (sky noise² / read noise²; 10 is DSD's recommendation, PLAN_SWAMP_FACTOR is what the plan wants), the sub efficiency (sky noise / total noise; ≥ 95% is excellent) and the extra integration a lower one costs, the minimum sub for the wanted factor and the device's offered sub that reaches it, plus the sky's electrons per second and the Poisson cross-check through e⁻/ADU. analyze: the newest sub of a session (or given files). The reference: `reference` files (bias frames, or ≥2 single darks of the sub's own length — their scatter is the read noise), else the matching dark master fetched FROM THE SCOPE (the Dwarf's CALI_FRAME, the Seestar's darklibrary: its level is the offset; the read noise is then this rig's measured one, else the spec's — said so), else the sub's own BIAS card. The result is stored per filter and gain, and acquisition_plan from then on scales its sky-noise term by it and quotes the swamp factor of its recommendation. show: the stored analyses. forget: drop them for this device.",
+    {
+      action: z.enum(['analyze', 'show', 'forget']),
+      session: z.string().optional().describe("a session folder or 'latest': the library copy when transferred, else on the scope"),
+      files: z.array(z.string()).optional().describe('light subs: library paths, a library folder, or device:/… paths'),
+      count: z.number().int().min(1).max(MAX_SUBLENGTH_LIGHTS).optional().describe('newest subs to analyse (default 1; the median of several is stored)'),
+      reference: z.array(z.string()).optional().describe('bias or dark frames to read the offset and read noise from (library or device:/… paths); omit to fetch the matching dark from the scope'),
+      swamp: z.number().min(1).max(100).optional().describe(`swamp factor wanted (default PLAN_SWAMP_FACTOR ${config.plan.swampFactor}; DSD's slider runs 2–10)`),
+      channel: z.enum(['auto', 'L', 'R', 'G', 'B']).optional().describe('the colour channel analysed: auto = a green phase of the mosaic (default), L = every pixel, R/G/B by the Bayer pattern'),
+      narrowband: z.boolean().optional().describe("DSD's narrowband mode (the background is the nebula, so the skew counts as signal): default true through a line/duo-band filter"),
+      duration_s: z.number().positive().optional().describe("the sub's exposure when its header lacks EXPTIME"),
+    },
+    async (a) => {
+      const facts = await ctx.facts();
+      const rig = resolveRig(facts);
+      const devKey = deviceKey(rig.spec.id, rig.serial);
+      if (a.action === 'show') return text({ device: devKey, wanted: config.plan.swampFactor, analyses: subLengthSamples(devKey).slice(0, 20), inPlan: rig.filters.map((f) => rig.gains.map((g) => ({ filter: f.name, gain: g, sample: latestSubLength(devKey, f.name, g) ?? null }))).flat().filter((x) => x.sample) });
+      if (a.action === 'forget') return text({ forgot: forget({ device: devKey, subLength: true }) });
+
+      const wanted = a.swamp ?? config.plan.swampFactor ?? DEFAULT_SWAMP;
+      const channel: Channel = a.channel ?? 'auto';
+      const { frames } = await loadFrames(ctx, { files: a.files, session: a.session, count: a.count ?? 1, newest: true });
+      const light = frames[frames.length - 1];
+      const gains = new Set(frames.map((f) => f.gain));
+      if (gains.size > 1) throw new Error(`the subs are of several gains (${[...gains].join(', ')}): analyse one cohort at a time`);
+      const gain = light.gain ?? rig.gains[0];
+      const sensor = rig.sensorAt(gain);
+      const filter = rigFilter(rig, light.filter);
+      const subS = a.duration_s ?? light.exposureS;
+      if (!subS) throw new Error(`${light.name} has no EXPTIME: give duration_s`);
+      const narrowband = a.narrowband ?? filter.band !== 'broadband';
+
+      // the reference: the owner's frames, else the scope's matching dark, else the sub's own offset card
+      const notes: string[] = [];
+      let refFrames: RawFrame[] = [];
+      let refFrom = '';
+      if (a.reference?.length) {
+        refFrames = await Promise.all(a.reference.slice(0, MAX_REFERENCE + 2).map(async (p) => readRaw(await bytesOf(p), path.basename(p.replace(/^device:/, '')))));
+        refFrom = 'the reference files given';
+      } else if (ctx.darkFrames) {
+        const listed = await ctx.darkFrames().catch((err) => {
+          notes.push(`the scope's dark frames could not be listed: ${errMsg(err)}`);
+          return [] as DarkFrameRef[];
+        });
+        const picked = pickReference(listed, { exposureS: subS, gain: light.gain, tempC: light.tempC });
+        if (picked.length) {
+          refFrames = await Promise.all(picked.map(async (d) => readRaw(await bytesOf(`device:${d.path}`), path.basename(d.path))));
+          refFrom = `fetched from the scope: ${picked.map((d) => path.basename(d.path)).join(', ')}`;
+        } else if (listed.length) notes.push(`the scope holds ${listed.length} dark/bias frames but none of ${subS}s${light.gain !== undefined ? ` at gain ${light.gain}` : ''}`);
+      }
+      for (const r of refFrames) if (r.width !== light.width || r.height !== light.height) throw new Error(`${r.name} is ${r.width}×${r.height}, the sub ${light.width}×${light.height}: not a reference for it`);
+      const ref = refFrames.length ? referenceNoise(refFrames, channel) : null;
+      if (ref) notes.push(...ref.warnings);
+      if (ref?.gain !== undefined && light.gain !== undefined && ref.gain !== light.gain) notes.push(`the reference is gain ${ref.gain}, the sub gain ${light.gain}: its level is not this sub's offset`);
+
+      // the offset: the reference's level (a dark of the sub's length holds its dark current too), else the sub's card, else what is measured, else the spec
+      const darkAduPerS = sensor.darkCurrentEPerS / sensor.ePerAdu;
+      const profile = sensorProfile(rig.spec.id, rig.serial);
+      const measuredBias = profile?.gains[String(gain)]?.blackAdu ?? profile?.blackAdu;
+      const measuredAtS = profile?.gains[String(gain)]?.blackAtS ?? 0;
+      let levelAdu: number;
+      let levelSource: string;
+      if (ref) {
+        levelAdu = ref.levelAdu;
+        levelSource = `${ref.frames.length > 1 ? 'the reference frames' : 'the reference frame'} (${refFrom})${ref.exposureS !== undefined && ref.exposureS > 0 && Math.abs(ref.exposureS - subS) > 0.01 * subS ? `, a ${ref.exposureS}s dark: its dark current differs from the sub's` : ''}`;
+      } else if (light.biasAdu !== undefined) {
+        levelAdu = light.biasAdu + darkAduPerS * subS;
+        levelSource = `the sub's BIAS card (${light.biasAdu}) plus ${r2(darkAduPerS * subS)} ADU of dark current from the spec`;
+      } else if (measuredBias !== undefined) {
+        levelAdu = measuredBias + darkAduPerS * Math.max(0, subS - measuredAtS);
+        levelSource = 'the measured black level (acquisition_measure sensor) plus the dark current over the sub';
+      } else {
+        levelAdu = sensor.blackAdu;
+        levelSource = `the spec's black level (${sensor.source.black}): take a dark of this length first`;
+      }
+      // the read noise: the reference's when it can vouch for one, else the rig's measured, else the spec's
+      let readNoiseAdu: number;
+      let readNoiseSource: string;
+      if (ref?.readNoiseAdu !== null && ref?.readNoiseAdu !== undefined) {
+        readNoiseAdu = ref.readNoiseAdu;
+        readNoiseSource = ref.readNoiseHow!;
+      } else {
+        readNoiseAdu = sensor.readNoiseE / sensor.ePerAdu;
+        readNoiseSource = sensor.source.readNoise === 'measured' ? 'measured on this rig (acquisition_measure sensor)' : `${sensor.source.readNoise} (${r2(sensor.readNoiseE)} e⁻ through ${Math.round(sensor.ePerAdu * 10000) / 10000} e⁻/ADU)`;
+      }
+
+      const results: SubLengthResult[] = frames.map((f) => analyzeSubLength({ light: f, readNoiseAdu, levelAdu, ePerAdu: sensor.ePerAdu, swamp: wanted, durationS: subS, channel, narrowband }));
+      // the frame of the median swamp stands for the cohort
+      const bySwamp = [...results].sort((x, y) => x.swamp - y.swamp);
+      const res = bySwamp[bySwamp.length >> 1];
+      const pick = frames[results.indexOf(res)];
+      notes.push(...res.notes);
+
+      // the planner's calibration: the measured sky variance rate against its model sky at this pointing and time
+      const site = ctx.site();
+      const at = pick.at !== undefined ? new Date(pick.at) : new Date();
+      const pos = pick.raHours !== undefined && pick.decDeg !== undefined ? sky.altAz(site, pick.raHours, pick.decDeg, at) : null;
+      let skyNoiseScale: number | null = null;
+      let model: { sqm: number; ePerS: number } | null = null;
+      if (pos && pos.altitude > 0) {
+        const zen = zenithSky();
+        const moon = moonToward(site, pick.raHours!, pick.decDeg!, at);
+        const sb = skyBrightness({ zenithSqm: zen.sqm, altDeg: pos.altitude, moon });
+        const eSkyModel = electronRate(rig, sb.sqm, filter.skyFraction) + sensor.darkCurrentEPerS;
+        const measuredVarE = (res.skyNoiseAdu * sensor.ePerAdu) ** 2 / subS;
+        skyNoiseScale = eSkyModel > 0 ? measuredVarE / eSkyModel : null;
+        model = { sqm: r2(sb.sqm), ePerS: r2(eSkyModel) };
+      } else notes.push('no pointing in the header (RA/DEC): the plan gets the swamp numbers but not the sky-noise scale');
+
+      recordSubLength({
+        at: at.getTime(),
+        device: devKey,
+        filter: filter.name,
+        gain,
+        subS,
+        frame: pick.name,
+        narrowband,
+        readNoiseAdu: r2(readNoiseAdu),
+        readNoiseSource,
+        skyNoiseAdu: r2(res.skyNoiseAdu),
+        skyVarAduPerS: Math.round((res.skyNoiseAdu ** 2 / subS) * 10000) / 10000,
+        skyAduPerS: Math.round(res.background.aduPerS * 10000) / 10000,
+        swamp: r2(res.swamp),
+        efficiency: Math.round(res.efficiency * 10000) / 10000,
+        skyNoiseScale: skyNoiseScale !== null && Number.isFinite(skyNoiseScale) ? r2(skyNoiseScale) : null,
+      });
+      // a bias frame's scatter is the read noise itself: the sensor profile learns it
+      if (ref?.readNoiseHow === 'bias frame (DSD rule)' && Number.isFinite(ref.readNoiseAdu!)) recordSensor(rig.spec.id, rig.serial, { gain, readNoiseAdu: r2(ref.readNoiseAdu!), at: Date.now(), frames: ref.frames.length, how: `sub_length: ${ref.frames.length} bias frame(s), DSD rule (${ref.how})` });
+
+      const offered = res.minSubS !== null ? (rig.subsS.find((t) => t >= res.minSubS! - 1e-9) ?? null) : null;
+      const longest = rig.subsS[rig.subsS.length - 1];
+      const fmtS = (x: number | null) => (x === null ? null : x > 1e6 ? 'never' : Math.round(x));
+      const recommendation =
+        res.minSubS === null
+          ? 'the sky adds no measurable noise at this sub: longer subs, or check that the reference is this gain\'s'
+          : res.minSubS <= subS
+            ? `${subS}s already reaches a swamp factor of ${wanted}: longer subs gain little beyond fewer frames`
+            : offered !== null
+              ? `${offered}s is the shortest offered sub that reaches ${wanted} (~${Math.round(res.minSubS)}s): acquisition_plan weighs it against trailing and the background`
+              : `no offered sub reaches ${wanted} (~${Math.round(res.minSubS)}s needed, ${longest}s the longest): take the longest the mount holds and accept ×${r2(efficiencyOf(Math.sqrt(res.swamp * (longest / subS)), 1).extraIntegration)} integration`;
+      return text({
+        device: devKey,
+        method: 'Deep Sky Detail Sub Length Calculator v1.2.0 (ex-Gaussian MLE of the background, E1/E2 sky noise)',
+        frames: frames.map((f) => f.name),
+        settings: { filter: filter.name, gain, subS, narrowband, channel: res.channel, swampWanted: wanted },
+        reference: {
+          frames: ref?.frames ?? [],
+          from: refFrom || null,
+          levelAdu: r2(levelAdu),
+          levelFrom: levelSource,
+          scatterAdu: ref ? r2(ref.scatterAdu) : null,
+          stackCount: ref?.stackCount ?? null,
+          readNoiseAdu: r2(readNoiseAdu),
+          readNoiseE: r2(readNoiseAdu * sensor.ePerAdu),
+          readNoiseFrom: readNoiseSource,
+        },
+        background: {
+          levelAdu: r2(res.background.levelAdu),
+          aboveReferenceAdu: r2(res.background.aboveReferenceAdu),
+          aduPerS: Math.round(res.background.aduPerS * 1000) / 1000,
+          ePerS: Math.round(res.background.ePerS * 1000) / 1000,
+          pixels: res.background.pixels,
+          fit: { mu: r2(res.fit.mu), sigma: r2(res.fit.sigma), tau: r2(res.fit.tau), totalSd: r2(res.fit.totalSd), converged: res.fit.converged, iterations: res.fit.iterations, fallback: res.fit.fallback },
+        },
+        skyNoise: { e1Adu: r2(res.skyNoiseAdu), e1OtherReadingAdu: r2(res.skyNoiseOtherReadingAdu), e2PoissonAdu: r2(res.skyNoisePoissonAdu), note: 'E1 from the fitted scatter (gain-independent); E2 the Poisson noise the level implies through e⁻/ADU — far apart means the gain, the reference or the fit is off' },
+        swamp: { measured: r2(res.swamp), byLevel: r2(res.swampPoisson), wanted, minSubS: fmtS(res.minSubS), minSubByLevelS: fmtS(res.minSubPoissonS), offeredSubS: offered },
+        efficiency: { pct: Math.round(res.efficiency * 1000) / 10, extraIntegration: r2(res.extraIntegration), verdict: efficiencyVerdict(res.efficiency), gapFactor: r2(res.gapFactor) },
+        perFrame: results.length > 1 ? results.map((r) => ({ frame: r.frame, swamp: r2(r.swamp), efficiencyPct: Math.round(r.efficiency * 1000) / 10, skyNoiseAdu: r2(r.skyNoiseAdu) })) : undefined,
+        recommendation,
+        plan: {
+          stored: `the plan scales its sky-noise term for ${filter.name} at gain ${gain}${skyNoiseScale !== null ? ` by ×${r2(skyNoiseScale)}` : ''} and quotes the swamp factor of its recommendation`,
+          skyNoiseScale: skyNoiseScale !== null ? r2(skyNoiseScale) : null,
+          modelSkyThere: model ? `${model.sqm} mag/arcsec² (${model.ePerS} e⁻/s with dark current) at ${Math.round(pos!.altitude)}° alt` : null,
+          readNoiseLearned: ref?.readNoiseHow === 'bias frame (DSD rule)' ? `read noise ${r2(readNoiseAdu)} ADU stored for gain ${gain}` : null,
+        },
+        notes,
+      });
     },
   );
 }

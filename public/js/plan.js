@@ -60,7 +60,7 @@ const subLine = (subS, range, subs) => (subS == null && !Array.isArray(range) ? 
 /** The acquisition planner's capture settings for a block: what to shoot with, the headroom, and why. */
 function captureLine(a) {
   const head = `${a.filter} · gain ${a.gain} · ${a.subS}s × ${a.frames}`;
-  const room = `sky ${a.backgroundPct}% of range${a.coreClips ? ' · core clips' : ''} · stars clip from mag ${a.starSaturationMag}`;
+  const room = `sky ${a.backgroundPct}% of range${a.coreClips ? ' · core clips' : ''} · stars clip from mag ${a.starSaturationMag}${a.swamp != null ? ` · swamp ${a.swamp}× of ${a.swampWanted}, efficiency ${a.efficiencyPct}%` : ''}`;
   return `<div class="small"><b>Capture:</b> ${esc(head)} <span class="muted">(${esc(room)}; ${esc(a.hoursToGood)} h to a clean picture)</span></div>
       <div class="small muted">${esc(a.line)}</div>`;
 }
@@ -473,7 +473,7 @@ async function loadSuggestions() {
               : r.usableMin
                 ? `${esc(dur(r.usableMin))} usable<small>best ${esc(hm(r.usableFrom))}–${esc(hm(r.usableUntil))} · merit ${esc(Math.round(r.merit * 100))}% · value ${esc(r.planValue)}</small>`
                 : `<span class="muted">not usable</span><small>${esc(r.notUsable ?? '')}</small>`;
-            const subs = r.capture ? `${r.capture.subS}s × ${r.capture.frames} · ${r.capture.hoursToGood} h to clean` : subLine(r.subSeconds, r.subRangeSeconds, r.subs);
+            const subs = r.capture ? `${r.capture.subS}s × ${r.capture.frames} · ${r.capture.hoursToGood} h to clean${r.capture.swamp != null ? ` · swamp ${r.capture.swamp}×` : ''}` : subLine(r.subSeconds, r.subRangeSeconds, r.subs);
             return `<tr class="${r.usableMin ? '' : 'gated'}"><td><b>${esc(r.displayName)}</b> ${verdict(r.detect, r.detectReason)}${r.obstructedNow ? ` <span class="badge waiting" title="behind the site's obstructions now${r.clearsAt ? `; clear at ${esc(r.clearsAt)}` : ''}">behind obstruction now</span>` : ''}<small>${esc(r.type)} in ${esc(r.constellation)}, ${esc(r.sizeArcmin)}′${r.magnitude != null ? `, mag ${esc(r.magnitude)}` : ''}${r.surfaceBrightness != null ? `, SB ${esc(r.surfaceBrightness)}` : ''}</small>${r.gated ? `<small>${esc(r.gateReason)}</small>` : ''}${r.restReason ? `<small>memory: ${esc(r.restReason)}</small>` : ''}</td>
             <td data-label="In tonight's plan">${inPlan}<small>max ${esc(Math.round(r.maxAltitude))}°</small></td>
             <td data-label="Sky">${r.sky != null ? `<b class="sky ${skyCls(r.sky)}">${esc(r.sky)}/100</b><small>while usable</small>` : '<small>no forecast</small>'}</td>

@@ -43,7 +43,7 @@ Filter is not part of the profile, so the same darks serve every filter. Duo-Ban
 - **One pool, one profile.** Nights of a target are pooled by name (`process_session target=…`). Pool only nights with the same exposure, gain and filter.
 
 ## Choosing, every target
-0. `acquisition_plan action=advise target=<name>` (the night plan's block already carries it as `capture`): it picks among the dark-covered exposure/gain pairs and the filters for this target under tonight's sky (Moon, airmass, transparency, trailing, the background and core limits). Use its settings; the steps below are the fallback when it fails.
+0. `acquisition_plan action=advise target=<name>` (the night plan's block already carries it as `capture`): it picks among the dark-covered exposure/gain pairs and the filters for this target under tonight's sky (Moon, airmass, transparency, trailing, the background and core limits). Use its settings; its `subLength` block says what swamp factor and sub efficiency the sub reaches (measured by `sub_length` on this rig's own subs when it has run, else modelled). The steps below are the fallback when it fails.
 1. Mount mode (`telescope_status.bodyMode`): Alt-Az → ALTAZ-15. EQ → EQ-30, or EQ-60 for faint Duo-Band emission with good tracking.
 2. Filter by target type. With a bright Moon, prefer emission targets with Duo-Band.
 3. Plan the slot so the target stays at 30–65° altitude.

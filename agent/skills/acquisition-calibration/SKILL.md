@@ -24,6 +24,13 @@ Repeat on two more nights for the site's sky. Moonlit or low cohorts are recorde
 ## 3. During a capture
 `acquisition_measure action=check session=latest` after the first cohort: SHORTEN / REFOCUS act now; LENGTHEN only with the owner's leave. It records sky and seeing samples too.
 
+## 4. Sub length (once per filter and gain in use; again when the sky or the season changes)
+`sub_length action=analyze session=latest` runs Deep Sky Detail's Sub Length Calculator on the newest sub: it fetches the dark master of the sub's exposure and gain from CALI_FRAME itself (two `_stack_1` single darks, when the scope has them, also give the read noise by their pair difference; a master gives the offset only and the read noise is the stored one — the result says which). Read:
+- `swamp.measured` against `swamp.wanted` (PLAN_SWAMP_FACTOR, 10): how many times the read noise's variance the sky already buries at this sub;
+- `efficiency.pct` (≥ 95% excellent) and `efficiency.extraIntegration` (what a lower one costs);
+- `swamp.minSubS` / `swamp.offeredSubS`: the shortest sub that reaches the factor and the device's sub at or past it; `recommendation` puts it in words.
+The result is stored per filter and gain; `acquisition_plan` then scales its sky-noise term by it and quotes `subLength` (swamp, efficiency, the minimum sub) with every recommendation. Through the Duo-Band it runs in narrowband mode (the background is the nebula); pass `narrowband=false` for a frame of empty sky. `sub_length action=show` lists what is stored; `action=forget` drops it.
+
 ## Rules
 - Measure only frames taken with the light path as stated (darks dark, lights on sky): a wrong cohort teaches wrong numbers. `acquisition_measure action=forget forget=gain gain=<g>` drops a bad one.
 - Never edit the shipped device files. A correction to the spec (a new exposure list after a firmware update) goes into `<data>/devices/dwarf-3.json` (a copy with the same id) — only on the owner's request.

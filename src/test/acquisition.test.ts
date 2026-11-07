@@ -7,7 +7,8 @@ import { advise, rotationRate, subCycle, BG_MAX_FRAC, type SkySlice, type Target
 import { loadDevices, pickDevice, resolveRig, userDevicesDir, deviceById } from '../astro/acquisition/devices.js';
 import { skyBrightness, zenithFromMeasured, airmass } from '../astro/acquisition/skyglow.js';
 import { cadence, clipLevel, frameStats, measureLights, measureSensor, readRaw, greenPhase, stampOfName } from '../astro/acquisition/measure.js';
-import { recordSensor, resetStoreCache, sensorProfile } from '../astro/acquisition/store.js';
+import { forget, latestSubLength, recordSensor, recordSubLength, resetStoreCache, sensorProfile } from '../astro/acquisition/store.js';
+import { analyzeSubLength, bayerOffset, calibrationNameInfo, efficiencyOf, erfc, exGaussianMoments, fitExGaussian, minSubFor, nelderMead, normalCdf, referenceNoise, swampAt } from '../astro/acquisition/sublength.js';
 
 const SITE = { lat: 31.5, lon: -99.4, elev: 450 };
 
@@ -259,5 +260,166 @@ describe('measurements', () => {
     assert.equal(s.source.ePerAdu, 'measured');
     assert.ok(!rig.missing.some((m) => m.startsWith('conversion gain')));
     assert.ok(sensorProfile('seestar-s50-pro', 'TESTSN'));
+  });
+});
+
+describe('sub length (Deep Sky Detail method)', () => {
+  const W = 320;
+  const H = 240;
+  /** a seeded uniform in (0, 1) */
+  const uniform = (seed: number) => {
+    let x = seed >>> 0;
+    return () => ((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) + 1) / 4294967297;
+  };
+
+  test('the normal CDF and erfc are accurate', () => {
+    assert.ok(Math.abs(normalCdf(0) - 0.5) < 1e-7);
+    assert.ok(Math.abs(normalCdf(1.959964) - 0.975) < 1e-6);
+    assert.ok(Math.abs(normalCdf(-3) - 0.0013499) < 1e-6);
+    assert.ok(Math.abs(erfc(0.5) - 0.4795001) < 1e-6);
+  });
+
+  test('Nelder–Mead finds the minimum of a bowl', () => {
+    const r = nelderMead((x) => (x[0] - 3) ** 2 + 2 * (x[1] + 1) ** 2 + 5, [0, 0]);
+    assert.ok(r.converged);
+    assert.ok(Math.abs(r.x[0] - 3) < 1e-4 && Math.abs(r.x[1] + 1) < 1e-4, `${r.x}`);
+    assert.ok(Math.abs(r.fx - 5) < 1e-8);
+  });
+
+  test('the ex-Gaussian fit recovers mu, sigma and tau of a synthetic sample', () => {
+    const g = gauss(21);
+    const u = uniform(22);
+    const xs = Float64Array.from({ length: 10_000 }, () => 500 + 12 * g() - 20 * Math.log(u()));
+    const start = exGaussianMoments(xs);
+    assert.ok(Math.abs(start.tau - 20) < 6, `moments tau ${start.tau}`);
+    const f = fitExGaussian(xs);
+    assert.ok(!f.fallback && f.converged, JSON.stringify(f));
+    assert.ok(Math.abs(f.mu - 500) < 1.5, `mu ${f.mu}`);
+    assert.ok(Math.abs(f.sigma - 12) < 1, `sigma ${f.sigma}`);
+    assert.ok(Math.abs(f.tau - 20) < 1.5, `tau ${f.tau}`);
+    // the same sample gives the same answer: no randomness anywhere
+    assert.deepEqual(fitExGaussian(xs), f);
+  });
+
+  test('a bias frame gives the read noise by the SD/MAD rule; a master gives the level only; two darks their pair difference', () => {
+    const BIAS = 500;
+    const RN = 4;
+    const g0 = gauss(31);
+    const bias = readRaw(fits(W, H, () => BIAS + RN * g0(), { EXPTIME: 0.001, GAIN: 60, BAYERPAT: 'RGGB' }), 'bias_gain_60_bin_1.fits');
+    const b = referenceNoise([bias], 'auto');
+    assert.equal(b.readNoiseHow, 'bias frame (DSD rule)');
+    assert.ok(Math.abs(b.readNoiseAdu! - RN) < 0.4, `rn ${b.readNoiseAdu}`);
+    assert.ok(Math.abs(b.levelAdu - BIAS) < 1);
+    // hot pixels: the SD blows up, the MAD does not
+    const g = gauss(32);
+    const hot = readRaw(fits(W, H, (x, y) => ((x * 7 + y * 13) % 97 === 0 ? 4000 : BIAS + RN * g()), { EXPTIME: 0.001, GAIN: 60 }), 'bias2.fits');
+    const h = referenceNoise([hot], 'auto');
+    assert.equal(h.how, 'mad');
+    assert.ok(Math.abs(h.readNoiseAdu! - RN) < 0.5, `rn ${h.readNoiseAdu}`);
+    // a master: the level, no read noise
+    const master = readRaw(fits(W, H, (x, y) => BIAS + 20 + ((x + y) % 5), { BAYERPAT: 'RGGB' }), 'dark_exp_60.000000_gain_60_bin_1_39C_stack_20.fits');
+    const m = referenceNoise([master], 'auto');
+    assert.equal(m.readNoiseAdu, null);
+    assert.equal(m.stackCount, 20);
+    assert.equal(m.exposureS, 60);
+    assert.ok(m.warnings.some((w) => w.includes('offset only')));
+    // two single darks of one length: the pair difference cancels the fixed pattern
+    const pattern = (x: number, y: number) => ((x * 3 + y) % 11) * 2;
+    const g1 = gauss(33);
+    const g2 = gauss(34);
+    const d1 = readRaw(fits(W, H, (x, y) => BIAS + pattern(x, y) + RN * g1()), 'dark_exp_30.000000_gain_60_bin_1_28C_stack_1.fits');
+    const d2 = readRaw(fits(W, H, (x, y) => BIAS + pattern(x, y) + RN * g2()), 'dark_exp_30.000000_gain_60_bin_1_29C_stack_1.fits');
+    const p = referenceNoise([d1, d2], 'auto');
+    assert.equal(p.readNoiseHow, 'pair difference of darks (dark-current noise included)');
+    assert.ok(Math.abs(p.readNoiseAdu! - RN) < 0.5, `rn ${p.readNoiseAdu}`);
+  });
+
+  test('calibration file names of both makers are read', () => {
+    assert.deepEqual(calibrationNameInfo('dark_exp_90.000000_gain_40_bin_1_39C_stack_20.fits'), { kind: 'dark', exposureS: 90, gain: 40, tempC: 39, stackCount: 20 });
+    assert.deepEqual(calibrationNameInfo('bias_gain_2_bin_1.fits'), { kind: 'bias', exposureS: undefined, gain: 2, tempC: undefined, stackCount: undefined });
+    assert.deepEqual(calibrationNameInfo('MasterDark_5_60.0s_15.0C_20261104-045913.fit'), { kind: 'dark', stackCount: 5, exposureS: 60, tempC: 15 });
+    assert.equal(calibrationNameInfo('Light_NGC 6960_60.0s_LP_20260927-000730.fit').kind, 'light');
+    assert.deepEqual(bayerOffset('GRBG', 'R'), [1, 0]);
+    assert.deepEqual(bayerOffset('RGGB', 'B'), [1, 1]);
+  });
+
+  test('a sub whose sky noise is √10 × the read noise has a swamp factor of 10 and a 95% efficiency', () => {
+    const BIAS = 500;
+    const RN = 4;
+    const K = 1; // e⁻/ADU
+    const skyE = 160; // → Poisson noise √160 = 12.65 ADU, 10 × RN²
+    const g = gauss(41);
+    const light = readRaw(fits(W, H, () => BIAS + skyE + Math.sqrt(skyE + RN ** 2) * g(), { EXPTIME: 30, GAIN: 60, BAYERPAT: 'RGGB' }), 'light.fits');
+    const r = analyzeSubLength({ light, readNoiseAdu: RN, levelAdu: BIAS, ePerAdu: K, swamp: 10 });
+    assert.ok(!r.fit.fallback);
+    assert.ok(Math.abs(r.skyNoiseAdu - Math.sqrt(skyE)) < 0.8, `sky noise ${r.skyNoiseAdu}`);
+    assert.ok(Math.abs(r.swamp - 10) < 1.5, `swamp ${r.swamp}`);
+    assert.ok(Math.abs(r.swampPoisson - 10) < 1, `swamp by level ${r.swampPoisson}`);
+    assert.ok(Math.abs(r.minSubS! - 30) < 5, `min sub ${r.minSubS}`);
+    assert.ok(Math.abs(r.efficiency - 0.953) < 0.01, `eff ${r.efficiency}`);
+    assert.ok(Math.abs(r.extraIntegration - 1.1) < 0.03);
+    assert.ok(Math.abs(r.background.aduPerS - skyE / 30) < 0.1);
+    // the same frame again: identical numbers
+    assert.deepEqual(analyzeSubLength({ light, readNoiseAdu: RN, levelAdu: BIAS, ePerAdu: K, swamp: 10 }), r);
+    // a sub four times shorter needs four times as long to reach the factor, and read noise costs more
+    const short = analyzeSubLength({ light, readNoiseAdu: RN, levelAdu: BIAS, ePerAdu: K, swamp: 10, durationS: 7.5 });
+    assert.ok(Math.abs(short.minSubS! - r.minSubS! / 4) < 1e-9);
+    assert.equal(minSubFor(5, RN, 160, 30), 15);
+    assert.ok(Math.abs(swampAt(160 / 30, RN, 60) - 20) < 1e-9);
+    assert.ok(efficiencyOf(0, RN).efficiency < 0.01);
+    assert.ok(efficiencyOf(100, RN).efficiency > 0.999);
+  });
+
+  test('a narrowband reading counts the skew as sky; a frame of pure offset says so', () => {
+    const BIAS = 500;
+    const g = gauss(51);
+    const u = uniform(52);
+    const light = readRaw(fits(W, H, () => BIAS + 100 + 10 * g() - 15 * Math.log(u()), { EXPTIME: 60, BAYERPAT: 'RGGB' }), 'neb.fits');
+    const bb = analyzeSubLength({ light, readNoiseAdu: 3, levelAdu: BIAS, ePerAdu: 1, narrowband: false });
+    const nb = analyzeSubLength({ light, readNoiseAdu: 3, levelAdu: BIAS, ePerAdu: 1, narrowband: true });
+    assert.ok(nb.skyNoiseAdu > bb.skyNoiseAdu && nb.background.levelAdu > bb.background.levelAdu);
+    assert.ok(Math.abs(bb.skyNoiseOtherReadingAdu - nb.skyNoiseAdu) < 1e-9);
+    const g3 = gauss(53);
+    const flat = readRaw(fits(W, H, () => BIAS + 3 * g3(), { EXPTIME: 60 }), 'dark.fits');
+    const d = analyzeSubLength({ light: flat, readNoiseAdu: 3.5, levelAdu: BIAS, ePerAdu: 1 });
+    assert.ok(d.notes.some((n) => n.includes('no wider than the read noise')));
+    assert.ok(d.minSubS === null || d.minSubS > 1000);
+  });
+
+  test('a stored analysis is the newest per filter and gain, within its age, and is forgotten per device', () => {
+    resetStoreCache();
+    const base = { device: 'seestar-s50-pro:SUBSN', filter: 'LP', gain: 200, subS: 60, frame: 'a.fit', narrowband: true, readNoiseAdu: 46, readNoiseSource: 'spec', skyNoiseAdu: 400, skyVarAduPerS: 2667, skyAduPerS: 65, swamp: 10.2, efficiency: 0.954, skyNoiseScale: 1.3 };
+    recordSubLength({ ...base, at: Date.now() - 2 * 86400e3 });
+    recordSubLength({ ...base, at: Date.now() - 86400e3, frame: 'b.fit', swamp: 9 });
+    recordSubLength({ ...base, at: Date.now() - 400 * 86400e3, frame: 'old.fit', filter: 'IRCUT' });
+    assert.equal(latestSubLength('seestar-s50-pro:SUBSN', 'lp', 200)?.frame, 'b.fit');
+    assert.equal(latestSubLength('seestar-s50-pro', 'LP', 200)?.frame, 'b.fit', 'the model matches the unit');
+    assert.equal(latestSubLength('seestar-s50-pro:SUBSN', 'LP', 100), undefined);
+    assert.equal(latestSubLength('seestar-s50-pro:SUBSN', 'IRCUT', 200), undefined, 'too old');
+    assert.ok(forget({ device: 'seestar-s50-pro:SUBSN', subLength: true }).some((d) => d.includes('3 sub-length samples')));
+    assert.equal(latestSubLength('seestar-s50-pro:SUBSN', 'LP', 200), undefined);
+  });
+
+  test('advise quotes the swamp factor of its sub: the model\'s, or scaled from this rig\'s own analysed sub', () => {
+    const rig = resolveRig({ driver: 'seestar', model: 'S50 Pro', eqMode: true, moreExposure: true, gain: 200 });
+    const base = { rig, target: target(), site: SITE, slices: slices(8), zenithSqm: 19.5, sqmSource: 'test', usableMin: 120 };
+    const model = advise({ ...base, swampFactor: 10 });
+    assert.equal(model.subLength.source, 'model');
+    assert.equal(model.subLength.wanted, 10);
+    assert.ok(model.subLength.swamp > 0 && model.subLength.efficiencyPct > 0 && model.subLength.efficiencyPct <= 100);
+    assert.ok(model.why.some((w) => w.startsWith('sub-length:')));
+    // measured: the sky variance per second against the read noise, at whatever sub it picks
+    const sample = { at: Date.now(), device: 'seestar-s50-pro', filter: 'IRCUT', gain: 200, subS: 30, frame: 'x.fit', narrowband: false, readNoiseAdu: 40, readNoiseSource: 'spec', skyNoiseAdu: 100, skyVarAduPerS: 10000 / 30, skyAduPerS: 50, swamp: 6.25, efficiency: 0.93, skyNoiseScale: 1 };
+    const measured = advise({ ...base, swampFactor: 10, fixed: { filter: 'IRCUT', subS: 60 }, subLength: (f, g) => (f === 'IRCUT' && g === 200 ? sample : undefined) });
+    assert.equal(measured.subLength.source, 'measured');
+    assert.ok(Math.abs(measured.subLength.swamp - (10000 / 30) * 60 / 1600) < 0.06, `swamp ${measured.subLength.swamp}`);
+    assert.equal(measured.subLength.minSubS, 48);
+    assert.equal(measured.subLength.offeredSubS, 60);
+    assert.equal(measured.subLength.measured?.frame, 'x.fit');
+    // a sky-noise scale changes the merit of short subs against long ones: a noisier sky than modelled hurts short subs less
+    const scaled = advise({ ...base, fixed: { filter: 'IRCUT' }, subLength: () => ({ ...sample, skyNoiseScale: 3 }) });
+    const plain = advise({ ...base, fixed: { filter: 'IRCUT' } });
+    assert.ok(scaled.why.some((w) => w.includes('scaled ×3')));
+    assert.ok(scaled.integration.hoursTo.good > plain.integration.hoursTo.good, 'more sky noise, longer to a clean picture');
   });
 });

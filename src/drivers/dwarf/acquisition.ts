@@ -5,7 +5,7 @@
  * FACTS_TTL_MS, and only while connected; without them the device spec stands in.
  */
 import { errMsg, logger } from '../../log.js';
-import type { FactsSource, LiveFacts } from '../../astro/acquisition/index.js';
+import type { DarkFrameRef, FactsSource, LiveFacts } from '../../astro/acquisition/index.js';
 import { listDir } from './ftp.js';
 import { resolveShootingMode } from './http.js';
 import type { Dwarf } from './device.js';
@@ -54,6 +54,33 @@ export function dwarfFacts(dwarf: Dwarf): FactsSource {
     cache = { at: Date.now(), v };
     return { ...base, ...v };
   };
+}
+
+/** The dark frames on the SD card (CALI_FRAME/dark/cam_0), as device paths with what their names say. */
+export async function dwarfDarkFrames(): Promise<DarkFrameRef[]> {
+  const out: DarkFrameRef[] = [];
+  for (const [dir, kind] of [
+    ['/Astronomy/CALI_FRAME/dark/cam_0', 'dark'],
+    ['/Astronomy/CALI_FRAME/bias/cam_0', 'bias'],
+  ] as const) {
+    const files = await listDir(dir).catch((err) => {
+      log.debug(`${dir} not listed: ${errMsg(err)}`);
+      return [];
+    });
+    for (const f of files) {
+      if (f.isDir || !/\.fits?$/i.test(f.name)) continue;
+      const m = f.name.match(/^(?:dark|bias)_(?:exp_([\d.]+)_)?gain_(\d+)_bin_\d+(?:_(-?\d+)C)?(?:_stack_(\d+))?\.fits?$/i);
+      out.push({
+        path: `/DWARF3${dir}/${f.name}`,
+        kind,
+        exposureS: m?.[1] !== undefined ? Number(m[1]) : kind === 'bias' ? 0 : undefined,
+        gain: m ? Number(m[2]) : undefined,
+        tempC: m?.[3] !== undefined ? Number(m[3]) : undefined,
+        stackCount: m?.[4] !== undefined ? Number(m[4]) : undefined,
+      });
+    }
+  }
+  return out;
 }
 
 /** A session's light subs on the SD card, oldest first, as device paths (the scope's own rejects left out). */

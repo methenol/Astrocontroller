@@ -20,6 +20,9 @@ After ~6 subs of a normal target, with the Moon down and the target above 35°:
 ## 3. During a capture
 `acquisition_measure action=check session=latest` after ~5 subs: SHORTEN (set the shorter sub, `start_stacking restart=true`) and REFOCUS act now; LENGTHEN only with the owner's leave. It records sky and seeing samples too.
 
+## 4. Sub length (once per filter in use; again after the sky or the season changes)
+`sub_length action=analyze session=latest` runs Deep Sky Detail's Sub Length Calculator on the newest sub: it fetches the dark master of the sub's exposure from the scope's darklibrary itself (its level is the offset; the read noise is the one measured in step 1, else the spec's — the result says which). To run it the exact DSD way, give bias frames: the three dark-filter `take_photo raw=true` frames of step 1 as `reference=[…]` (their scatter is the read noise, and it is stored for the gain). Read `swamp.measured` against `swamp.wanted` (PLAN_SWAMP_FACTOR, 10), `efficiency.pct` (≥ 95% excellent) with `efficiency.extraIntegration`, and `swamp.minSubS` / `swamp.offeredSubS` — `recommendation` puts it in words (in alt-az the 30 s ceiling usually wins; in EQ it says whether 60/90/120 s pay). Stored per filter and gain, it becomes part of every later `acquisition_plan` answer (`subLength`). Through the LP filter it runs in narrowband mode; pass `narrowband=false` for empty sky. `action=show` lists what is stored; `action=forget` drops it.
+
 ## Rules
 - Measure only frames taken with the light path as stated: a wrong cohort teaches wrong numbers. `acquisition_measure action=forget forget=gain gain=<g>` drops a bad one.
 - The stack gain is the firmware's: never change it to "test" something.

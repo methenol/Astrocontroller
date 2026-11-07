@@ -183,6 +183,10 @@ export interface TargetAdvice {
     snrTonight: number;
     hoursToGood: number;
     suggestedGoalMin: number;
+    /** sky noise² / read noise² at this sub (sub_length's swamp factor) against the one wanted, and the sub efficiency */
+    swamp: number;
+    swampWanted: number;
+    efficiencyPct: number;
     line: string;
     /** the tool calls that apply the settings on this driver */
     apply: string;

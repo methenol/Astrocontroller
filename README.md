@@ -2,7 +2,7 @@
 
 An AI operator for the **DWARFLAB Dwarf 3** smart telescope. The app runs in Docker and has three parts:
 
-- **An MCP server** with 55 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
+- **An MCP server** with 56 tools that control both cameras, the mount, focus, astro workflows, daytime tracking, image analysis, weather, planning and data transfer.
 - **[Oh My Pi](https://github.com/can1357/oh-my-pi)** (the `omp` fork of the Pi coding agent). It runs headless in RPC mode as the agent, using your own OpenAI-compatible, vision-capable LLM.
 - **A web UI** with live tele/wide/stack views, live-stacking progress, manual controls, a chat with the agent, tonight's weather and target plan, an album and library browser, a skill editor and logs. It is mobile-first: the same page is a thumb-driven single-screen app on a phone at the scope and a two-column desk layout on a laptop.
 
@@ -158,6 +158,8 @@ Near-ties go to the safer side (more headroom, then the shorter sub), and the an
 
 **Measurements.** `acquisition_measure` turns the rig's own raw frames into the numbers the spec can only guess, deterministically (robust statistics on one green phase of the mosaic) and stores them in `<DATA_DIR>/acquisition.json`: `sensor` (dark frames: read noise, offset, dark current), `sky` (light subs: e⁻/ADU by photon transfer, the clip level, the sky in mag/arcsec² and the zenith moonless sky it implies, the stars' FWHM, the session's cadence and dither cost), `check` (the same on a running session, with a verdict: keep, shorten, lengthen, refocus). Three trusted sky cohorts (Moon down, target above 35°, astronomical dark) replace `PLAN_BORTLE` with the measured sky. The agent's `acquisition-calibration` skill is the procedure.
 
+**Sub length.** `sub_length` is [Deep Sky Detail's Sub Length Calculator](https://github.com/deepskydetail/DSD_SubCalc) (the method of its online app, Windows build and Siril script) run deterministically on one of the rig's own raw subs (`src/astro/acquisition/sublength.ts`): the sub's sky background is fitted with an exponentially modified Gaussian by maximum likelihood (sigma the sky's noise, tau the skew of nebulosity and gradients; narrowband frames count the skew as signal), the offset and read noise come from a reference frame — the dark master of the sub's exposure and gain fetched from the telescope (the Dwarf's `CALI_FRAME`, the Seestar's `darklibrary`), bias frames or single darks the owner gives (their scatter, SD or MAD × 1.4826, is the read noise), else the sub's own `BIAS` card and the stored read noise — and it reports the **swamp factor** the sub reaches (sky noise² / read noise²), the **sub efficiency** (sky noise / total noise; ≥ 95% is excellent) and the extra integration a lower one costs, the minimum sub for the factor wanted (`PLAN_SWAMP_FACTOR`, 10 by default) and the device's offered sub that reaches it, with the Poisson cross-check through e⁻/ADU. The result is stored per filter and gain, and from then on `acquisition_plan` scales its sky-noise term by the measured-over-model ratio at that pointing and quotes, for every recommendation and every night-plan block (`swamp` in `capture`), the swamp factor and efficiency the recommended sub reaches and the shortest sub that would reach the wanted one. `acquisition_measure action=check` quotes the same factor from the running session's own scatter.
+
 ## Journal tab
 
 Each night's journal is recorded from the telescope's state, whatever starts the work (the agent, the web UI, the scope). It works for the Dwarf and the Seestar alike, through a small per-driver probe (`drivers/<id>/journal.ts`). Per target visit it records:
@@ -250,7 +252,7 @@ The MCP endpoint is `http://<host>:8080/mcp` (Streamable HTTP, stateless). Other
 | Status/system | `telescope_status`, `telescope_device_info`, `telescope_reconnect`, `sync_time_and_location`, `power`, `raw_command` |
 | Camera | `set_shooting_mode`, `get_camera_settings`, `set_camera_setting`, `take_photo`, `video_recording`, `timelapse`, `view_camera` |
 | Motion & focus | `motors_home`, `motor_position`, `move_motors` (absolute/relative), `nudge`, `stop_motion`, `autofocus`, `star_sharpness`, `star_focus`, `focus_step`, `focus_position` (incl. infinity) |
-| Planning | `sky_conditions`, `weather_forecast`, `sky_check`, `plan_targets`, `rest_target`, `find_target`, `search_catalog`, `map_obstructions`, `acquisition_plan`, `acquisition_measure` |
+| Planning | `sky_conditions`, `weather_forecast`, `sky_check`, `plan_targets`, `rest_target`, `find_target`, `search_catalog`, `map_obstructions`, `acquisition_plan`, `acquisition_measure`, `sub_length` |
 | Astro | `calibrate`, `goto_target`, `stop_goto`, `astro_recover`, `live_stacking`, `stacking_status`, `polar_alignment`, `track_sun_moon` |
 | Daytime | `track_object`, `sentry_mode` |
 | Duty | `duty` (the unattended night loop) |

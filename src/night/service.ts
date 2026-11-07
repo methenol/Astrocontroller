@@ -487,7 +487,7 @@ export class PlanService extends SafeEmitter {
         notUsable: k.why,
         suggestedGoalMin: goalDefault || acq?.integration.suggestedGoalMin || goalFor(findObject(r.name)?.type, r.detectBucket),
         /** the acquisition planner: settings for its best hours tonight, and the hours to a clean picture */
-        capture: acq ? { filter: acq.settings.filter, gain: acq.settings.gain, subS: acq.settings.subS, frames: acq.settings.frames, hoursToGood: acq.integration.hoursTo.good, backgroundPct: acq.overexposure.backgroundPct } : null,
+        capture: acq ? { filter: acq.settings.filter, gain: acq.settings.gain, subS: acq.settings.subS, frames: acq.settings.frames, hoursToGood: acq.integration.hoursTo.good, backgroundPct: acq.overexposure.backgroundPct, swamp: acq.subLength.swamp, swampWanted: acq.subLength.wanted, efficiencyPct: acq.subLength.efficiencyPct } : null,
       };
     });
     // what the plan scheduled first (in its order), then by what the plan could make of each
@@ -539,6 +539,9 @@ export class PlanService extends SafeEmitter {
         snrTonight: rec.integration.snrTonight,
         hoursToGood: rec.integration.hoursTo.good,
         suggestedGoalMin: rec.integration.suggestedGoalMin,
+        swamp: rec.subLength.swamp,
+        swampWanted: rec.subLength.wanted,
+        efficiencyPct: rec.subLength.efficiencyPct,
         line: rec.why.slice(0, 2).join('; '),
         apply: rec.apply,
       };

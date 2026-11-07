@@ -5,9 +5,12 @@
  *   and the ADU at which the files clip;
  * - the site's sky: each clear-sky sub cohort's background, turned into the zenith, moonless sky
  *   brightness it implies (the number that replaces PLAN_BORTLE once a few agree);
- * - the stars' FWHM, against the forecast's seeing at the time.
+ * - the stars' FWHM, against the forecast's seeing at the time;
+ * - sub-length analyses (sublength.ts): per filter, gain and sub, the sky noise a sub really gets
+ *   against the read noise — the swamp factor — and the sky-noise rate the plan scales its model by.
  *
- * The planner reads it through `sensorProfile`, `siteSky` and `siteSeeing`; acquisition_measure writes it.
+ * The planner reads it through `sensorProfile`, `siteSky`, `siteSeeing` and `latestSubLength`;
+ * acquisition_measure and sub_length write it.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -64,14 +67,47 @@ export interface SeeingSample {
   altDeg?: number;
 }
 
+export interface SubLengthSample {
+  at: number;
+  device: string;
+  filter: string;
+  gain: number;
+  subS: number;
+  /** the light frame analysed */
+  frame: string;
+  narrowband: boolean;
+  /** the read noise the analysis ran against, ADU, and where it came from */
+  readNoiseAdu: number;
+  readNoiseSource: string;
+  /** the sky's noise in the sub (E1, ex-Gaussian), ADU */
+  skyNoiseAdu: number;
+  /** the sky's variance per second, ADU²/s: swamp at another sub = this × sub / RN² */
+  skyVarAduPerS: number;
+  /** the sky above the offset, ADU/s */
+  skyAduPerS: number;
+  /** sky noise² / read noise² at this sub */
+  swamp: number;
+  /** sky noise / total noise, 0–1 */
+  efficiency: number;
+  /**
+   * the measured sky variance rate in e²/s over the planner's model sky e⁻/s at the frame's pointing
+   * and time: the factor the plan scales its sky-noise term by (null without a pointing)
+   */
+  skyNoiseScale: number | null;
+}
+
 interface StoreFile {
   sensors: Record<string, SensorProfile>;
   sky: SkySample[];
   seeing: SeeingSample[];
+  subLength: SubLengthSample[];
 }
 
 const KEEP_SKY = 300;
 const KEEP_SEEING = 300;
+const KEEP_SUBLENGTH = 200;
+/** a sub-length sample older than this no longer calibrates the plan (lights, seasons, firmware) */
+const SUBLENGTH_DAYS = 180;
 /** samples the site's sky needs before it replaces PLAN_BORTLE */
 export const SITE_SKY_MIN_SAMPLES = 3;
 /** only the last this many days of sky samples stand for the site (seasons, new lights) */
@@ -84,10 +120,10 @@ function load(): StoreFile {
   if (memo) return memo;
   try {
     const raw = JSON.parse(fs.readFileSync(file(), 'utf8')) as Partial<StoreFile>;
-    memo = { sensors: raw.sensors ?? {}, sky: Array.isArray(raw.sky) ? raw.sky : [], seeing: Array.isArray(raw.seeing) ? raw.seeing : [] };
+    memo = { sensors: raw.sensors ?? {}, sky: Array.isArray(raw.sky) ? raw.sky : [], seeing: Array.isArray(raw.seeing) ? raw.seeing : [], subLength: Array.isArray(raw.subLength) ? raw.subLength : [] };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`acquisition.json unreadable, starting empty: ${errMsg(err)}`);
-    memo = { sensors: {}, sky: [], seeing: [] };
+    memo = { sensors: {}, sky: [], seeing: [], subLength: [] };
   }
   return memo;
 }
@@ -139,6 +175,29 @@ export function recordSeeing(sample: SeeingSample): void {
   save();
 }
 
+export function recordSubLength(sample: SubLengthSample): void {
+  const s = load();
+  s.subLength.push(sample);
+  if (s.subLength.length > KEEP_SUBLENGTH) s.subLength.splice(0, s.subLength.length - KEEP_SUBLENGTH);
+  save();
+}
+
+const sameDevice = (a: string, b: string) => a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`);
+
+/** The newest sub-length analysis of this device through a filter at a gain (any sub length), within SUBLENGTH_DAYS. */
+export function latestSubLength(device: string, filter: string, gain: number, now = Date.now()): SubLengthSample | undefined {
+  const key = (f: string) => f.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const rows = load().subLength.filter((x) => sameDevice(x.device, device) && key(x.filter) === key(filter) && x.gain === gain && now - x.at < SUBLENGTH_DAYS * 86400e3);
+  return rows.length ? rows.reduce((a, b) => (b.at > a.at ? b : a)) : undefined;
+}
+
+/** Every sub-length analysis of a device, newest first. */
+export function subLengthSamples(device: string): SubLengthSample[] {
+  return load()
+    .subLength.filter((x) => sameDevice(x.device, device))
+    .sort((a, b) => b.at - a.at);
+}
+
 /** The site's measured zenith sky (median of the trusted samples of the last months), or null with too few. */
 export function siteSky(now = Date.now()): { sqm: number; samples: number; spread: number } | null {
   const recent = load().sky.filter((x) => x.trusted && now - x.at < SITE_SKY_DAYS * 86400e3).map((x) => x.zenithSqm);
@@ -167,7 +226,7 @@ export function storeView(): StoreFile {
 }
 
 /** Forget measurements: one gain of a device, a whole device, or the site's sky / seeing samples. */
-export function forget(what: { device?: string; gain?: number; sky?: boolean; seeing?: boolean }): string[] {
+export function forget(what: { device?: string; gain?: number; sky?: boolean; seeing?: boolean; subLength?: boolean }): string[] {
   const s = load();
   const done: string[] = [];
   if (what.device) {
@@ -187,6 +246,11 @@ export function forget(what: { device?: string; gain?: number; sky?: boolean; se
   if (what.seeing) {
     done.push(`${s.seeing.length} seeing samples`);
     s.seeing = [];
+  }
+  if (what.subLength) {
+    const mine = what.device ? s.subLength.filter((x) => sameDevice(x.device, what.device!)) : s.subLength;
+    done.push(`${mine.length} sub-length samples`);
+    s.subLength = s.subLength.filter((x) => !mine.includes(x));
   }
   save();
   return done;

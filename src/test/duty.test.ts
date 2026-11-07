@@ -144,6 +144,8 @@ describe('DutyLoop', () => {
   });
 
   test('a cancelled transfer is reported once, though the job publishes it twice', async () => {
+    // events are dropped unless a duty is active
+    duty.start({ objective: 'x', until: 'none', by: 'user' });
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const j = startJob('t', 'slow', () => gate, 'agent');
@@ -275,6 +277,8 @@ describe('DutyLoop', () => {
   });
 
   test('events during a turn wait for it to end, then go out', async () => {
+    // events are dropped unless a duty is active
+    duty.start({ objective: 'x', until: 'none', by: 'user' });
     agent.set({ busy: true });
     duty.event('dark master saved');
     await new Promise((r) => setTimeout(r, 3100));
@@ -286,6 +290,8 @@ describe('DutyLoop', () => {
   });
 
   test('events queued while the agent was down go out when it is back', async () => {
+    // events are dropped unless a duty is active
+    duty.start({ objective: 'x', until: 'none', by: 'user' });
     agent.set({ ready: false });
     duty.event('processing p1 done');
     await new Promise((r) => setTimeout(r, 3100));
@@ -352,6 +358,8 @@ describe('DutyLoop', () => {
   });
 
   test('a stack the scope ends by itself is an event; a requested stop is not', async () => {
+    // events are dropped unless a duty is active
+    duty.start({ objective: 'x', until: 'none', by: 'user' });
     dwarf.state.stacking.tele = { state: 'running', stackedCount: 40, currentCount: 44, totalCount: 999 };
     dwarf.stackControl.tele = { startedBy: 'agent' };
     dwarf.changed();

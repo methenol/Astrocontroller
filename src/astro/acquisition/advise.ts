@@ -19,6 +19,11 @@
  * - the target's brightest part: a core predicted to clip costs the candidate a share of its merit;
  * - darks: on a device that refuses a sub without a matching master, only covered pairs.
  *
+ * A sub-length analysis of this rig's own subs (sublength.ts, Deep Sky Detail's method) calibrates
+ * the sky-noise term — the measured sky variance over the model's at that pointing — and the answer
+ * quotes the swamp factor (sky noise² / read noise²) the recommended sub reaches against the one
+ * wanted (PLAN_SWAMP_FACTOR), the sub efficiency, and the shortest sub that would reach it.
+ *
  * Near-ties go to the safer side: the most headroom, then the shorter sub. Which input a number came
  * from (spec, the scope, a measurement, the forecast) is reported with the answer.
  */
@@ -26,6 +31,8 @@ import type { Emission, BandClass } from '../detect.js';
 import type { Site } from '../sky.js';
 import { findFilter, type Rig } from './devices.js';
 import { airmass, extinctionFor, skyBrightness, transmission, type MoonGeometry } from './skyglow.js';
+import { DEFAULT_SWAMP, efficiencyOf, efficiencyVerdict, swampAt } from './sublength.js';
+import type { SubLengthSample } from './store.js';
 
 /** Photons s⁻¹ cm⁻² from a mag-0 source across the broadband (the calibration exposure.ts uses). */
 const F0 = 879_000;
@@ -87,6 +94,9 @@ const SEEING_NOMINAL_ARCSEC = 2;
  */
 const SMART_SCOPE_BLUR_PX = 5;
 const SIDEREAL_RAD_S = 7.2921e-5;
+/** A measured sky-noise scale outside this range is a bad frame or a wrong gain, not a calibration. */
+const SKY_SCALE_MIN = 0.25;
+const SKY_SCALE_MAX = 4;
 
 export interface TargetInfo {
   name: string;
@@ -131,6 +141,10 @@ export interface AdviseInput {
   keepBySubS?: Record<string, number>;
   /** the plan's forecast floor (0–100): a slice below it is under advisory cloud */
   cloudFloor?: number;
+  /** the swamp factor a sub should reach (sky noise² / read noise²); DSD's 10 when absent */
+  swampFactor?: number;
+  /** this rig's newest sub-length analysis through a filter at a gain (sub_length), if any */
+  subLength?: (filter: string, gain: number) => SubLengthSample | undefined;
 }
 
 export interface Candidate {
@@ -187,6 +201,22 @@ export interface Recommendation {
     caps: string[];
   };
   alternatives: Array<{ filter: string; gain: number; subS: number; relative: number; note: string }>;
+  /** the sub against the read noise, Deep Sky Detail's way */
+  subLength: {
+    /** the swamp factor wanted */
+    wanted: number;
+    /** at the recommended sub: sky noise² / read noise², the sub efficiency and its integration cost */
+    swamp: number;
+    efficiencyPct: number;
+    extraIntegration: number;
+    /** the shortest sub that reaches the wanted factor (null: the sky cannot) and the device's first offered sub at or past it */
+    minSubS: number | null;
+    offeredSubS: number | null;
+    /** measured: scaled from this rig's own analysed sub; model: the planner's sky and read noise */
+    source: 'measured' | 'model';
+    measured: { at: number; frame: string; subS: number; swamp: number; efficiencyPct: number; readNoise: string; skyNoiseScale: number | null } | null;
+    verdict: string;
+  };
   sources: Record<string, string>;
   missing: string[];
 }
@@ -287,11 +317,14 @@ export function advise(input: AdviseInput): Recommendation {
   const subs = input.fixed?.subS !== undefined ? [input.fixed.subS] : rig.subsS;
   const usableS = Math.max(0, input.usableMin * 60);
 
-  const candidates: Array<Candidate & { detail: { eSky: number[]; eT: number[]; sensor: ReturnType<Rig['sensorAt']>; keep: number; duty: number; ditherEvery: number; corePct: number | null; bgAdu: number } }> = [];
+  const candidates: Array<Candidate & { detail: { eSky: number[]; eT: number[]; sensor: ReturnType<Rig['sensorAt']>; keep: number; duty: number; ditherEvery: number; corePct: number | null; bgAdu: number; skyScale: number; measured?: SubLengthSample } }> = [];
   for (const f of filters) {
     const keepT = targetKeep(target.emission, f.band, f.skyFraction);
     for (const gain of gains) {
       const sensor = rig.sensorAt(gain);
+      // the sky-noise term calibrated by this rig's own analysed sub through this filter at this gain
+      const measured = input.subLength?.(f.name, gain);
+      const skyScale = measured?.skyNoiseScale !== null && measured?.skyNoiseScale !== undefined && Number.isFinite(measured.skyNoiseScale) ? Math.min(SKY_SCALE_MAX, Math.max(SKY_SCALE_MIN, measured.skyNoiseScale)) : 1;
       for (const t of subs) {
         const why: string[] = [];
         if (!darkCovered(rig, t, gain)) continue;
@@ -319,7 +352,7 @@ export function advise(input: AdviseInput): Recommendation {
           const trailed = s.cap !== null && t > s.cap.capS * 1.02;
           if (trailed || bgFrac > BG_MAX_FRAC) continue;
           held++;
-          const noise2 = (eT + eSky + sensor.darkCurrentEPerS) * t + sensor.readNoiseE ** 2;
+          const noise2 = (eT + eSky * skyScale + sensor.darkCurrentEPerS) * t + sensor.readNoiseE ** 2;
           // SNR² per wall hour per Bayer cell
           // a passing cloud ruins the sub it crosses: the longer the sub, the likelier
           const survive = s.cloudLoss ? Math.exp((-s.cloudLoss * t) / CLOUD_GAP_S) : 1;
@@ -335,7 +368,7 @@ export function advise(input: AdviseInput): Recommendation {
         const frames = Math.floor((usableS * heldFrac) / cycleS);
         if (usableS > 0 && frames < MIN_FRAMES) merit *= FEW_FRAMES_KEEP;
         if (maxBg > BG_MAX_FRAC) why.push(`the sky fills ${Math.round(maxBg * 100)}% of the range at its brightest`);
-        candidates.push({ filter: f.name, gain, subS: t, merit, heldFrac, maxBackgroundFrac: maxBg, coreClips, frames, why, detail: { eSky: eSkyAll, eT: eTAll, sensor, keep, duty, ditherEvery, corePct: coreSb !== null ? Math.round(coreMax * 100) : null, bgAdu: maxBgAdu } });
+        candidates.push({ filter: f.name, gain, subS: t, merit, heldFrac, maxBackgroundFrac: maxBg, coreClips, frames, why, detail: { eSky: eSkyAll, eT: eTAll, sensor, keep, duty, ditherEvery, corePct: coreSb !== null ? Math.round(coreMax * 100) : null, bgAdu: maxBgAdu, skyScale, measured } });
       }
     }
   }
@@ -355,9 +388,31 @@ export function advise(input: AdviseInput): Recommendation {
   // integration: time to each SNR tier at the window's mean rates
   const eT = mean(d.eT);
   const eSky = mean(d.eSky);
-  const perExposureS = (snr: number) => (snr ** 2 * (eT + eSky + sensor.darkCurrentEPerS + sensor.readNoiseE ** 2 / best.subS)) / (CELL_PX * eT ** 2);
+  const eSkyNoise = eSky * d.skyScale;
+  const perExposureS = (snr: number) => (snr ** 2 * (eT + eSkyNoise + sensor.darkCurrentEPerS + sensor.readNoiseE ** 2 / best.subS)) / (CELL_PX * eT ** 2);
   const wallH = (snr: number) => (eT > 0 ? perExposureS(snr) / (d.duty * d.keep) / 3600 : Infinity);
-  const snrFor = (exposureS: number) => (eT > 0 && exposureS > 0 ? Math.sqrt((exposureS * CELL_PX * eT ** 2) / (eT + eSky + sensor.darkCurrentEPerS + sensor.readNoiseE ** 2 / best.subS)) : 0);
+  const snrFor = (exposureS: number) => (eT > 0 && exposureS > 0 ? Math.sqrt((exposureS * CELL_PX * eT ** 2) / (eT + eSkyNoise + sensor.darkCurrentEPerS + sensor.readNoiseE ** 2 / best.subS)) : 0);
+
+  // the sub against the read noise: from this rig's own analysed sub when there is one, else the model
+  const wanted = input.swampFactor ?? DEFAULT_SWAMP;
+  const m = d.measured;
+  const swampOf = m ? (t: number) => swampAt(m.skyVarAduPerS, m.readNoiseAdu, t) : (t: number) => ((eSkyNoise + sensor.darkCurrentEPerS) * t) / Math.max(1e-12, sensor.readNoiseE ** 2);
+  const swampBest = swampOf(best.subS);
+  const effBest = efficiencyOf(Math.sqrt(Math.max(0, swampBest)), 1);
+  const perSecond = swampOf(1);
+  const minSubS = perSecond > 1e-12 ? wanted / perSecond : null;
+  const offeredSubS = minSubS !== null ? (rig.subsS.find((t) => t >= minSubS - 1e-9) ?? null) : null;
+  const subLength: Recommendation['subLength'] = {
+    wanted,
+    swamp: r1(swampBest),
+    efficiencyPct: Math.round(effBest.efficiency * 1000) / 10,
+    extraIntegration: r2(effBest.extraIntegration),
+    minSubS: minSubS !== null && Number.isFinite(minSubS) ? Math.round(minSubS) : null,
+    offeredSubS,
+    source: m ? 'measured' : 'model',
+    measured: m ? { at: m.at, frame: m.frame, subS: m.subS, swamp: r1(m.swamp), efficiencyPct: Math.round(m.efficiency * 1000) / 10, readNoise: `${r2(m.readNoiseAdu)} ADU (${m.readNoiseSource})`, skyNoiseScale: m.skyNoiseScale !== null ? r2(m.skyNoiseScale) : null } : null,
+    verdict: efficiencyVerdict(effBest.efficiency),
+  };
   const clear = mean(slices.map((s) => (s.observability !== undefined ? Math.min(1, s.observability / 100) : 1)));
   const tonightExpS = best.frames * best.subS * d.keep * clear;
   const collectedMin = input.collectedMin ?? 0;
@@ -404,6 +459,12 @@ export function advise(input: AdviseInput): Recommendation {
       const lead = ratio >= 1.5 ? `${r1(ratio)}× the signal-to-noise rate` : ratio >= 1.03 ? `${Math.round((ratio - 1) * 100)}% faster to the same SNR` : 'about the same rate, with more headroom';
       why.push(`${best.filter} over ${other.filter}: ${lead} (${target.emission === 'broadband' ? 'a continuum target: a line filter cuts it as hard as the sky' : `an ${target.emission === 'Ha_dominant' ? 'Hα' : 'OIII'} target: ${f.band === 'broadband' ? 'its lines are not worth the sky a narrow filter would cut' : `the filter keeps its lines and cuts ${Math.round((1 - f.skyFraction) * 100)}% of the sky`}`}${moonUp.length ? ', under moonlight' : ''})`);
     }
+  }
+  {
+    const basis = m ? `measured on this rig's ${m.subS}s sub of ${new Date(m.at).toISOString().slice(0, 10)}, scaled` : 'from the model sky and read noise';
+    const reach = minSubS === null ? 'no sub length reaches it' : minSubS <= best.subS ? `reached from ~${Math.max(1, Math.round(minSubS))}s` : offeredSubS !== null ? `~${Math.round(minSubS)}s would reach it; ${offeredSubS}s is on offer${offeredSubS === best.subS ? '' : ' but loses more elsewhere'}` : `~${Math.round(minSubS)}s would reach it, longer than this device offers`;
+    why.push(`sub-length: at ${best.subS}s the sky's noise is ${r1(swampBest)}× the read noise's (wanted ${wanted}; sub efficiency ${subLength.efficiencyPct}%, ${subLength.verdict.split(':')[0]}; ${basis}): ${reach}`);
+    if (m && d.skyScale !== 1) why.push(`the sky-noise term is scaled ×${r2(d.skyScale)} by that analysis (measured sky noise over the model's)`);
   }
   if (!rig.gainSettable) why.push(`gain ${best.gain} is the firmware's stack gain`);
   else if (gains.length > 1) {
@@ -469,6 +530,7 @@ export function advise(input: AdviseInput): Recommendation {
       caps,
     },
     alternatives,
+    subLength,
     sources: {
       sensor: `e⁻/ADU ${r2(sensor.ePerAdu * 1000) / 1000} (${sensor.source.ePerAdu}), read noise ${r2(sensor.readNoiseE)} e⁻ (${sensor.source.readNoise}), black ${Math.round(sensor.blackAdu)} ADU (${sensor.source.black}), clip at ${Math.round(sensor.saturationAdu)} ADU (${sensor.source.saturation})`,
       optics: `${rig.apertureMm} mm, ${rig.focalLengthMm} mm, ${r2(rig.plateScale)}″/px (${rig.sources.optics})`,

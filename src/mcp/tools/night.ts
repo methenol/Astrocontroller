@@ -58,7 +58,7 @@ const blockLine = (b: Block) =>
         framing: b.target!.advice?.framing,
         subs: b.target!.advice?.sub ? `${b.target!.advice.sub.rangeS ? `${b.target!.advice.sub.rangeS[0]}–${b.target!.advice.sub.rangeS[1]}` : b.target!.advice.sub.subS}s × ${b.target!.advice.sub.subs}: ${b.target!.advice.sub.line}` : undefined,
         capture: b.target!.advice?.acquisition
-          ? (({ filter, gain, subS, frames, backgroundPct, coreClips, hoursToGood, apply, line }) => `${filter}, gain ${gain}, ${subS}s × ${frames} (sky ${backgroundPct}% of range${coreClips ? ', core clips' : ''}; ${hoursToGood} h to a clean picture) — ${line}. Apply: ${apply}`)(b.target!.advice.acquisition)
+          ? (({ filter, gain, subS, frames, backgroundPct, coreClips, hoursToGood, swamp, swampWanted, efficiencyPct, apply, line }) => `${filter}, gain ${gain}, ${subS}s × ${frames} (sky ${backgroundPct}% of range${coreClips ? ', core clips' : ''}; swamp ${swamp}× of ${swampWanted} wanted, sub efficiency ${efficiencyPct}%; ${hoursToGood} h to a clean picture) — ${line}. Apply: ${apply}`)(b.target!.advice.acquisition)
           : undefined,
         alternates: b.alternates.map((a) => `${a.gotoName} (${a.quadrant}, alt ${a.alt}°, ${a.source}, usable ${dur(a.usableMin)})`),
       }

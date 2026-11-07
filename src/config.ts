@@ -155,6 +155,8 @@ export const config = {
   device: env.str('PLAN_DEVICE', ''),
   /** the site's zenith sky brightness from a sky meter, mag/arcsec² (wins over measured subs and PLAN_BORTLE) */
   skySqm: env.optNum('PLAN_SKY_SQM', { min: 16, max: 22.5 }),
+  /** the swamp factor a sub should reach: sky noise² over read noise² (Deep Sky Detail's calculator recommends 10; 3–5 is the lenient school) */
+  swampFactor: env.num('PLAN_SWAMP_FACTOR', 10, { min: 1, max: 100 }),
   },
   llm: {
     baseUrl: env.url('LLM_BASE_URL', 'http://localhost:8000/v1'),

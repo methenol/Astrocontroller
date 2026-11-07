@@ -24,6 +24,7 @@ import path from 'node:path';
 import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
 import type { DeviceLibrary, DownloadProgress, DownloadResult, MediaItem } from '../../library/device-library.js';
+import type { DarkFrameRef } from '../../astro/acquisition/index.js';
 import { isTransferredFolder, type DeviceSessionEntry } from '../../library/sessions.js';
 import { calibrationCamera } from '../../processing/queue.js';
 import type { Seestar } from './device.js';
@@ -290,6 +291,8 @@ const sessionKey = (target: string, exp: string, filter: string, night: string) 
 export type SeestarStorage = DeviceLibrary & {
   /** a session's subs as storage paths, in time order */
   sessionSubs(folder: string): Promise<string[]>;
+  /** the dark library's masters as album paths (/SEESTAR/darklibrary/<exp>/MasterDark_…), with what their names say */
+  darkFrames(): Promise<DarkFrameRef[]>;
 };
 
 export function seestarStorage(files: SeestarFiles): SeestarStorage {
@@ -474,6 +477,17 @@ export function seestarStorage(files: SeestarFiles): SeestarStorage {
     async sessionSubs(folder) {
       const info = await find(folder);
       return info.subs.map((f) => `${info.subDir}/${f.name}`);
+    },
+    async darkFrames() {
+      const out: DarkFrameRef[] = [];
+      const dirs = (await files.list(DARKS).catch(() => [] as SeestarEntry[])).filter((d) => d.isDir && Number.isFinite(parseFloat(d.name)));
+      for (const dir of dirs) {
+        for (const d of await darksFor(parseFloat(dir.name))) {
+          const m = d.name.match(/^Master(Dark|Bias)_(\d+)_([\d.]+)s(?:_(-?[\d.]+)C)?/i);
+          out.push({ path: `${ALBUM_PREFIX}${d.rel}`, kind: m?.[1]?.toLowerCase() === 'bias' ? 'bias' : 'dark', exposureS: m ? Number(m[3]) : parseFloat(dir.name), tempC: m?.[4] !== undefined ? Number(m[4]) : undefined, stackCount: m ? Number(m[2]) : undefined });
+        }
+      }
+      return out;
     },
     async listSessions(withCounts) {
       const { infos, other } = await scan(true);

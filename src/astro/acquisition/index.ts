@@ -9,7 +9,8 @@
  *   measurements > PLAN_BORTLE;
  * - the window sampled every SLICE_MIN: altitude and azimuth, the Moon, the forecast hour;
  * - the target from the catalog: surface brightness and what carries its light;
- * - what the journal learned: the share of subs the stacker keeps at each sub length.
+ * - what the journal learned: the share of subs the stacker keeps at each sub length;
+ * - the rig's own sub-length analyses (sub_length): the sky noise its subs really get.
  */
 import { config } from '../../config.js';
 import { findObject, displayName } from '../catalog.js';
@@ -20,7 +21,7 @@ import type { Journal } from '../../night/journal.js';
 import { advise, type Recommendation, type SkySlice, type TargetInfo } from './advise.js';
 import { resolveRig, type LiveFacts, type Rig } from './devices.js';
 import { moonToward } from './skyglow.js';
-import { deviceKey, siteSeeing, siteSky } from './store.js';
+import { deviceKey, latestSubLength, siteSeeing, siteSky } from './store.js';
 
 export { type Recommendation } from './advise.js';
 export { type LiveFacts, type Rig } from './devices.js';
@@ -33,6 +34,18 @@ const MIN_ALT_DEG = 10;
 const KEEP_MIN_FRAMES = 40;
 
 export type FactsSource = () => Promise<Partial<LiveFacts> & { driver: LiveFacts['driver'] }>;
+
+/** A dark or bias frame on the telescope's storage, as the drivers list them for sub_length. */
+export interface DarkFrameRef {
+  /** a device path (/DWARF3/…, /SEESTAR/…) the device library can fetch */
+  path: string;
+  kind: 'dark' | 'bias';
+  exposureS?: number;
+  gain?: number;
+  tempC?: number;
+  /** frames in the master; 1 is a single exposure */
+  stackCount?: number;
+}
 
 /** The zenith, moonless sky of the site and where the number comes from. */
 export function zenithSky(): { sqm: number; source: string } {
@@ -136,6 +149,8 @@ export function adviseFor(r: AdviseRequest): { rig: Rig; rec: Recommendation } {
     collectedMin: r.collectedMin,
     keepBySubS: keepBySub(r.journal),
     cloudFloor: r.cloudFloor,
+    swampFactor: config.plan.swampFactor,
+    subLength: (filter, gain) => latestSubLength(deviceKey(rig.spec.id, rig.serial), filter, gain),
   });
   return { rig, rec };
 }
