@@ -123,8 +123,8 @@ export function dwarfWeb(dwarf: Dwarf, hub: StreamHub): WebTelescope {
         return { result: await dwarf.focusStep(b.direction === 'near' ? 'near' : 'far', b.steps) };
       case 'star_measure': {
         // One tele frame measured for star sharpness; the camera's exposure is restored by the helper.
-        const { sharp } = await measureTele({ dwarf, hub }, { exposureS: b.exposureS });
-        return { result: sharpnessLine(sharp), focusPosition: dwarf.state.focusPosition, ...sharp };
+        const { sharp, settings } = await measureTele({ dwarf, hub }, { exposureS: b.exposureS });
+        return { result: sharpnessLine(sharp), focusPosition: dwarf.state.focusPosition, settings, ...sharp };
       }
       case 'star_sweep': {
         // The search writes its own plain-language verdict; the UI toasts it and the progress arrives

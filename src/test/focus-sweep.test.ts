@@ -94,6 +94,21 @@ describe('star-focus sweep and tele measurement: the camera is handed back as it
     assert.equal(fake.requestsFor(Cmd.PARAM_SET_GAIN).length, 0);
   });
 
+  test('a measurement shoots its still only once a changed exposure and gain have taken hold, as a sweep sample does', async () => {
+    fake.reply(Cmd.CAMERA_TELE_PHOTOGRAPH, { code: -1 });
+    const { hub } = stubHub(dwarf);
+    await assert.rejects(measureTele({ dwarf, hub }, { gain: 100 }));
+    // by order, not by time: the restore after the refused still can land in the same millisecond
+    const at = fake.requests.findIndex((r) => r.cmd === Cmd.CAMERA_TELE_PHOTOGRAPH);
+    assert.ok(at >= 0, 'a still was asked for');
+    const shot = fake.requests[at];
+    const before = fake.requests.slice(0, at).filter((r) => r.cmd === Cmd.PARAM_SET_EXPOSURE || r.cmd === Cmd.PARAM_SET_GAIN);
+    assert.ok(before.length, 'the settings were changed before the still');
+    const lastSet = before[before.length - 1].t;
+    assert.ok(shot.t - lastSet >= 1400, `the still came ${shot.t - lastSet} ms after the last setting`);
+    assert.deepEqual(fake.requestsFor(Cmd.PARAM_SET_EXPOSURE).map((r) => r.data.value), [100, 156], 'the same 1/2 s a sweep would use, then back to 15 s');
+  });
+
   test('a measurement whose still fails puts the gain back', async () => {
     fake.reply(Cmd.CAMERA_TELE_PHOTOGRAPH, { code: -1 });
     const { hub } = stubHub(dwarf);

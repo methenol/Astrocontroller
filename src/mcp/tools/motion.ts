@@ -115,17 +115,17 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
 
   tool(
     'star_sharpness',
-    "Measure how sharp the stars are in one tele frame and get the focus number: median star half-flux radius (HFR) in px and arcsec, and `score` = 1000 ÷ HFR(arcsec), higher = sharper (on this scope ~250-450 is sharp, <120 is soft). Every part of it is flux-weighted per star against that star's own local sky, so it does not move with exposure, gain, cloud thickness, sky glow or the camera's tone curve — two scores from minutes apart are comparable, which is what makes it usable as a trend. It only measures; it does not focus. Order of work: autofocus (the finder) → star_focus (a fine sweep that also moves the focuser) → star_sharpness to confirm; or focus_step + this to nudge by hand. Run it after autofocus, between focus_step moves, and once per target as the night's baseline. By default it takes the reading from a snapshot whose exposure suits the filter (0.5 s VIS, 1 s Astro, 4 s Duo-Band: through a narrowband filter a short frame shows too few stars and the reading is noise), then puts the setting back. Raise gain if the stars are too faint to measure.",
+    "Measure how sharp the stars are in one tele frame and get the focus number: median star half-flux radius (HFR) in px and arcsec, and `score` = 1000 ÷ HFR(arcsec), higher = sharper (on this scope ~250-450 is sharp, <120 is soft). Every part of it is flux-weighted per star against that star's own local sky, so it does not move with exposure, gain, cloud thickness, sky glow or the camera's tone curve — two scores from minutes apart are comparable, which is what makes it usable as a trend. It only measures; it does not focus. Order of work: autofocus (the finder) → star_focus (a fine sweep that also moves the focuser) → star_sharpness to confirm; or focus_step + this to nudge by hand. Run it after autofocus, between focus_step moves, and once per target as the night's baseline. It takes the reading from a full tele still exactly like a star_focus sample: by default at the same exposure and gain as the last star_focus sweep (through the same filter), so its score confirms the sweep number for number; with no sweep yet, at the exposure star_focus would choose for the filter (0.5 s VIS, 1 s Astro, 4 s Duo-Band: through a narrowband filter a short frame shows too few stars and the reading is noise). The settings are put back afterwards. Raise gain if the stars are too faint to measure.",
     {
-      exposure_s: z.number().min(0.05).max(60).optional().describe('take the ONE still at this exposure instead of the default short snapshot; the camera setting is restored afterwards either way'),
-      gain: z.number().min(0).max(240).optional().describe('gain for that still, restored afterwards'),
+      exposure_s: z.number().min(0.05).max(60).optional().describe('take the still at this exposure instead of the last sweep’s (or the filter default); the camera setting is restored afterwards either way'),
+      gain: z.number().min(0).max(240).optional().describe('gain for that still instead of the last sweep’s; restored afterwards'),
       crop: cropArg.describe('measure one region (fractions 0..1); give every frame you compare the same region'),
     },
     async ({ exposure_s, gain, crop }) => {
-      const { img, sharp } = await measureTele({ dwarf, hub }, { exposureS: exposure_s, gain, crop });
+      const { img, sharp, settings } = await measureTele({ dwarf, hub }, { exposureS: exposure_s, gain, crop });
       const jpeg = await displayJpeg(img, 1024);
       const saved = saveCapture(jpeg, 'star_sharpness');
-      const report = { focusPosition: dwarf.state.focusPosition, captured: capturedLine(img) || undefined, ...sharp, image: `captures/${saved}` };
+      const report = { focusPosition: dwarf.state.focusPosition, settings, captured: capturedLine(img) || undefined, ...sharp, image: `captures/${saved}` };
       return withImage(jpeg, JSON.stringify(report, null, 1));
     },
   );

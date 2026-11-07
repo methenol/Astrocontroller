@@ -1,6 +1,7 @@
 /**
  * The two providers, their answers validated before use:
- *  - Open-Meteo (https://open-meteo.com, free, no key): hourly cloud cover by layer, humidity, dew
+ *  - Open-Meteo (https://open-meteo.com, free, no key): hourly cloud cover by layer (the median
+ *    across several weather models, see CLOUD_MODELS), humidity, dew
  *    point, wind/gusts, precipitation probability and amount, visibility, and what the night safety
  *    report needs on top: the weather code, showers, snowfall and CAPE.
  *  - 7Timer! ASTRO (https://www.7timer.info, free, no key): astronomical seeing and transparency
@@ -9,6 +10,9 @@
 import { z } from 'zod';
 import type { Site } from '../sky.js';
 import { getJson, type Fetch } from './http.js';
+import { logger, errMsg } from '../../log.js';
+
+const log = logger('weather');
 
 const HOURLY = ['cloud_cover', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high', 'relative_humidity_2m', 'dew_point_2m', 'temperature_2m', 'wind_speed_10m', 'wind_gusts_10m', 'precipitation_probability', 'precipitation', 'visibility', 'weather_code', 'showers', 'snowfall', 'cape'] as const;
 const CURRENT = ['cloud_cover', 'temperature_2m', 'relative_humidity_2m', 'dew_point_2m', 'wind_speed_10m', 'wind_gusts_10m', 'precipitation'] as const;
@@ -74,6 +78,80 @@ export const DEFAULT_URLS: ProviderUrls = {
   sevenTimer: 'https://www.7timer.info/bin/astro.php',
 };
 
+/**
+ * The models whose cloud cover is combined into the median. Open-Meteo's default ("best_match")
+ * is a single model per region — GFS/HRRR over the US — and a single model misses whole cloud
+ * decks: on 2026-11-07 over central Florida GFS/HRRR said 0–1 % while ICON, GEM and JMA said
+ * 50–90 % and the sky survey showed a lit low-cloud deck. A model without data for the site (or
+ * the hour) answers null and is left out of that hour's median.
+ */
+export const CLOUD_MODELS = ['gfs_seamless', 'ecmwf_ifs025', 'icon_seamless', 'gem_seamless', 'jma_seamless', 'ukmo_seamless'] as const;
+const CLOUD_VARS = ['cloud_cover', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high'] as const;
+type CloudVar = (typeof CLOUD_VARS)[number];
+
+const EnsembleSchema = z.object({ hourly: z.record(z.string(), z.array(z.union([z.number(), z.string(), z.null()]))) });
+
+/** The median of the numbers given, or null when there are none. */
+export function median(xs: number[]): number | null {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/** Per UTC hour ("2026-10-12T20:00"), the median across CLOUD_MODELS of each cloud layer. */
+export type CloudMedians = Map<string, Record<CloudVar, number | null>>;
+
+/** Each hour's cloud cover as the median across CLOUD_MODELS, per layer. */
+export function cloudMedians(raw: unknown): CloudMedians {
+  const parsed = EnsembleSchema.safeParse(raw);
+  if (!parsed.success) throw fail('Open-Meteo (models)', parsed.error);
+  const H = parsed.data.hourly;
+  const time = H.time ?? [];
+  const out: CloudMedians = new Map();
+  time.forEach((t, i) => {
+    if (typeof t !== 'string') return;
+    const row = {} as Record<CloudVar, number | null>;
+    for (const v of CLOUD_VARS) {
+      const vals = CLOUD_MODELS.map((m) => H[`${v}_${m}`]?.[i]).filter((x): x is number => typeof x === 'number');
+      const med = median(vals);
+      row[v] = med == null ? null : Math.round(med);
+    }
+    // each layer's median is taken on its own, so they can disagree with the total's: the total
+    // is never less than any one layer
+    if (row.cloud_cover != null) row.cloud_cover = Math.max(row.cloud_cover, row.cloud_cover_low ?? 0, row.cloud_cover_mid ?? 0, row.cloud_cover_high ?? 0);
+    if (Object.values(row).some((x) => x != null)) out.set(t, row);
+  });
+  return out;
+}
+
+async function fetchCloudMedians(site: Site, urls: ProviderUrls, f?: Fetch): Promise<CloudMedians> {
+  const q = new URLSearchParams({
+    latitude: String(site.lat),
+    longitude: String(site.lon),
+    hourly: CLOUD_VARS.join(','),
+    models: CLOUD_MODELS.join(','),
+    timezone: 'UTC',
+    forecast_days: '3',
+    past_hours: '2',
+  });
+  return cloudMedians(await getJson(`${urls.openMeteo}?${q}`, { fetch: f }));
+}
+
+/** The hours' and the current cloud cover replaced by the models' medians where there is one. */
+function applyMedians(om: OpenMeteo, med: CloudMedians): void {
+  const H = om.hourly;
+  H.time.forEach((t, i) => {
+    const row = med.get(t);
+    if (!row) return;
+    for (const v of CLOUD_VARS) if (row[v] != null) H[v][i] = row[v];
+  });
+  // the current value comes from one model only (Open-Meteo answers a single "current" for many
+  // models): the median of the hour it falls in stands in for it
+  const now = om.current?.time ? med.get(`${om.current.time.slice(0, 13)}:00`)?.cloud_cover : null;
+  if (om.current && now != null) om.current.cloud_cover = now;
+}
+
 export async function fetchOpenMeteo(site: Site, urls: ProviderUrls, f?: Fetch): Promise<OpenMeteo> {
   const q = new URLSearchParams({
     latitude: String(site.lat),
@@ -84,6 +162,11 @@ export async function fetchOpenMeteo(site: Site, urls: ProviderUrls, f?: Fetch):
     forecast_days: '3',
     past_hours: '2',
   });
+  // the cloud medians are asked for alongside; when they cannot be had, the default model's clouds stand
+  const medP = fetchCloudMedians(site, urls, f).catch((err: unknown) => {
+    log.warn(`cloud cover from several models unavailable (${errMsg(err)}); using Open-Meteo's default model`);
+    return null;
+  });
   const raw = await getJson(`${urls.openMeteo}?${q}`, { fetch: f });
   const parsed = OpenMeteoSchema.safeParse(raw);
   if (!parsed.success) throw fail('Open-Meteo', parsed.error);
@@ -92,6 +175,8 @@ export async function fetchOpenMeteo(site: Site, urls: ProviderUrls, f?: Fetch):
     const s = parsed.data.hourly[k];
     if (s && s.length !== n) throw new Error(`Open-Meteo answered ${s.length} values of ${k} for ${n} hours`);
   }
+  const med = await medP;
+  if (med) applyMedians(parsed.data, med);
   return parsed.data;
 }
 

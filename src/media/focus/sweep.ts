@@ -3,7 +3,7 @@
  * focuser around a position that scores every step and ends on the sharpest (`starFocusSweep`).
  * Both are exclusive telescope operations, and both put the camera back the way they found it.
  */
-import { decode, loadImage, type Crop, type FloatImage } from '../images.js';
+import { decode, type Crop, type FloatImage } from '../images.js';
 import { fetchFile } from '../../drivers/dwarf/http.js';
 import { logger, errMsg } from '../../log.js';
 import { FOCUS_MAX, type Dwarf } from '../../drivers/dwarf/device.js';
@@ -35,6 +35,8 @@ const DEFAULT_RANGE = 30;
 const DEFAULT_STEP = 5;
 const DEFAULT_MAX_POINTS = 25;
 const DEFAULT_SETTLE_MS = 700;
+/** After an exposure or gain change, the camera takes this long to shoot with the new setting. */
+const SETTINGS_SETTLE_MS = 1500;
 /** Without a named exposure, a current one up to this is kept (if long enough for the filter); otherwise the filter's measuring exposure is used. */
 const SHORT_EXPOSURE_S = 1;
 const MEASURE_EXPOSURE_S = 0.5;
@@ -87,11 +89,115 @@ const VERIFY_SOFTER = 1.08;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const currentOf = (s: unknown): unknown => (s as { current?: unknown } | undefined)?.current;
 
+// ------------------------------------------------------------------ the shot both measure from
+
 /**
- * One tele frame, measured for focus. Unless the caller names an exposure, the camera goes onto a
- * short one when it is not already on one: a long exposure writes star trails into the reading, and
- * in DSO mode there is no live view to grab anyway. The setting is restored afterwards, so a night's
- * imaging settings survive a focus check.
+ * The exposure and gain a focus measurement shoots at. The sweep and the single check both resolve,
+ * set, shoot and restore through this, so a star_sharpness reading taken after a sweep is the same
+ * kind of frame (a full tele still) at the same exposure and gain as the sweep's samples and can be
+ * compared with them number for number.
+ */
+interface Shot {
+  filter: string;
+  /** the camera's exposure before, in seconds (null = auto or unreported) */
+  curSecs: number | null;
+  /** the exposure label the camera reported before, handed back afterwards */
+  expLabel: string;
+  restoreExp: string;
+  /** the exposure the stills are taken at (null = the camera's own, unknown) */
+  effExp: number | null;
+  wantExp: number | null;
+  changeExposure: boolean;
+  gainNow: unknown;
+  gain?: number;
+  changeGain: boolean;
+  notes: string[];
+}
+
+async function resolveShot(dwarf: Dwarf, o: { exposureS?: number; gain?: number }): Promise<Shot> {
+  const settings = await dwarf.cameraSettings('tele');
+  const expLabel = String(currentOf(settings.settings.exposure) ?? '');
+  const gainNow = currentOf(settings.settings.gain);
+  // exposureSeconds decodes the device's own live value: null = auto or unreported.
+  const curSecs = await dwarf.exposureSeconds('tele').catch(() => null);
+  const filter = String(currentOf(settings.settings.filter) ?? '');
+  const wantExp = chooseExposure(o.exposureS, curSecs, filter);
+  const changeExposure = wantExp !== null && (curSecs === null || Math.abs(curSecs - wantExp) > 0.01);
+  const notes: string[] = [];
+  // never a gain change that cannot be put back
+  const changeGain = o.gain !== undefined && typeof gainNow === 'number' && gainNow !== o.gain;
+  if (o.gain !== undefined && typeof gainNow !== 'number') notes.push(`gain left as it was: the camera has not reported its current gain, so a change could not be restored afterwards`);
+  // Hand the camera back exactly what it reported, label and all: whatever it was on is the imaging
+  // setting, and a long manual exposure must not come back as auto. Nothing to restore if it never said.
+  // ("unknown (not reported since connect)" is a description, not a setting: it cannot be sent back)
+  const reported = expLabel !== '' && !expLabel.startsWith('unknown');
+  const restoreExp = reported ? expLabel : curSecs !== null ? String(curSecs) : 'auto';
+  return { filter, curSecs, expLabel, restoreExp, effExp: wantExp ?? curSecs ?? null, wantExp, changeExposure, gainNow, gain: o.gain, changeGain, notes };
+}
+
+const shotLabel = (s: Shot) =>
+  `tele ${s.effExp ?? '?'}s${s.changeGain ? ` gain ${s.gain}` : typeof s.gainNow === 'number' ? ` gain ${s.gainNow}` : ''} (was ${s.expLabel || 'unknown'}${typeof s.gainNow === 'number' ? `, gain ${s.gainNow}` : ''}${s.changeExposure || s.changeGain ? '; restored afterwards' : ''})`;
+
+/** What setShot changed, for restoreShot to put back (filled in as each write is made). */
+interface ShotChanges {
+  exposure: boolean;
+  gain: boolean;
+}
+
+async function setShot(dwarf: Dwarf, s: Shot, done: ShotChanges): Promise<void> {
+  if (s.changeExposure) {
+    done.exposure = true;
+    await dwarf.setSetting('tele', 'exposure', s.wantExp!);
+  }
+  if (s.changeGain) {
+    done.gain = true;
+    await dwarf.setSetting('tele', 'gain', s.gain!);
+  }
+  // 2026-11-07: a star_sharpness right after a sweep switched the exposure from auto to 0.5 s (the
+  // firmware reset the gain to 160, put back to 120) and took its still 6 ms later: a much fainter
+  // frame, HFR 15.7″ against the sweep's 5.3″ at the same focus. The sweep never showed it — its first
+  // still comes after a focuser move and a settle. Every still waits for new settings to take hold.
+  if (done.exposure || done.gain) await sleep(SETTINGS_SETTLE_MS);
+}
+
+async function restoreShot(dwarf: Dwarf, hub: StreamHub, s: Shot, done: ShotChanges, what: string): Promise<void> {
+  // gain first: a gain write switches an auto exposure to manual, so the exposure goes back last
+  if (done.gain) await dwarf.setSetting('tele', 'gain', s.gainNow as number).catch((e) => log.warn(`could not restore the tele gain: ${errMsg(e)}`));
+  if (done.exposure) await dwarf.setSetting('tele', 'exposure', s.restoreExp).catch((e) => log.warn(`could not restore the tele exposure: ${errMsg(e)}`));
+  // the stills paused the live view; nudge it back, and never let a stream that died meanwhile take the process down with it
+  const cam = hub.camera('tele');
+  setTimeout(() => {
+    try {
+      cam.retryRtsp();
+    } catch (e) {
+      log.warn(`the live view did not restart after ${what}: ${errMsg(e)}`);
+    }
+  }, LIVE_VIEW_RESTART_MS).unref();
+}
+
+/** One full tele still at the shot's settings, scored. */
+async function shootStill(dwarf: Dwarf, hub: StreamHub, s: Shot, crop?: Crop): Promise<{ img: FloatImage; sharp: StarSharpness }> {
+  if (s.effExp !== null && s.effExp >= 1) hub.camera('tele').expectPause(s.effExp * 1000 + STILL_OVERHEAD_MS);
+  const item = await dwarf.takePhoto('tele');
+  if (!item) throw new Error('the tele produced no still for the focus measurement (camera service hung? check telescope_status health)');
+  const img = await decode(await fetchFile(item.filePath), `tele focus still ${s.effExp ?? 'current'}s (${item.filePath})`);
+  img.capturedAt = item.modificationTime * 1000;
+  return { img, sharp: starSharpness(img, { crop }) };
+}
+
+/**
+ * The exposure and gain of the last sweep that completed, through the filter it ran with: a check
+ * without its own exposure or gain shoots at these, so it confirms the sweep in the sweep's terms.
+ * Another filter needs its own exposure, so then the check falls back to the filter's default.
+ */
+let lastSweepShot: { filter: string; exposureS?: number; gain?: number } | null = null;
+
+/**
+ * One tele frame, measured for focus: a full tele still taken exactly as a sweep sample is, at the
+ * same exposure and gain. Without an exposure or gain named, it uses the last sweep's (through the
+ * same filter); failing that, the same default the sweep would choose — the camera goes onto a short
+ * exposure when it is not already on one, since a long exposure writes star trails into the reading.
+ * The settings are restored afterwards, so a night's imaging settings survive a focus check.
  */
 export async function measureTele({ dwarf, hub }: FocusDeps, o: { exposureS?: number; gain?: number; crop?: Crop } = {}): Promise<{ sharp: StarSharpness; img: FloatImage; settings: string }> {
   // checked before anything is changed: a refusal half way would leave the gain behind
@@ -99,28 +205,21 @@ export async function measureTele({ dwarf, hub }: FocusDeps, o: { exposureS?: nu
   dwarf.assertNoNdLock('a focus measurement');
   dwarf.assertCameraFree('tele', 'a focus measurement');
   return dwarf.exclusive('measuring focus', async () => {
-    const curSecs = await dwarf.exposureSeconds('tele').catch(() => null);
     const filter = await filterOf(dwarf);
-    const want = chooseExposure(o.exposureS, curSecs, filter) ?? undefined;
-    let gainBack: number | undefined;
+    const fromSweep = lastSweepShot && lastSweepShot.filter === filter ? lastSweepShot : null;
+    const s = await resolveShot(dwarf, { exposureS: o.exposureS ?? fromSweep?.exposureS, gain: o.gain ?? fromSweep?.gain });
+    const done: ShotChanges = { exposure: false, gain: false };
     try {
-      if (o.gain !== undefined) {
-        const cur = currentOf((await dwarf.cameraSettings('tele')).settings.gain);
-        if (typeof cur === 'number' && cur !== o.gain) {
-          gainBack = cur;
-          await dwarf.setSetting('tele', 'gain', o.gain);
-        }
-      }
-      const { img } = await loadImage('tele', hub, { exposureS: want });
+      await setShot(dwarf, s, done);
+      const { img, sharp } = await shootStill(dwarf, hub, s, o.crop);
       const at = Date.now();
-      const sharp = starSharpness(img, { crop: o.crop });
-      sharp.cautions.push(...filterNotes(filter, want ?? curSecs, dwarf.isTracking()));
+      sharp.cautions.push(...s.notes, ...filterNotes(s.filter, s.effExp, dwarf.isTracking()));
       // Every open web UI sees the last reading, not just the one that asked for it.
       dwarf.publishState({ focusTune: { running: false, action: 'measure', startedAt: at, finishedAt: at, position: dwarf.state.focusPosition, message: sharpnessLine(sharp) } });
-      const settings = `tele ${want !== undefined ? `${want}s` : curSecs !== null ? `${curSecs}s (already set)` : 'auto (unchanged)'}${gainBack !== undefined ? `, gain ${o.gain} (was ${gainBack})` : ''}`;
-      return { img, sharp, settings };
+      const usedSweep = fromSweep && (o.exposureS === undefined || o.gain === undefined) ? ' — the last sweep’s exposure and gain' : '';
+      return { img, sharp, settings: `${shotLabel(s)}${usedSweep}` };
     } finally {
-      if (gainBack !== undefined) await dwarf.setSetting('tele', 'gain', gainBack).catch((e) => log.warn(`could not restore the tele gain: ${errMsg(e)}`));
+      await restoreShot(dwarf, hub, s, done, 'the focus measurement');
     }
   });
 }
@@ -303,31 +402,14 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
   notes.push(...posNotes);
   if (positions.length < 3) throw new Error(`only ${positions.length} position(s) to sample — nothing to compare; give a wider range or more positions`);
 
-  // The same exposure and gain for every sample, or the samples do not measure the same thing.
-  const settings = await dwarf.cameraSettings('tele');
-  const expLabel = String(currentOf(settings.settings.exposure) ?? '');
-  const gainNow = currentOf(settings.settings.gain);
-  // exposureSeconds decodes the device's own live value: null = auto or unreported.
-  const curSecs = await dwarf.exposureSeconds('tele').catch(() => null);
-  const filter = String(currentOf(settings.settings.filter) ?? '');
-  const wantExp = chooseExposure(o.exposureS, curSecs, filter);
-  // changed inside the try below, so that the finally puts back whatever was changed
-  const changeExposure = wantExp !== null && (curSecs === null || Math.abs(curSecs - wantExp) > 0.01);
-  // never a gain change that cannot be put back
-  const changeGain = o.gain !== undefined && typeof gainNow === 'number' && gainNow !== o.gain;
-  if (o.gain !== undefined && typeof gainNow !== 'number') notes.push(`gain left as it was: the camera has not reported its current gain, so a change could not be restored afterwards`);
-  let exposureSet = false;
-  let gainSet = false;
-  const effExp = wantExp ?? curSecs ?? null;
-  // Hand the camera back exactly what it reported, label and all: whatever it was on is the imaging
-  // setting, and a long manual exposure must not come back as auto. Nothing to restore if it never said.
-  // ("unknown (not reported since connect)" is a description, not a setting: it cannot be sent back)
-  const reported = expLabel !== '' && !expLabel.startsWith('unknown');
-  const restoreExp = reported ? expLabel : curSecs !== null ? String(curSecs) : 'auto';
-  const settingsNote = `tele ${effExp ?? '?'}s${changeGain ? ` gain ${o.gain}` : ''} (was ${expLabel || 'unknown'}${typeof gainNow === 'number' ? `, gain ${gainNow}` : ''}${changeExposure || changeGain ? '; restored afterwards' : ''})`;
-  notes.push(...filterNotes(filter, effExp, dwarf.isTracking()));
+  // The same exposure and gain for every sample, or the samples do not measure the same thing;
+  // resolved, set and restored exactly as a single star_sharpness check does (resolveShot).
+  const shot = await resolveShot(dwarf, o);
+  notes.push(...shot.notes);
+  const done: ShotChanges = { exposure: false, gain: false };
+  const settingsNote = shotLabel(shot);
+  notes.push(...filterNotes(shot.filter, shot.effExp, dwarf.isTracking()));
 
-  const cam = hub.camera('tele');
   const deadline = startedAt + (o.deadlineMs ?? SWEEP_DEADLINE_MS);
   const repeats = Math.max(1, Math.min(MAX_REPEATS, Math.round(o.repeats ?? 1)));
   const total = positions.length;
@@ -340,14 +422,7 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
     dwarf.publishState({ focusTune: { running: true, action: 'sweep', startedAt, ...patch } });
   };
 
-  const shoot = async (): Promise<{ img: FloatImage; sharp: StarSharpness }> => {
-    if (effExp !== null && effExp >= 1) cam.expectPause(effExp * 1000 + STILL_OVERHEAD_MS);
-    const item = await dwarf.takePhoto('tele');
-    if (!item) throw new Error('the tele produced no still for the focus measurement (camera service hung? check telescope_status health)');
-    const img = await decode(await fetchFile(item.filePath), `tele focus still ${effExp ?? 'current'}s (${item.filePath})`);
-    img.capturedAt = item.modificationTime * 1000;
-    return { img, sharp: starSharpness(img, { crop: o.crop }) };
-  };
+  const shoot = () => shootStill(dwarf, hub, shot, o.crop);
 
   const sampleAt = async (position: number): Promise<{ sample: FocusSample; image?: FloatImage }> => {
     const t0 = Date.now();
@@ -380,14 +455,7 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
   };
 
   try {
-    if (changeExposure) {
-      exposureSet = true;
-      await dwarf.setSetting('tele', 'exposure', wantExp!);
-    }
-    if (changeGain) {
-      gainSet = true;
-      await dwarf.setSetting('tele', 'gain', o.gain!);
-    }
+    await setShot(dwarf, shot, done);
     publish({ total, index: 0, position: Math.round(center), message: 'measuring the starting position' });
     for (let i = 0; i < total; i++) {
       let sample: FocusSample;
@@ -492,6 +560,8 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
     };
     lastPosition = result.finalPosition;
     lastMessage = [result.verdict, ...result.notes].join(' — ');
+    // what the check that follows shoots at, so it confirms this sweep with the same kind of frame
+    lastSweepShot = { filter: shot.filter, exposureS: shot.effExp ?? undefined, gain: shot.changeGain ? shot.gain : typeof shot.gainNow === 'number' ? shot.gainNow : undefined };
     // in the log too: a caller that gave up waiting still leaves the outcome on record
     log.info(`${lastMessage} — samples ${samples.map((x) => `${x.position}:${x.error ? 'failed' : `${x.hfrPx}px`}`).join(' ')}`);
     return result;
@@ -510,17 +580,7 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
     lastMessage = `star focus failed: ${errMsg(err)}${back}`;
     throw new Error(`${errMsg(err)}${back}`);
   } finally {
-    // gain first: a gain write switches an auto exposure to manual, so the exposure goes back last
-    if (gainSet) await dwarf.setSetting('tele', 'gain', gainNow as number).catch((e) => log.warn(`could not restore the tele gain: ${errMsg(e)}`));
-    if (exposureSet) await dwarf.setSetting('tele', 'exposure', restoreExp).catch((e) => log.warn(`could not restore the tele exposure: ${errMsg(e)}`));
-    // the stills paused the live view; nudge it back, and never let a stream that died meanwhile take the process down with it
-    setTimeout(() => {
-      try {
-        cam.retryRtsp();
-      } catch (e) {
-        log.warn(`the live view did not restart after the focus sweep: ${errMsg(e)}`);
-      }
-    }, LIVE_VIEW_RESTART_MS).unref();
+    await restoreShot(dwarf, hub, shot, done, 'the focus sweep');
     dwarf.publishState({ focusTune: { running: false, action: 'sweep', startedAt, finishedAt: Date.now(), position: lastPosition, message: lastMessage } });
   }
 }

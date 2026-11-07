@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { WeatherService, scoreHour } from '../astro/weather.js';
 import { bestWindow } from '../astro/weather.js';
 import { getJson, transient } from '../astro/weather/http.js';
+import { CLOUD_MODELS, cloudMedians, median } from '../astro/weather/providers.js';
 import type { HourForecast } from '../astro/weather/score.js';
 
 const SITE = { lat: 45.5, lon: -122.6, elev: 0 };
@@ -34,11 +35,11 @@ function openMeteo(hours = 3, cloud = 0) {
 const sevenTimer = { init: '2026101200', dataseries: [{ timepoint: 3, seeing: 2, transparency: 7, extra: 1 }] };
 
 /** A fetch that answers per host from a script, counting calls. */
-function scripted(routes: { om?: () => unknown; st?: () => unknown }) {
-  const calls = { om: 0, st: 0 };
+function scripted(routes: { om?: () => unknown; st?: () => unknown; ens?: () => unknown }) {
+  const calls = { om: 0, st: 0, ens: 0 };
   const f = (async (input: string | URL | Request) => {
     const url = String(input);
-    const which = url.includes('open-meteo') ? 'om' : 'st';
+    const which = url.includes('open-meteo') ? (url.includes('models=') ? 'ens' : 'om') : 'st';
     calls[which]++;
     const r = routes[which];
     const out = r ? r() : { status: 404 };
@@ -106,6 +107,7 @@ describe('weather', () => {
     const f = (async (input: string | URL | Request) => {
       const url = String(input);
       if (!url.includes('open-meteo')) return new Response(JSON.stringify(sevenTimer), { status: 200 });
+      if (url.includes('models=')) return new Response('no', { status: 404 });
       om++;
       // the first site's answer arrives after the second site's
       if (url.includes(`latitude=${SITE.lat}`)) await new Promise((r) => setTimeout(r, 60));
@@ -135,6 +137,36 @@ describe('weather', () => {
     assert.equal(calls.om, 2, 'no new attempt during the cool-down');
     now += 13 * 3600e3;
     await assert.rejects(w.forecast(SITE, TZ), /past 12 h/);
+  });
+
+  test('cloud cover is the median across the models, per layer, and the current value follows it', async () => {
+    // three hours; models answer 0, 2, 54, 0, 54, 6 for the total and the last model has no data at 02:00
+    const totals = [0, 2, 54, 0, 54, 6];
+    const hourly: Record<string, unknown[]> = { time: ['2026-10-12T00:00', '2026-10-12T01:00', '2026-10-12T02:00'] };
+    CLOUD_MODELS.forEach((m, k) => {
+      const last = k === CLOUD_MODELS.length - 1;
+      hourly[`cloud_cover_${m}`] = [totals[k], totals[k], last ? null : totals[k]];
+      hourly[`cloud_cover_low_${m}`] = [k === 2 ? 40 : 0, 0, 0];
+      hourly[`cloud_cover_mid_${m}`] = [0, 0, 0];
+      hourly[`cloud_cover_high_${m}`] = [0, 0, 0];
+    });
+    const { f, calls } = scripted({ om: () => openMeteo(3, 0), st: () => sevenTimer, ens: () => ({ hourly }) });
+    const fc = await new WeatherService({ fetch: f }).forecast(SITE, TZ);
+    assert.equal(calls.ens, 1);
+    assert.deepEqual(fc.hours.map((h) => h.cloudTotal), [4, 4, 2], 'median of 0,0,2,6,54,54 is 4; of 0,0,2,54,54 is 2');
+    assert.equal(fc.current.cloudCover, 4, "the current value is its hour's median, not the default model's 0");
+    assert.equal(median([]), null);
+    assert.equal(median([3, 1, 2]), 2);
+    // a layer's median above the total's lifts the total
+    const lifted = cloudMedians({ hourly: { time: ['t'], ...Object.fromEntries(CLOUD_MODELS.flatMap((m) => [[`cloud_cover_${m}`, [0]], [`cloud_cover_low_${m}`, [30]]])) } });
+    assert.equal(lifted.get('t')?.cloud_cover, 30);
+  });
+
+  test("without the models' answer the default model's cloud cover stands", async () => {
+    const { f } = scripted({ om: () => openMeteo(3, 25), st: () => sevenTimer, ens: () => ({ status: 404 }) });
+    const fc = await new WeatherService({ fetch: f }).forecast(SITE, TZ);
+    assert.deepEqual(fc.hours.map((h) => h.cloudTotal), [25, 25, 25]);
+    assert.equal(fc.current.cloudCover, 25);
   });
 
   test('getJson retries transient failures only', async () => {
