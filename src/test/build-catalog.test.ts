@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { num, sexa, crossIds, parseOpenNgc, prettyOpenNgcId } from '../tools/catalog/parse.js';
-import { Catalog, sepArcmin, extendedTol } from '../tools/catalog/merge.js';
+import { Catalog, sepArcmin, extendedTol, resolveType } from '../tools/catalog/merge.js';
 import { Downloader, parseVizierTsv } from '../tools/catalog/fetch.js';
 import { idRank, tsvRow, TSV_HEADER } from '../tools/catalog/write.js';
 import type { Rec } from '../tools/catalog/types.js';
@@ -105,6 +105,29 @@ describe('catalog build: merging', () => {
     assert.equal(o.mag, 12.1);
     assert.equal(o.sb, 13.4);
     assert.equal(o.pa, 30);
+  });
+
+  test('a merge keeps every source type claim, and the classifying surveys settle the type', () => {
+    const surveys = new Set(['vdb', 'sh2', 'rcw']);
+    const c = new Catalog();
+    // Maia Nebula: OpenNGC labels it HII; only the reflection survey and general catalogs match it
+    c.add(rec({ id: 'NGC 1432', type: 'HII', ra: 3.76, dec: 24.37, maj: 60, ids: ['LBN 771'] }), 'openngc');
+    c.add(rec({ id: 'LBN 771', type: 'Neb', ra: 3.76, dec: 24.37, maj: 60 }), 'lbn');
+    c.add(rec({ id: 'vdB 21', type: 'RfN', ra: 3.76, dec: 24.37, maj: 50, ids: ['NGC 1432'] }), 'vdb');
+    const maia = c.get('NGC 1432')!;
+    assert.deepEqual(maia.claims, { openngc: 'HII', lbn: 'Neb', vdb: 'RfN' });
+    assert.equal(maia.type, 'HII', 'the merge itself leaves the type alone');
+    assert.equal(resolveType(maia, surveys), 'RfN');
+    // a general catalog's unspecified Neb takes the survey's kind too
+    assert.equal(resolveType({ type: 'Neb', claims: { ced: 'Neb', vdb: 'RfN' } }, surveys), 'RfN');
+    // the surveys disagree (an HII region with a vdB entry): mixed, so the first catalog's type stands
+    assert.equal(resolveType({ type: 'Neb', claims: { openngc: 'Neb', sh2: 'HII', vdb: 'RfN' } }, surveys), 'Neb');
+    // a survey that agrees on the kind keeps the code (EmN and HII are both emission)
+    assert.equal(resolveType({ type: 'EmN', claims: { openngc: 'EmN', sh2: 'HII' } }, surveys), 'EmN');
+    // a general catalog is not evidence, and non-nebula codes are never weighed
+    assert.equal(resolveType({ type: 'HII', claims: { openngc: 'HII', lbn: 'RfN' } }, surveys), 'HII');
+    assert.equal(resolveType({ type: 'Cl+N', claims: { openngc: 'Cl+N', vdb: 'RfN' } }, surveys), 'Cl+N');
+    assert.equal(resolveType({ type: 'HII' }, surveys), 'HII');
   });
 
   test('aliases do not take a designation that already names something', () => {

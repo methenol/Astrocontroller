@@ -33,6 +33,33 @@ export function extendedTol(rec: Rec, o: Obj): number | null {
 
 const sizeRatio = (a: number, b: number) => Math.max(a, b) / Math.min(a, b);
 
+/** What a diffuse-nebula type code says about the light: the distinction surveys settle. */
+const NEBULA_KIND: Readonly<Record<string, 'emission' | 'reflection' | 'unspecified'>> = {
+  HII: 'emission', EmN: 'emission', RfN: 'reflection', Neb: 'unspecified',
+};
+
+/**
+ * The object's type, weighed over every source that described it. The first catalog to list an
+ * object names it, but its type code may be a general catalog's label: OpenNGC files the Maia
+ * Nebula as HII, while van den Bergh, a survey of reflection nebulae only, lists it too. When the
+ * classifying surveys that matched a diffuse nebula agree on its kind, that kind replaces a
+ * different or unspecified one; when they disagree (a Sharpless region with a vdB entry is both
+ * emission and reflection) or none matched, the type stays as the first catalog gave it.
+ * Only diffuse-nebula codes are weighed: cluster, dark, planetary and remnant codes are kept.
+ */
+export function resolveType(o: Pick<Obj, 'type' | 'claims'>, surveys: ReadonlySet<string>): string {
+  const own = NEBULA_KIND[o.type];
+  if (!own) return o.type;
+  const verdicts = new Map<string, string>();
+  for (const [source, type] of Object.entries(o.claims ?? {})) {
+    const kind = NEBULA_KIND[type];
+    if (surveys.has(source) && kind && kind !== 'unspecified' && !verdicts.has(kind)) verdicts.set(kind, type);
+  }
+  if (verdicts.size !== 1) return o.type;
+  const [[kind, type]] = verdicts;
+  return kind === own ? o.type : type;
+}
+
 export type Outcome = 'added' | 'merged';
 
 export class Catalog {
@@ -120,7 +147,7 @@ export class Catalog {
   }
 
   private insert(rec: Rec, source: string): Obj {
-    const o: Obj = { ...rec, ids: [...rec.ids], names: [...rec.names], sources: [source] };
+    const o: Obj = { ...rec, ids: [...rec.ids], names: [...rec.names], sources: [source], claims: { [source]: rec.type } };
     this.objects.push(o);
     this.addKeys(o, [o.id, ...o.ids, ...o.names]);
     const k = `${((Math.floor(o.ra * 15) % 360) + 360) % 360}:${Math.min(89, Math.floor(o.dec))}`;
@@ -132,6 +159,8 @@ export class Catalog {
 
   private mergeInto(o: Obj, rec: Rec, source: string): void {
     if (!o.sources.includes(source)) o.sources.push(source);
+    o.claims ??= { [o.sources[0]]: o.type };
+    o.claims[source] ??= rec.type;
     const have = new Set([o.id, ...o.ids, ...o.names].map(normalizeName));
     const take = (d: string, list: string[]) => {
       const k = normalizeName(d);

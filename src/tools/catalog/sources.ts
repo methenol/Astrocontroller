@@ -51,6 +51,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'harris',
+      classifies: true,
       title: 'Globular clusters (Harris 2010)',
       cite: 'Harris W.E., Catalog of Parameters for Milky Way Globular Clusters, 2010 edition (VizieR VII/202)',
       near: { types: ['GCl'], tol: () => 1.5 },
@@ -66,6 +67,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'dias',
+      classifies: true,
       title: 'Open clusters (Dias et al. 2002, v3.5)',
       cite: 'Dias W.S., Alessi B.S., Moitinho A., Lepine J.R.D., New catalogue of optically visible open clusters and candidates (VizieR B/ocl)',
       near: { types: ['OCl', 'Cl+N', '*Ass'], tol: (rec, o) => (o.maj && rec.maj && Math.max(o.maj, rec.maj) / Math.min(o.maj, rec.maj) > 3 ? null : 0.2 * Math.max(o.maj ?? 2, rec.maj ?? 2) + 1) },
@@ -80,6 +82,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'pn',
+      classifies: true,
       title: 'Planetary nebulae (Strasbourg-ESO catalogue)',
       cite: 'Acker A. et al., Strasbourg-ESO Catalogue of Galactic Planetary Nebulae, 1992 (VizieR V/84)',
       near: { types: ['PN'], tol: () => 0.5 },
@@ -101,6 +104,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'mash',
+      classifies: true,
       title: 'Planetary nebulae (Macquarie/AAO/Strasbourg Hα survey, MASH I+II)',
       cite: 'Phillipps S. et al., The Macquarie/AAO/Strasbourg Hα Planetary Nebula Catalogue (MASH), 2005 (MNRAS 359, 1001) and MASH-II, 2008 (MNRAS 384, 525; VizieR V/127A)',
       near: { types: ['PN'], tol: () => 0.5 },
@@ -124,6 +128,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'green',
+      classifies: true,
       title: 'Supernova remnants (Green 2024)',
       cite: 'Green D.A., A catalogue of 310 Galactic supernova remnants, 2024 (VizieR VII/297)',
       near: { types: NEBULAE, tol: extendedTol },
@@ -140,6 +145,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'sh2',
+      classifies: true,
       title: 'Sharpless HII regions (Sh2)',
       cite: 'Sharpless S., A Catalogue of H II Regions, 1959 (VizieR VII/20)',
       near: { types: NEBULAE, tol: extendedTol },
@@ -153,6 +159,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'rcw',
+      classifies: true,
       title: 'RCW southern HII regions',
       cite: 'Rodgers A.W., Campbell C.T., Whiteoak J.B., A catalogue of H-alpha emission regions in the southern Milky Way, 1960 (VizieR VII/216)',
       near: { types: NEBULAE, tol: extendedTol },
@@ -199,6 +206,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'vdb',
+      classifies: true,
       title: 'van den Bergh reflection nebulae (vdB)',
       cite: 'van den Bergh S., A study of reflection nebulae, 1966 (VizieR VII/21)',
       near: { types: NEBULAE, tol: extendedTol },
@@ -213,6 +221,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'barnard',
+      classifies: true,
       title: 'Barnard dark nebulae',
       cite: 'Barnard E.E., Catalogue of 349 dark objects in the sky, 1927 (VizieR VII/220A)',
       near: { types: ['DrkN'], tol: extendedTol },
@@ -226,6 +235,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'ldn',
+      classifies: true,
       title: 'Lynds dark nebulae (LDN)',
       cite: 'Lynds B.T., Catalogue of Dark Nebulae, 1962 (VizieR VII/7A)',
       near: { types: ['DrkN'], tol: extendedTol },
@@ -242,6 +252,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'rc3',
+      classifies: true,
       title: 'Galaxies (RC3, Third Reference Catalogue of Bright Galaxies)',
       cite: 'de Vaucouleurs G. et al., Third Reference Catalogue of Bright Galaxies, 1991 (VizieR VII/155)',
       load: async () => ({
@@ -268,6 +279,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'pgc',
+      classifies: true,
       title: 'Galaxies (Principal Galaxies Catalogue, PGC/LEDA)',
       cite: 'Paturel C. et al., Principal Galaxies Catalogue and LEDA, 2003 (A&A 412, 45; VizieR VII/119B)',
       // most PGC entries merge into an RC3/OpenNGC galaxy by their shared "PGC N" designation; this catches the
@@ -285,6 +297,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'arp',
+      classifies: true,
       title: 'Arp peculiar galaxies',
       cite: 'Arp H., Atlas of Peculiar Galaxies, 1966 (VizieR VII/192)',
       near: { types: ['G', 'GPair', 'GTrpl', 'GGroup'], tol: () => 1 },
@@ -300,6 +313,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'hcg',
+      classifies: true,
       title: 'Hickson compact galaxy groups',
       cite: 'Hickson P., Systematic properties of compact groups of galaxies, 1982 (VizieR VII/213)',
       load: async () => ({
@@ -312,6 +326,7 @@ export function sources(env: SourceEnv): Source[] {
     },
     {
       key: 'aco',
+      classifies: true,
       title: 'Abell galaxy clusters (ACO, distance class ≤ 4)',
       cite: 'Abell G.O., Corwin H.G., Olowin R.P., A catalog of rich clusters of galaxies, 1989 (VizieR VII/110A)',
       load: async () => {

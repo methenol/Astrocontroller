@@ -10,12 +10,14 @@
  * designations (VizieR tables carry cross-identifications: LDN→Barnard, RCW→NGC/Gum, RC3→PGC…),
  * then, for extended objects, by position and size. A match adds the record's designations and
  * fills fields the object lacks; otherwise the record becomes a new object. Sources are merged in
- * the order listed, so the first catalog that has an object names it.
+ * the order listed, so the first catalog that has an object names it. Its type is then weighed
+ * against the classifying surveys that matched it (`resolveType`): a general catalog's label gives
+ * way when the surveys agree the object is something else.
  */
 import path from 'node:path';
 import { typeName } from '../astro/designations.js';
 import { Downloader, writeAtomic } from './catalog/fetch.js';
-import { Catalog } from './catalog/merge.js';
+import { Catalog, resolveType } from './catalog/merge.js';
 import { sources } from './catalog/sources.js';
 import { objectsTsv, sourcesJson, type SourceStats } from './catalog/write.js';
 
@@ -27,7 +29,8 @@ async function main(): Promise<void> {
 
   const catalog = new Catalog();
   const stats: SourceStats[] = [];
-  for (const src of sources({ dir, fresh, download })) {
+  const all = sources({ dir, fresh, download });
+  for (const src of all) {
     console.log(`${src.key}: ${src.title}`);
     const { records, aliases = [] } = await src.load();
     let added = 0;
@@ -43,6 +46,16 @@ async function main(): Promise<void> {
   }
 
   const { objects } = catalog;
+  const surveys = new Set(all.filter((s) => s.classifies).map((s) => s.key));
+  let retyped = 0;
+  for (const o of objects) {
+    const type = resolveType(o, surveys);
+    if (type !== o.type) {
+      o.type = type;
+      retyped++;
+    }
+  }
+  console.log(`\n${retyped} types settled by the classifying surveys`);
   writeAtomic(path.join(dir, 'objects.tsv'), objectsTsv(objects));
   writeAtomic(path.join(dir, 'sources.json'), sourcesJson(new Date(), objects.length, stats));
 

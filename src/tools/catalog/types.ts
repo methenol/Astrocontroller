@@ -24,6 +24,11 @@ export interface Rec {
 /** A merged object: a record plus the sources that contributed to it. */
 export interface Obj extends Rec {
   sources: string[];
+  /**
+   * The type each contributing source gave this object, by source key (the first record a source
+   * contributed). `type` is the creating source's until `resolveType` weighs these after the merge.
+   */
+  claims?: Record<string, string>;
 }
 
 /** How to match records not found by designation: candidate types and a position tolerance (arcmin, null = not the same). */
@@ -43,5 +48,11 @@ export interface Source {
   title: string;
   cite: string;
   near?: NearMatch;
+  /**
+   * The catalog is a survey of one kind of object (van den Bergh lists reflection nebulae,
+   * Sharpless HII regions), so the type it gives is evidence about what the object is. A general
+   * catalog's type (OpenNGC, Cederblad, LBN) is a label; see `resolveType`.
+   */
+  classifies?: boolean;
   load: () => Promise<Loaded>;
 }
