@@ -602,7 +602,7 @@ describe('Seestar MCP tools', () => {
       const media = seestarMedia(scope);
       seestarMcpSpec(scope, duty, media).register(server);
       media.hub.shutdown();
-      for (const n of ['duty', 'show_in_stellarium', 'object_info', 'reference_image', 'sky_conditions', 'weather_forecast', 'search_catalog', 'rest_target', 'list_library', 'processing_status', 'goto_target', 'plan_targets']) assert.ok(names.includes(n), n);
+      for (const n of ['duty', 'show_in_stellarium', 'object_info', 'reference_image', 'target_season', 'sky_conditions', 'weather_forecast', 'search_catalog', 'rest_target', 'list_library', 'processing_status', 'goto_target', 'plan_targets']) assert.ok(names.includes(n), n);
       // the Seestar's storage, album, camera and focus tools under the Dwarf's names
       for (const n of ['list_device_sessions', 'transfer_session', 'transfer_files', 'list_album', 'view_image', 'analyze_image', 'analyze_subs', 'delete_album_items', 'take_photo', 'video_recording', 'timelapse', 'view_camera', 'stacking_status', 'star_sharpness', 'star_focus', 'dark_frames']) assert.ok(names.includes(n), n);
       // and every other tool the Dwarf's agent has

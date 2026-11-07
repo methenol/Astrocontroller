@@ -235,6 +235,7 @@ async function detail(id, el) {
         <button type="button" class="primary" data-db-goto="${esc(d.id)}" data-label="${esc(d.gotoName)}"${low ? ' disabled title="below the horizon"' : ''}>GoTo ${esc(d.gotoName)}</button>
         <button type="button" data-db-agent="${esc(d.gotoName)}">Ask the agent to image it</button>
         <button type="button" class="ghost" data-sky="${esc(d.gotoName)}" data-ra="${esc(d.raHours ?? '')}" data-dec="${esc(d.decDeg ?? '')}">View in Stellarium</button>
+        <button type="button" class="ghost" data-research="${esc(d.gotoName)}" data-display="${esc(d.name ?? d.gotoName)}" data-ra="${esc(d.raHours ?? '')}" data-dec="${esc(d.decDeg ?? '')}" title="Ask the agent to research it: what it is, its discovery and history, reference images, when it is up tonight and through the year, and how to collect it with this telescope">Research</button>
       </div>
       ${programFormHtml(entry)}`;
     el.dataset.target = JSON.stringify({ name: d.id, display: d.gotoName, raHours: d.raHours, decDeg: d.decDeg });

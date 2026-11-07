@@ -36,6 +36,6 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerDutyTools(tool, ctx);
   if (ctx.night) registerNightTools(tool, ctx.night);
   registerStellariumTools(tool);
-  registerResearchTools(tool, { fov: () => ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV });
+  registerResearchTools(tool, { fov: () => ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV, site: () => ctx.dwarf.requireLocation() });
   registerAcquisitionTools(tool, { site: () => ctx.dwarf.requireLocation(), facts: dwarfFacts(ctx.dwarf), night: ctx.night, sessionSubs: dwarfSessionSubs, darkFrames: dwarfDarkFrames });
 }

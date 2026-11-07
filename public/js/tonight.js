@@ -79,7 +79,7 @@ function planRow(t) {
     <td data-label="Best time">${esc(t.bestTime ?? '')}<small>max ${esc(t.maxAltitude)}°${sky}</small>${clear}</td>
     <td data-label="${t.weatherAlignment != null ? 'Weather' : 'Hours above minimum'}">${weather}</td>
     <td data-label="Framing &amp; filter"><small>${esc(t.framing)}</small><small>${esc(filter)}</small>${sub}</td>
-    <td><button class="ghost" data-image="${esc(t.gotoName ?? t.name)}">Image</button><button class="ghost" data-sky="${esc(t.gotoName ?? t.name)}" data-display="${esc(t.displayName ?? t.name)}" data-ra="${esc(t.raHours ?? '')}" data-dec="${esc(t.decDeg ?? '')}" title="Show it in the Stellarium tab">Sky</button></td></tr>`;
+    <td><button class="ghost" data-image="${esc(t.gotoName ?? t.name)}">Image</button><button class="ghost" data-sky="${esc(t.gotoName ?? t.name)}" data-display="${esc(t.displayName ?? t.name)}" data-ra="${esc(t.raHours ?? '')}" data-dec="${esc(t.decDeg ?? '')}" title="Show it in the Stellarium tab">Sky</button><button class="ghost" data-research="${esc(t.gotoName ?? t.name)}" data-display="${esc(t.displayName ?? t.name)}" data-ra="${esc(t.raHours ?? '')}" data-dec="${esc(t.decDeg ?? '')}" title="Ask the agent to research it: what it is, its discovery and history, reference images, when it is up tonight and through the year, and how to collect it with this telescope">Research</button></td></tr>`;
 }
 
 async function loadPlan() {

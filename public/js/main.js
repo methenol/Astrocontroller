@@ -12,6 +12,7 @@ import './plan.js';
 import './journal.js';
 import './database.js';
 import './stellarium.js';
+import './research.js';
 import './album.js';
 import './library.js';
 import './skills.js';

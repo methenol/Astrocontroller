@@ -6,7 +6,10 @@
  */
 import sharp from 'sharp';
 import { z } from 'zod';
+import { config } from '../../config.js';
 import { describe as describeObject, findObject, type DsoObject } from '../../astro/catalog.js';
+import { horizonOf, maskFor } from '../../astro/horizon.js';
+import { targetSeason } from '../../astro/season.js';
 import * as sky from '../../astro/sky.js';
 import { errMsg } from '../../log.js';
 import { saveCapture, text, withImage, type ToolFn } from './common.js';
@@ -27,6 +30,8 @@ const SKYVIEW = 'https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl';
 export interface ResearchContext {
   /** the main camera's field in degrees */
   fov(): { h: number; v: number };
+  /** the observer's site; target_season is registered only with it */
+  site?: () => sky.Site;
 }
 
 async function getJson<T>(url: string, timeoutMs = TIMEOUT_MS): Promise<T> {
@@ -215,4 +220,29 @@ export function registerResearchTools(tool: ToolFn, ctx: ResearchContext): void 
       return withImage(jpeg, [`${n.title} (${n.center ?? 'NASA'}, ${n.date}, ${n.nasaId})`, n.description, `https://images.nasa.gov/details/${encodeURIComponent(n.nasaId)}`, `saved as captures/${saved}`].filter(Boolean).join('\n'));
     },
   );
+
+  const site = ctx.site;
+  if (site) {
+    tool(
+      'target_season',
+      "A fixed target's year at this site, from tonight on: for each week, the hours of astronomical darkness it spends above the minimum altitude (raised by the site's obstruction map) and how high it gets, rolled up by month; the best months, the season (the longest run of nights with at least an hour usable, and whether tonight is in it), the night it transits in the middle of darkness (best night), the highest it ever gets here, and whether it is circumpolar or never rises. Deterministic geometry: no forecast, no Moon. For tonight's hour by hour, find_target; for a program target's season against its goal, plan_program/night_plan. Planets, the Moon and comets move: not for them.",
+      {
+        name: z.string().trim().min(1).max(120).optional(),
+        ra_hours: z.number().min(0).lt(24).optional().describe('J2000, for an object not in the local catalog'),
+        dec_deg: z.number().min(-90).max(90).optional(),
+        min_altitude: z.number().min(0).lt(90).optional().describe('default: the plan minimum altitude'),
+        ignore_horizon: z.boolean().optional().describe("true to ignore this site's obstruction map"),
+        weekly: z.boolean().optional().describe('true to include every sampled night, not just the months'),
+      },
+      async ({ name, ra_hours, dec_deg, min_altitude, ignore_horizon, weekly }) => {
+        if (name && ra_hours === undefined && sky.bodyByName(name)) throw new Error(`${name} moves against the stars: use sky_conditions for where it is tonight`);
+        const t = resolveTarget(name, ra_hours, dec_deg);
+        const s = site();
+        const mask = ignore_horizon ? null : maskFor(s);
+        const r = targetSeason(s, t.raHours, t.decDeg, { minAltitude: min_altitude ?? config.observer.minAltitudeDeg, tz: config.observer.timezone, horizon: mask ? horizonOf(mask) : undefined });
+        const { nights, ...rest } = r;
+        return text({ target: t.label, ra: sky.hoursToHms(t.raHours), dec: sky.degToDms(t.decDeg), site: { lat: s.lat, lon: s.lon }, ...rest, ...(weekly ? { nights } : {}) });
+      },
+    );
+  }
 }

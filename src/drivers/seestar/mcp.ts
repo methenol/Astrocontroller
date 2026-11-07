@@ -86,7 +86,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
         );
       }
       registerStellariumTools(tool);
-      registerResearchTools(tool, { fov: () => scope.state.fov ?? NOMINAL_FOV });
+      registerResearchTools(tool, { fov: () => scope.state.fov ?? NOMINAL_FOV, site: () => scope.requireLocation() });
       registerAcquisitionTools(tool, { site: () => scope.requireLocation(), facts: seestarFacts(scope), night, sessionSubs: media ? (folder) => media.storage.sessionSubs(folder) : undefined, darkFrames: media ? () => media.storage.darkFrames() : undefined });
     },
   };

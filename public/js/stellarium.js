@@ -16,6 +16,7 @@ import { state, isPanelActive } from './state.js';
 import { showScreen } from './shell.js';
 import { draft } from './chat.js';
 import { imagingRequest } from './tonight.js';
+import { askResearch } from './research.js';
 import { findInProgram, programFormHtml, wireProgramForms } from './program-add.js';
 
 const VENDOR = 'vendor/stellarium';
@@ -806,6 +807,11 @@ $('#sky-time').onchange = (e) => {
 for (const [id, h] of [['#sky-back', -1], ['#sky-fwd', 1]]) $(id).onclick = () => stel && setTime(skyTime() + h * 3600_000);
 $('#sky-goto').onclick = (e) => gotoAim(e.currentTarget);
 $('#sky-agent').onclick = askAgent;
+// the selection, or the frame centre (by its position) when Frame mode is off it
+$('#sky-research').onclick = (e) => {
+  const a = aim();
+  if (a) askResearch({ name: a.name, display: a.display, raHours: a.raHours, decDeg: a.decDeg }, e.currentTarget);
+};
 $('#sky-prog-btn').onclick = () => ($('#sky-prog').hidden ? openProgramForm() : closeProgramForm());
 $('#sky-frame').onclick = () => stel && setFraming(!framing);
 $('#sky-scope').onclick = () => stel && centerOnScope();
