@@ -94,7 +94,7 @@ If the blocked target is the one the owner named (the priority target): put "ret
 ## P5 — Changing target (scheduled change, or the objective's handover)
 1. `live_stacking action=stop` on the current target.
 2. Run **P2** on the next target (on the night plan: the plan's next block).
-3. Once the new stack is collecting: `transfer_session` for the previous target's session (it queues processing when auto-processing is on).
+3. Once the new stack is collecting: `transfer_session` for the previous target's session (it queues processing when auto-processing is on). Not on autonomous Starfront nights while the roof is open: there every session waits until the roof closes.
 
 ## Journal
 Astrocontroller writes every target's session to the night's journal by itself (GoTo and time to target, focus and its position, stack, rejections, stats). Add what the owner should read tomorrow with `journal action=note` (one or two sentences: why a target was left, trouble and what fixed it). `journal action=read night=last` answers "how did last night go"; the owner's own notes are there too. The owner's target program (what to collect and for how long) is `plan_program`; change it only on their request.

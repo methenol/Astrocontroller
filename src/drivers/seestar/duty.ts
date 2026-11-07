@@ -124,7 +124,7 @@ function watch(scope: Seestar, event: EventSink, autonomous: () => boolean = () 
   };
 }
 
-export function seestarDuty(scope: Seestar, o: { autonomous?: () => boolean } = {}): DutyDevice {
+export function seestarDuty(scope: Seestar, o: { autonomous?: () => boolean; transferHold?: () => string | null } = {}): DutyDevice {
   return {
     get state() {
       return scope.state;
@@ -135,6 +135,9 @@ export function seestarDuty(scope: Seestar, o: { autonomous?: () => boolean } = 
     autonomous: () => !!o.autonomous?.(),
     watch: (_now, event) => watch(scope, event, () => !!o.autonomous?.()),
     closeOut: () =>
-      `stop stacking if it still runs (stop_stacking), park the scope (park), then transfer the night's sessions that are not in the library yet (list_device_sessions, transfer_session; processing queues itself)${o.autonomous?.() ? ', and once those transfers have finished (their finished events), seestar_disconnect' : ''}.`,
+      // Starfront: with the roof still open, the night is transferred when it closes (the agent is woken for it)
+      o.transferHold?.()
+        ? "stop stacking if it still runs (stop_stacking) and park the scope (park). Do not transfer: the Starfront roof is still open, and the night's sessions are transferred when it closes (you are woken for it)."
+        : `stop stacking if it still runs (stop_stacking), park the scope (park), then transfer the night's sessions that are not in the library yet (list_device_sessions, transfer_session; processing queues itself)${o.autonomous?.() ? ', and once those transfers have finished (their finished events), seestar_disconnect' : ''}.`,
   };
 }

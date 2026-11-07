@@ -119,7 +119,7 @@ on('config', (c) => {
 $('#btn-auto-nights').onclick = async () => {
   const on = !state.starfront?.enabled;
   const what = on
-    ? 'Turn on autonomous Starfront nights?\n\nEvery night the roof over the scope opens, the agent is put on duty until astronomical dawn: it carries out the night plan (the Plan tab: your program, scheduled, with catalog fillers) from astronomical dark, transfers each target when it moves to the next, and at dawn transfers the last one and stows the arm. ' +
+    ? 'Turn on autonomous Starfront nights?\n\nEvery night the roof over the scope opens, the agent is put on duty until astronomical dawn: it carries out the night plan (the Plan tab: your program, scheduled, with catalog fillers) from astronomical dark, parks when the roof closes or at dawn, and transfers the whole night once the roof has closed (Starfront asks that files are not transferred while others are imaging). ' +
       'A roof still reported closed at the roof-check time (19:00 unless set otherwise) is checked with the telescope. It stays on across nights until you turn it off.'
     : 'Turn off autonomous Starfront nights?\n\nA night already on duty continues until you stop the duty.';
   if (!confirm(what)) return;

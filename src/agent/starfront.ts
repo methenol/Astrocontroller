@@ -12,8 +12,8 @@
  *   arm, look with the wide camera, report with starfront_roof), then parks and disconnects.
  * - STARFRONT_CONNECT_LEAD_MIN before the night plan's start (dark), with the roof open (or seen
  *   open): a duty starts until astronomical dawn with the night's objective (connect, then carry out
- *   the night plan). A roof that opens later starts it at once. The duty's END wake at dawn stops,
- *   parks, transfers, and disconnects once the transfers have finished (the driver's close-out).
+ *   the night plan). A roof that opens later starts it at once. The duty's END wake at dawn stops
+ *   and parks (the driver's close-out); the night is transferred when the roof closes (below).
  * - The roof closes during the night: the agent is told at once (stop stacking, park, transfer,
  *   disconnect once the transfers have finished); it reopens: told again (connect, carry on).
  * - The roof status is authoritative: a roof reported closed is never checked with the telescope.
@@ -22,8 +22,11 @@
  *
  * These wakes are orders (duty.order): steps of a mode the owner turned on, which the agent carries
  * out even off duty.
- * - When the next target starts stacking, the previous target's untransferred sessions are
- *   transferred (processing queues itself after each).
+ * - Nothing is transferred while the roof is open: Starfront asks that files are transferred once
+ *   the night is done, to leave the bandwidth to those still imaging. Every session waits on the
+ *   card until the roof closes, then they all go (processing queues itself after each). A night
+ *   whose roof is still open at dawn is transferred when it closes in the morning (transferHold
+ *   refuses the agent's transfers until then).
  *
  * A night is started once; a user's own duty is never replaced.
  */
@@ -49,9 +52,9 @@ export const NIGHT_OBJECTIVE = [
   "Autonomous Starfront night: the roof is open. Carry out tonight's night plan (the owner's program, scheduled: night_plan) until astronomical dawn, maximising integration time.",
   '1. If the scope is disconnected: seestar_connect (over ZWO Telescope Network this can take 5–10 min: end your turn with duty next_check in_s=120; you are woken when it is connected). Then seestar_status; open_arm if parked. If the roof was not verified with the telescope tonight and the building is not known, first confirm the sky with view_camera camera=wide pointed up and report it with starfront_roof.',
   "2. Before the plan starts (astronomical dark): get ready; nothing is stacked before then. Each sample's night plan line says what comes first.",
-  "3. From the plan's start: be on the plan's target (goto_target, autofocus, star_focus, start_stacking) and move to the next block's target when the plan moves on. Blocked or clouded: night_plan action=obscured target=<name> cause=obstruction|cloud and take the target it gives. The previous target is transferred automatically when the next starts stacking.",
+  "3. From the plan's start: be on the plan's target (goto_target, autofocus, star_focus, start_stacking) and move to the next block's target when the plan moves on. Blocked or clouded: night_plan action=obscured target=<name> cause=obstruction|cloud and take the target it gives. Do not transfer while the roof is open (Starfront keeps the bandwidth for those imaging): every session waits on the card until the roof closes.",
   "4. If you are told the roof closed: stop_stacking and park at once; transfer tonight's sessions not yet in the library (list_device_sessions, transfer_session); when their finished events arrive, seestar_disconnect. Then wait (duty next_check 900). When it reopens: seestar_connect, open_arm, carry on from step 3 (night_plan action=now).",
-  "5. At astronomical dawn the duty ends: stop stacking, park, transfer the night's sessions not yet transferred, and when those transfers have finished, seestar_disconnect.",
+  "5. At astronomical dawn the duty ends: stop stacking and park. If the roof has already closed, transfer the night's sessions not yet transferred and, once those transfers have finished, seestar_disconnect; if it is still open, wait: you are woken to transfer when it closes.",
 ].join('\n');
 
 /** How the agent looks at the roof: connect, raise the arm, look up with the wide camera. */
@@ -66,6 +69,13 @@ export const ROOF_CHECK_PROMPT = (time: string, duty?: string) =>
 
 export const ROOF_CLOSING_ORDER =
   "the Starfront roof is CLOSING: stop_stacking and park NOW. Then transfer tonight's sessions not yet in the library (list_device_sessions, transfer_session), and when their finished events arrive, seestar_disconnect. Wait for the roof to reopen (duty next_check in_s=900); its reopening wakes you.";
+/** The night is over and the roof has closed: the whole night goes into the library. */
+export const ROOF_CLOSED_TRANSFER_ORDER = (night: string) =>
+  `the Starfront roof has closed after the night of ${night}: park if the scope is not parked, then transfer the whole night. seestar_connect first if the scope is disconnected (5–10 min over ZWO; you are woken when it is connected), then list_device_sessions and transfer_session for every session not yet in the library (processing queues itself after each). When all their finished events have arrived (check jobs), seestar_disconnect.`;
+
+/** Once the night is over, how long a roof with no status at all is waited for before the transfer goes ahead anyway. */
+const NO_STATUS_GRACE_MS = 2 * 3600_000;
+
 export const ROOF_REOPENED_ORDER =
   'the Starfront roof has REOPENED: seestar_connect if the scope is disconnected (5–10 min over ZWO; you are woken when it is connected), open_arm, then carry on with the night plan (night_plan action=now).';
 
@@ -78,6 +88,10 @@ interface NightRecord {
   /** the roof opened before dark: the agent was asked to verify it with the telescope */
   verifyAskedAt?: number;
   checkResult?: 'open' | 'closed';
+  /** the night's duty ran and its roof has not been seen closed since its end: the transfer waits for it */
+  transferDue?: boolean;
+  /** the transfer at the roof's closing (after the night) was ordered */
+  transferAskedAt?: number;
 }
 
 interface Persisted {
@@ -109,10 +123,6 @@ export interface StarfrontDeps {
   planStart?: () => number | null;
   connectLeadMin?: number;
   site: () => ObserverLocation;
-  /** the scope's stacking, for the transfer of the previous target */
-  stacking?: { on(e: 'state', f: () => void): unknown; off(e: 'state', f: () => void): unknown; current(): { stacking: boolean; target?: string } };
-  /** transfer a target's sessions not yet in the library; returns what was queued */
-  transferTarget?: (target: string) => Promise<string>;
   fetchRoofs?: () => Promise<Roof[]>;
   now?: () => number;
   file?: string;
@@ -141,11 +151,8 @@ export class StarfrontNights extends SafeEmitter {
   private roofAt: number | null = null;
   private roofError: string | null = null;
   private wasOpen: boolean | null = null;
-  private lastStackTarget: string | undefined;
-  private wasStacking = false;
   private readonly now: () => number;
   private readonly file: string;
-  private readonly onScope = () => this.followStacking();
 
   constructor(private readonly d: StarfrontDeps) {
     super();
@@ -183,14 +190,12 @@ export class StarfrontNights extends SafeEmitter {
     if (this.timer) return;
     this.timer = setInterval(() => void this.tick(), (this.d.pollS ?? config.starfront.pollS) * 1000);
     this.timer.unref?.();
-    this.d.stacking?.on('state', this.onScope);
     void this.tick();
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.d.stacking?.off('state', this.onScope);
   }
 
   /** the owner has the mode on */
@@ -256,6 +261,15 @@ export class StarfrontNights extends SafeEmitter {
       this.d.duty.order(open ? ROOF_REOPENED_ORDER : ROOF_CLOSING_ORDER);
     }
     if (open !== null) this.wasOpen = open;
+    // during a night on duty, the roof closing has the agent park and transfer (the closing order);
+    // reopened, the sessions taken from then on wait for the next closing
+    if (inNight && night.transferDue !== undefined && open !== null && night.transferDue !== open) {
+      night.transferDue = open;
+      this.save();
+    }
+
+    // a night that is over, its roof now closed: transfer it
+    if (this.closedTransfer(key, open)) return;
 
     if (!inNight || night.engagedAt) {
       this.publish();
@@ -306,6 +320,7 @@ export class StarfrontNights extends SafeEmitter {
       this.d.duty.start({ objective: NIGHT_OBJECTIVE, until: 'dawn', by: 'user', via: "Starfront's autonomous nights" });
       night.engagedAt = this.now();
       night.engagedBy = why;
+      night.transferDue = true;
       log.info(`night ${key} started: ${why}`);
     } catch (e) {
       log.warn(`could not start the night's duty: ${errMsg(e)}`);
@@ -337,21 +352,40 @@ export class StarfrontNights extends SafeEmitter {
     return this.status();
   }
 
-  /** When the next target starts stacking, the previous target's sessions are transferred. */
-  private followStacking(): void {
-    if (!this.st.enabled || !this.d.stacking || !this.d.transferTarget) return;
-    const { stacking, target } = this.d.stacking.current();
-    if (stacking && !this.wasStacking && target) {
-      const prev = this.lastStackTarget;
-      if (prev && prev !== target) {
-        void this.d.transferTarget(prev).then(
-          (r) => this.d.duty.event(`${target} started stacking, so ${prev} is being transferred: ${r}`, true),
-          (e) => this.d.duty.event(`the transfer of ${prev} could not be started: ${errMsg(e)}`, true),
-        );
-      }
-      this.lastStackTarget = target;
+  /**
+   * A night whose duty ran, now over (`key` is a later night) with its roof still open at its end, is
+   * transferred once the roof reports closed (or, with no roof status at all, a while after the
+   * darkness ended).
+   */
+  private closedTransfer(key: string, open: boolean | null): boolean {
+    const now = this.now();
+    const due = Object.keys(this.st.nights).filter((k) => k < key && this.st.nights[k].transferDue);
+    if (!due.length || open === true) return false;
+    if (open === null) {
+      const at = this.st.nights[due[due.length - 1]].engagedAt;
+      const w = at ? sky.nightWindow(this.d.site(), new Date(at)) : null;
+      if (!w?.darkEnd || now < w.darkEnd.getTime() + NO_STATUS_GRACE_MS) return false;
     }
-    this.wasStacking = stacking;
+    for (const k of due) {
+      this.st.nights[k].transferDue = false;
+      this.st.nights[k].transferAskedAt = now;
+    }
+    const nights = due.join(', ');
+    log.info(`night ${nights} over and the roof ${open === false ? 'closed' : 'status unknown'}: asking the agent to transfer it`);
+    this.d.duty.order(ROOF_CLOSED_TRANSFER_ORDER(nights));
+    this.save();
+    return true;
+  }
+
+  /**
+   * Why the agent may not transfer now (null: it may): while a night's roof is open, Starfront's
+   * bandwidth is left to those imaging; the night is transferred when the roof closes.
+   */
+  transferHold(): string | null {
+    if (!this.st.enabled) return null;
+    if (this.roofOpen() === false) return null;
+    if (!Object.values(this.st.nights).some((n) => n.transferDue)) return null;
+    return 'Autonomous Starfront night: nothing is transferred while the roof is open (Starfront asks that files are transferred once the night is done, to leave the bandwidth to those imaging). The whole night is transferred when the roof closes; you are woken for it. Leave the sessions on the card until then.';
   }
 
   private publish(): void {
@@ -380,6 +414,8 @@ export class StarfrontNights extends SafeEmitter {
           ? `roof verified open: the scope is parked and disconnected until the duty at ${localHm(dutyAt)}`
           : night.verifyAskedAt && !night.checkResult
             ? 'roof open before dark: the agent is verifying it'
+          : Object.keys(this.st.nights).some((k) => k < key && this.st.nights[k].transferDue)
+            ? 'night over: the transfer waits for the roof to close'
         : w?.sunset && now < w.sunset.getTime()
           ? `waiting for the night (sunset ${sky.fmtTime(w.sunset, tz)})`
           : open

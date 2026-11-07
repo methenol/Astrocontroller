@@ -11,7 +11,7 @@ import type { Express } from 'express';
 import { config } from '../../config.js';
 import { DutyLoop } from '../../agent/duty.js';
 import { setDeviceLibrary } from '../../library/device-library.js';
-import { cancelActiveJobs, listDeviceSessions, transferSession } from '../../library/transfer.js';
+import { cancelActiveJobs } from '../../library/transfer.js';
 import { StarfrontNights } from '../../agent/starfront.js';
 import { mountWeb } from '../../web/server.js';
 import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
@@ -29,7 +29,7 @@ function create({ agent }: DriverDeps): DriverRuntime {
   // the night plan's lines go into every duty sample; the night needs the duty (its journal and events), so it is bound late
   let night: NightServices | null = null;
   // on autonomous nights the agent keeps being woken while the scope is released: it connects it again itself
-  const duty: DutyLoop = new DutyLoop(withNightPlan(seestarDuty(scope, { autonomous: (): boolean => !!nights?.enabled }), () => night), agent);
+  const duty: DutyLoop = new DutyLoop(withNightPlan(seestarDuty(scope, { autonomous: (): boolean => !!nights?.enabled, transferHold: (): string | null => nights?.transferHold() ?? null }), () => night), agent);
   const media = seestarMedia(scope);
   setDeviceLibrary(media.storage);
   // Starfront's autonomous nights: only with STARFRONT_REMOTE_ZWO on a scope over ZWO Telescope Network
@@ -43,17 +43,6 @@ function create({ agent }: DriverDeps): DriverRuntime {
           } catch {
             return null;
           }
-        },
-        stacking: {
-          on: (e, f) => scope.on(e, f),
-          off: (e, f) => scope.off(e, f),
-          current: () => ({ stacking: scope.isStacking(), target: scope.state.view.target }),
-        },
-        transferTarget: async (target) => {
-          const { sessions } = await listDeviceSessions(false);
-          const todo = sessions.filter((s) => s.target === target && !s.transferred);
-          for (const s of todo) await transferSession(s.folder, { includeSubframes: true, includeCalibration: true, origin: 'agent' });
-          return todo.length ? `${todo.length} session(s) queued (${todo.map((s) => s.folder).join(', ')})` : 'nothing left to transfer';
         },
       })
     : null;

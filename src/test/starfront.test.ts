@@ -28,9 +28,6 @@ function rig(o: { building?: number; dutyStatus?: 'off' | 'active' } = {}) {
   const starts: Array<{ objective: string; until?: string }> = [];
   const events: string[] = [];
   let dutyStatus = o.dutyStatus ?? 'off';
-  const listeners = new Set<() => void>();
-  let stack = { stacking: false, target: undefined as string | undefined };
-  const transfers: string[] = [];
   const nights = new StarfrontNights({
     duty: {
       start: ((s: { objective: string; until?: string }) => {
@@ -48,24 +45,14 @@ function rig(o: { building?: number; dutyStatus?: 'off' | 'active' } = {}) {
     file: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'starfront-')), 'starfront.json'),
     building: o.building ?? 0,
     checkTime: '19:00',
-    stacking: { on: (_e, f) => void listeners.add(f), off: (_e, f) => void listeners.delete(f), current: () => stack },
-    transferTarget: async (target) => {
-      transfers.push(target);
-      return 'queued';
-    },
   });
   return {
     nights,
     starts,
     events,
-    transfers,
     at: (ms: number) => (t = ms),
     roof: (open: Record<number, boolean>) => (roof = roofs(open)),
     noRoofStatus: () => (roof = []),
-    stackOn: (target: string | undefined, stacking = true) => {
-      stack = { stacking, target };
-      for (const f of listeners) f();
-    },
     endDuty: () => (dutyStatus = 'off'),
   };
 }
@@ -184,17 +171,41 @@ describe('autonomous Starfront nights', () => {
     assert.equal(r.nights.status().building, 6);
   });
 
-  test('when the next target starts stacking, the previous one is transferred', async () => {
+  test('nothing is transferred while the roof is open; the roof closing during the night allows it', async () => {
     const r = rig({ building: 6 });
     r.nights.setEnabled(true);
-    r.nights.start();
-    r.stackOn('M 31');
-    r.stackOn('M 31', false);
-    r.stackOn('M 31');
-    assert.deepEqual(r.transfers, [], 'the same target again is not a new one');
-    r.stackOn('M 31', false);
-    r.stackOn('IC 434');
-    r.nights.stop();
-    assert.deepEqual(r.transfers, ['M 31']);
+    assert.equal(r.nights.transferHold(), null, 'no night on duty yet');
+    r.roof({ 6: true });
+    r.at(DARK);
+    await r.nights.tick();
+    assert.match(String(r.nights.transferHold()), /roof is open/);
+    r.roof({});
+    await r.nights.tick();
+    assert.equal(r.nights.transferHold(), null, 'roof closed: fair game');
+    assert.ok(r.events.some((e) => /^ORDER the Starfront roof is CLOSING: stop_stacking and park NOW.*transfer/s.test(e)));
+    r.roof({ 6: true });
+    await r.nights.tick();
+    assert.match(String(r.nights.transferHold()), /roof is open/, 'reopened: held again');
+  });
+
+  test('a roof still open at dawn: the night is transferred when it closes', async () => {
+    const r = rig({ building: 6 });
+    r.nights.setEnabled(true);
+    r.roof({ 6: true });
+    r.at(DARK);
+    await r.nights.tick();
+    r.endDuty();
+    r.at(W.darkEnd!.getTime() + 10 * 60_000);
+    await r.nights.tick();
+    assert.ok(!r.events.some((e) => /roof has closed after the night/.test(e)), 'not while it is open');
+    assert.match(String(r.nights.transferHold()), /roof is open/);
+    assert.equal(r.nights.status().phase, 'night over: the transfer waits for the roof to close');
+    r.roof({});
+    await r.nights.tick();
+    await r.nights.tick();
+    const orders = r.events.filter((e) => /^ORDER the Starfront roof has closed after the night of /.test(e));
+    assert.equal(orders.length, 1, r.events.join('\n'));
+    assert.match(orders[0], new RegExp(`night of ${NIGHT_KEY}.*transfer_session.*seestar_disconnect`, 's'));
+    assert.equal(r.nights.transferHold(), null);
   });
 });

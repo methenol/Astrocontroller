@@ -68,7 +68,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
         });
       }
       // sessions on the Seestar, transfers, the library and processing
-      registerLibraryTools(tool, { device: true });
+      registerLibraryTools(tool, { device: true, transferHold: () => nights?.transferHold() ?? null });
       if (duty) registerDutyTools(tool, { duty });
       if (night) registerNightTools(tool, night);
       if (nights) {

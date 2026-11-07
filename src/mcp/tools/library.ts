@@ -10,9 +10,18 @@ import { except, localTime, text, type ToolFn } from './common.js';
 /** The tools that read the telescope's SD card (the Dwarf's album and sessions). */
 const DEVICE_TOOLS = ['list_device_sessions', 'transfer_session', 'transfer_files'];
 
-/** device: the telescope has an SD card to transfer from (the Dwarf); otherwise only the library and processing. */
-export function registerLibraryTools(all: ToolFn, o: { device: boolean } = { device: true }): void {
+/**
+ * device: the telescope has an SD card to transfer from (the Dwarf); otherwise only the library and processing.
+ * transferHold: why transfers must wait now (Starfront's roof open), or null.
+ */
+export function registerLibraryTools(all: ToolFn, o: { device: boolean; transferHold?: () => string | null } = { device: true }): void {
   const tool = o.device ? all : except(all, DEVICE_TOOLS);
+  // the owner can always transfer (the web UI is never held; in chat, owner_requested=true)
+  const holdCheck = (ownerRequested?: boolean) => {
+    const why = ownerRequested ? null : o.transferHold?.();
+    if (why) throw new Error(`${why} Only if the owner asked for this transfer themselves, call again with owner_requested=true.`);
+  };
+  const ownerRequested = z.boolean().optional().describe('the owner asked for this transfer themselves (in chat): it goes ahead even while an autonomous Starfront night holds transfers. Never set it on your own initiative.');
   tool(
     'list_device_sessions',
     'List deep-sky imaging sessions stored on the telescope (folder, target, camera, exposure, gain, start time, FITS count, size) and whether each is already in the local library.',
@@ -34,8 +43,10 @@ export function registerLibraryTools(all: ToolFn, o: { device: boolean } = { dev
       process: z.boolean().optional().describe(`queue processing after the transfer (default ${config.studio.autoProcess && !!config.studio.url})`),
       profile: z.string().optional().describe('processing profile for this session (names from processing_status); default from .env'),
       pool: z.boolean().optional().describe(`process this session pooled with every earlier library session of the same target, as one multi-night image (default ${config.studio.poolSessions})`),
+      owner_requested: ownerRequested,
     },
-    async ({ session, include_subframes, include_calibration, process, profile, pool }) => {
+    async ({ session, include_subframes, include_calibration, process, profile, pool, owner_requested }) => {
+      holdCheck(owner_requested);
       const job = await library.transferSession(session, { includeSubframes: include_subframes !== false, includeCalibration: include_calibration !== false, process, profile, pool, origin: 'agent' });
       return text({ ...job, note: 'Runs in the background; Astrocontroller tells you with an event when it ends (done, partial or failed), and again when its processing finishes. No need to poll.' });
     },
@@ -44,8 +55,11 @@ export function registerLibraryTools(all: ToolFn, o: { device: boolean } = { dev
   tool(
     'transfer_files',
     'Copy specific album files (photos, videos, stacked images) from the telescope into the library. Runs in the background; you get an event when it ends.',
-    { paths: z.array(z.string()).min(1) },
-    async ({ paths }) => text(library.transferFiles(paths, 'agent')),
+    { paths: z.array(z.string()).min(1), owner_requested: ownerRequested },
+    async ({ paths, owner_requested }) => {
+      holdCheck(owner_requested);
+      return text(library.transferFiles(paths, 'agent'));
+    },
   );
 
   tool(

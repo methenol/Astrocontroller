@@ -340,7 +340,10 @@ export function onAgentEvent(ev) {
 
 inner.addEventListener('click', (e) => {
   const img = e.target.closest('img[data-cap]');
-  if (img) lightbox(img.src, img.dataset.cap);
+  if (img) return lightbox(img.src, img.dataset.cap);
+  // an image the agent put in its own message (a research package's reference images)
+  const inText = e.target.closest('.msg.assistant .content img');
+  if (inText) lightbox(inText.src, inText.alt);
 });
 
 // ---- composer
