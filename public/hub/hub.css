@@ -1,4 +1,5 @@
-/* The profile hub: a slim switcher bar over the selected telescope's own UI, and the profile manager.
+/* The profile hub: the selected telescope's own UI in a frame (its top bar carries the switcher, which
+   the hub draws over the frame), the profile manager, and a slim bar for when no UI is up.
    Same palette as the app (public/style.css). */
 :root {
   --bg: #000;
@@ -61,30 +62,80 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background: #050608;
   border-bottom: 1px solid var(--line);
 }
-.logo { width: 22px; height: 22px; flex: none; border-radius: 50%; border: 2px solid var(--accent); box-shadow: inset 0 0 0 5px #050608, inset 0 0 0 11px var(--accent); }
-.switcher { flex: 1; min-width: 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-.switcher::-webkit-scrollbar { display: none; }
-.pill {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
-  font-size: 13px;
-  white-space: nowrap;
+.spacer { flex: 1; }
+.logo { position: relative; width: 20px; height: 20px; flex: none; border-radius: 50%; border: 2px solid var(--accent); box-shadow: inset 0 0 0 4px #050608, inset 0 0 0 10px var(--accent); }
+/* the same profile button the telescope UI shows in its bar */
+.profile-btn { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 9px; min-height: 38px; padding: 0 10px 0 8px; background: transparent; border-color: var(--line-2); border-radius: 10px; text-align: left; }
+.profile-btn[aria-expanded="true"] { border-color: var(--accent-2); background: #13213a; }
+.pdot { position: absolute; right: -5px; bottom: -5px; width: 10px; height: 10px; border-radius: 50%; background: #3a4558; border: 2px solid #050608; }
+.pdot.running { background: var(--ok); }
+.pdot.starting, .pdot.restarting, .pdot.stopping { background: var(--warn); }
+.pdot.failed { background: var(--err); }
+.profile-text { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+.profile-text b { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.profile-text small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chev { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+
+/* ---- the switcher: a popover under the button that opened it, a bottom sheet on a phone ---- */
+.switch-layer { position: fixed; inset: 0; z-index: 20; }
+.switch-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .35); }
+.switch-menu {
+  position: absolute;
+  left: var(--x, 8px);
+  top: var(--y, 52px);
+  width: min(420px, calc(100vw - 16px));
+  max-height: calc(100dvh - var(--y, 52px) - 8px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .7);
 }
-.pill[aria-current="page"] { border-color: var(--accent); background: #13213a; }
-.pill .kind { color: var(--muted); font-size: 11px; }
+.grab { display: none; }
+.switch-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 2px 6px 4px; }
+.switch-list { display: flex; flex-direction: column; gap: 2px; }
+.srow { display: flex; align-items: center; gap: 6px; padding: 2px 4px 2px 2px; border: 1px solid transparent; border-radius: 10px; }
+.srow.current { background: #13213a; border-color: var(--accent-2); }
+.spick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 8px; text-align: left; background: transparent; border: 0; }
+.spick:hover { background: transparent; }
+.spick:focus-visible { outline: none; }
+.srow:has(.spick:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.srow:not(.current):hover { background: #121a28; }
+.srow.off .stext b { color: #b7c2d3; }
+.stext { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.stext b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stext small { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sact { flex: none; min-height: 34px; padding: 0 10px; font-size: 12.5px; background: transparent; }
+.sact.warn { color: var(--warn); }
+.sopen { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); text-decoration: none; font-size: 15px; }
+.sopen:hover { color: var(--accent); border-color: var(--line-2); }
+.switch-foot { display: flex; gap: 6px; padding: 6px 2px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+.switch-foot button { min-height: 36px; font-size: 13px; }
+.switch-foot button:first-child { flex: 1; }
+@media (max-width: 699px) {
+  .switch-scrim { background: rgba(0, 0, 0, .6); }
+  .switch-menu { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 85dvh; padding: 8px 10px calc(14px + env(safe-area-inset-bottom, 0px)); border-radius: 18px 18px 0 0; border-width: 1px 0 0; }
+  .grab { display: block; align-self: center; width: 40px; height: 4px; border-radius: 2px; background: var(--line-2); margin: 2px 0 6px; }
+  .srow { border-color: var(--line); padding: 4px 6px 4px 4px; }
+  .spick { min-height: 52px; }
+  .sact, .sopen { min-height: 44px; height: 44px; }
+  .sopen { width: 44px; }
+  .switch-foot button { min-height: 48px; }
+}
+
+/* red night-vision cast, following the telescope UI's Night switch */
+.night-tint { position: fixed; inset: 0; z-index: 200; background: #b30000; mix-blend-mode: multiply; opacity: 0; pointer-events: none; transition: opacity .25s; }
+body.night .night-tint { opacity: 1; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a4558; flex: none; }
 .dot.running { background: var(--ok); }
 .dot.starting, .dot.restarting, .dot.stopping { background: var(--warn); }
 .dot.failed { background: var(--err); }
 .manage { flex: none; min-height: 32px; font-size: 13px; }
 .manage[aria-pressed="true"] { border-color: var(--accent); }
-.iconlink { flex: none; color: var(--muted); text-decoration: none; font-size: 18px; padding: 0 4px; }
-.iconlink:hover { color: var(--accent); }
 
 /* ---- stage ---- */
 .stage { flex: 1; min-height: 0; position: relative; }

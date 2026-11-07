@@ -79,21 +79,129 @@ function confirmBox({ title, text, ok = 'OK', danger = false, check }) {
 
 // ---- switcher and frame ------------------------------------------------------------------------------
 
-function renderSwitcher() {
-  const nav = $('#switcher');
-  nav.replaceChildren(
-    ...state.profiles.map((p) =>
-      el(
-        'button',
-        { type: 'button', class: 'pill', 'aria-current': !state.managing && state.selected === p.id ? 'page' : null, title: `${p.name}: ${p.active ? phaseText[p.status.phase] : 'deactivated'}`, onclick: () => select(p.id) },
-        el('span', { class: `dot ${p.active ? p.status.phase : ''}` }),
-        p.name,
-        el('span', { class: 'kind' }, p.driver === 'dwarf' ? 'Dwarf' : 'Seestar'),
-      ),
-    ),
-  );
-  $('#btn-manage').setAttribute('aria-pressed', String(state.managing));
+const phaseOf = (p) => (p.active ? p.status.phase : 'off');
+/** "Dwarf · running · 2 more profiles": the line under the profile's name on its button. */
+function subline(p) {
+  const others = state.profiles.length - 1;
+  return `${kindOf(p)} · ${p.active ? phaseText[p.status.phase] : 'deactivated'}${others > 0 ? ` · ${others} more` : ''}`;
 }
+
+/** The hub's own bar (manager, idle profile) and the profile shown in the telescope UI's bar. */
+function renderSwitcher() {
+  const p = byId(state.selected);
+  $('#hub-profile-name').textContent = p ? p.name : 'Telescopes';
+  $('#hub-profile-sub').textContent = p ? subline(p) : `${state.profiles.length} profiles`;
+  $('#hub-profile-dot').className = `pdot ${p ? phaseOf(p) : ''}`;
+  $('#btn-manage').setAttribute('aria-pressed', String(state.managing));
+  postProfile();
+  if (!$('#switch-layer').hidden) renderSwitchList();
+}
+
+// ---- the telescope UI in the frame asks for the switcher; only same-origin messages from it count
+const toFrame = (msg) => {
+  const w = $('#frame').contentWindow;
+  if (w && frameFor) w.postMessage({ source: 'astro-hub', ...msg }, location.origin);
+};
+let postedProfile = '';
+function postProfile(force = false) {
+  const p = byId(frameFor);
+  if (!p) return;
+  const msg = { type: 'profile', id: p.id, name: p.name, sub: subline(p), phase: phaseOf(p) };
+  const key = JSON.stringify(msg);
+  if (!force && key === postedProfile) return;
+  postedProfile = key;
+  toFrame(msg);
+}
+window.addEventListener('message', (e) => {
+  if (e.origin !== location.origin || e.source !== $('#frame').contentWindow || e.data?.source !== 'astro-app') return;
+  document.body.classList.toggle('night', !!e.data.night);
+  if (e.data.type === 'hello') postProfile(true);
+  else if (e.data.type === 'open-switcher') {
+    const f = $('#frame').getBoundingClientRect();
+    const r = e.data.rect ?? {};
+    openSwitcher({ left: f.left + (r.left ?? 0), bottom: f.top + (r.bottom ?? 0) }, true);
+  } else if (e.data.type === 'manage') openManager();
+});
+
+// ---- the switcher -----------------------------------------------------------------------------------
+let switcherFromFrame = false;
+let listKey = '';
+function renderSwitchList(force = false) {
+  const key = JSON.stringify([state.selected, state.profiles.map((p) => [p.id, p.name, p.active, p.status.phase, p.driver])]);
+  if (!force && key === listKey) return; // a poll that changed nothing must not steal the focus
+  listKey = key;
+  const running = state.profiles.filter((p) => p.active && p.status.phase === 'running').length;
+  const off = state.profiles.filter((p) => !p.active).length;
+  $('#switch-count').textContent = `${running} running${off ? ` · ${off} off` : ''}`;
+  const list = $('#switch-list');
+  if (!state.profiles.length) {
+    list.replaceChildren(el('p', { class: 'muted small' }, 'No profiles yet.'));
+    return;
+  }
+  list.replaceChildren(
+    ...state.profiles.map((p) => {
+      const current = p.id === state.selected && !state.managing;
+      return el(
+        'div',
+        { class: `srow${current ? ' current' : ''}${p.active ? '' : ' off'}` },
+        el(
+          'button',
+          { type: 'button', class: 'spick', 'aria-current': current ? 'true' : null, onclick: () => (closeSwitcher(false), select(p.id)) },
+          el('span', { class: `dot ${p.active ? p.status.phase : ''}` }),
+          el('span', { class: 'stext' }, el('b', {}, p.name), el('small', {}, `${kindOf(p)} · ${p.active ? phaseText[p.status.phase] : 'deactivated'}`)),
+        ),
+        p.active
+          ? el('button', { type: 'button', class: 'sact warn', title: 'Stop this profile: no connection, no agent, no duty', onclick: () => (closeSwitcher(false), deactivate(p)) }, 'Deactivate')
+          : el('button', { type: 'button', class: 'sact', onclick: () => (closeSwitcher(false), activate(p)) }, 'Activate'),
+        p.active ? el('a', { class: 'sopen', href: `p/${encodeURIComponent(p.id)}/`, target: '_blank', rel: 'noopener', title: 'Open in its own browser tab', 'aria-label': `Open ${p.name} in a new browser tab` }, '↗') : null,
+      );
+    }),
+  );
+}
+
+/** Opens the list under `anchor` (viewport px); on a phone it is a bottom sheet whatever the anchor. */
+function openSwitcher(anchor, fromFrame) {
+  switcherFromFrame = fromFrame;
+  renderSwitchList(true);
+  const menu = $('#switch-menu');
+  const width = Math.min(420, window.innerWidth - 16);
+  menu.style.setProperty('--x', `${Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8))}px`);
+  menu.style.setProperty('--y', `${anchor.bottom + 6}px`);
+  $('#switch-layer').hidden = false;
+  $('#hub-profile').setAttribute('aria-expanded', 'true');
+  (menu.querySelector('.spick[aria-current]') ?? menu.querySelector('button'))?.focus();
+}
+function closeSwitcher(refocus = true) {
+  if ($('#switch-layer').hidden) return;
+  $('#switch-layer').hidden = true;
+  $('#hub-profile').setAttribute('aria-expanded', 'false');
+  if (switcherFromFrame) toFrame({ type: 'switcher-closed', refocus });
+  else if (refocus && !$('#hubbar').hidden) $('#hub-profile').focus();
+}
+$('#switch-layer').addEventListener('click', (e) => {
+  if (e.target.closest('[data-close]')) closeSwitcher();
+});
+$('#switch-layer').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSwitcher();
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const picks = [...document.querySelectorAll('#switch-list .spick')];
+    const i = picks.indexOf(document.activeElement);
+    const next = picks[(i + (e.key === 'ArrowDown' ? 1 : -1) + picks.length) % picks.length];
+    if (next) {
+      e.preventDefault();
+      next.focus();
+    }
+  }
+});
+$('#hub-profile').addEventListener('click', () => {
+  if (!$('#switch-layer').hidden) return closeSwitcher();
+  const r = $('#hub-profile').getBoundingClientRect();
+  openSwitcher({ left: r.left, bottom: r.bottom }, false);
+});
+$('#switch-manage').addEventListener('click', () => (closeSwitcher(false), openManager()));
+$('#switch-new').addEventListener('click', () => (closeSwitcher(false), openEditor(null)));
 
 let frameFor = null;
 function renderStage() {
@@ -101,9 +209,8 @@ function renderStage() {
   const idle = $('#idle');
   $('#manager').hidden = !state.managing;
   const p = byId(state.selected);
-  const openTab = $('#open-tab');
-  openTab.hidden = state.managing || !p?.active;
-  if (p) openTab.href = `p/${encodeURIComponent(p.id)}/`;
+  // the telescope UI has the switcher in its own bar; the hub's bar is for when none is up
+  $('#hubbar').hidden = !state.managing && !!p?.active && p.status.phase !== 'failed';
   document.title = p && !state.managing ? `${p.name} · Astrocontroller` : 'Astrocontroller';
 
   if (state.managing || !p) {

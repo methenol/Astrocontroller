@@ -116,9 +116,52 @@ export function grow(el) {
   el.style.height = `${Math.min(el.scrollHeight + 2, Math.round(window.innerHeight * COMPOSER_MAX_VH))}px`;
 }
 
+// ---- the control groups: accordions on a phone; at desk widths a picker that keeps one open
+const groups = $$('.controls > .group');
+const picker = $('#ctl-picker');
+const pickButtons = groups.map((g) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.setAttribute('role', 'tab');
+  b.setAttribute('aria-controls', g.id);
+  b.textContent = g.querySelector('summary').firstChild.textContent.trim();
+  b.onclick = () => pickGroup(g.id);
+  picker?.append(b);
+  return b;
+});
+function syncPicker() {
+  groups.forEach((g, i) => {
+    pickButtons[i].hidden = g.hidden;
+    pickButtons[i].setAttribute('aria-selected', String(g.open && !g.hidden));
+  });
+}
+/** Opens one group (the remembered one, or the first the telescope has) and closes the rest. */
+function pickGroup(id) {
+  const target = groups.find((g) => g.id === id && !g.hidden) ?? groups.find((g) => !g.hidden);
+  if (!target) return;
+  store.set('ctl-group', target.id);
+  for (const g of groups) if (g.open !== (g === target)) g.open = g === target;
+  syncPicker();
+}
+for (const g of groups) {
+  g.addEventListener('toggle', () => {
+    if (isWide() && g.open) {
+      for (const o of groups) if (o !== g && o.open) o.open = false;
+      store.set('ctl-group', g.id);
+    }
+    syncPicker();
+  });
+}
+// a group the telescope lacks is hidden by capabilities.js: never leave the picker on it
+const groupWatch = new MutationObserver(() => {
+  if (isWide() && !groups.some((g) => g.open && !g.hidden)) pickGroup(store.get('ctl-group'));
+  syncPicker();
+});
+for (const g of groups) groupWatch.observe(g, { attributes: true, attributeFilter: ['hidden'] });
+
 /** Opens the remembered screen (or a sensible one for the width). */
 export function layoutBoot() {
-  if (isWide()) for (const g of $$('.group')) g.open = true;
+  if (isWide()) pickGroup(store.get('ctl-group'));
   const saved = store.get('screen');
   const remembered = saved && saved !== 'view' && document.getElementById(`panel-${saved}`) ? saved : null;
   if (isWide()) {
@@ -130,7 +173,7 @@ export function layoutBoot() {
 function relayout() {
   const name = screenName();
   if (isWide()) {
-    for (const g of $$('.group')) g.open = true;
+    pickGroup(store.get('ctl-group'));
     if (name === 'view') showScreen(store.get('screen') && document.getElementById(`panel-${store.get('screen')}`) ? store.get('screen') : 'chat');
     else showScreen(name);
   } else showScreen(name);

@@ -12,10 +12,14 @@
   <script type="module" src="hub/hub.js"></script>
 </head>
 <body>
-  <header class="hubbar">
-    <span class="logo" aria-hidden="true"></span>
-    <nav class="switcher" id="switcher" aria-label="Telescopes"></nav>
-    <a class="iconlink" id="open-tab" href="#" target="_blank" rel="noopener" title="Open this telescope in its own browser tab" hidden>↗</a>
+  <!-- shown only while no telescope UI is up (the manager, an idle profile): the UI carries its own switcher -->
+  <header class="hubbar" id="hubbar">
+    <button type="button" class="profile-btn" id="hub-profile" aria-haspopup="dialog" aria-expanded="false">
+      <span class="logo" aria-hidden="true"><i class="pdot" id="hub-profile-dot"></i></span>
+      <span class="profile-text"><b id="hub-profile-name">Telescopes</b><small id="hub-profile-sub"></small></span>
+      <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <span class="spacer"></span>
     <button type="button" class="manage" id="btn-manage" aria-pressed="false">Profiles</button>
   </header>
 
@@ -128,6 +132,21 @@
     </form>
   </dialog>
 
+  <!-- the telescope switcher: a popover under its button on a desk, a bottom sheet on a phone -->
+  <div class="switch-layer" id="switch-layer" hidden>
+    <div class="switch-scrim" data-close></div>
+    <div class="switch-menu" id="switch-menu" role="dialog" aria-modal="true" aria-label="Switch telescope">
+      <span class="grab" aria-hidden="true"></span>
+      <div class="switch-head"><b>Telescopes</b><span class="muted small" id="switch-count"></span></div>
+      <div class="switch-list" id="switch-list"></div>
+      <div class="switch-foot">
+        <button type="button" id="switch-manage">Manage profiles…</button>
+        <button type="button" id="switch-new">New profile</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="night-tint" aria-hidden="true"></div>
   <div class="toast" id="toast" role="status" hidden></div>
 </body>
 </html>

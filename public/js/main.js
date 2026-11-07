@@ -18,6 +18,7 @@ import './skills.js';
 import './logs.js';
 // after every screen: its 'telescope' listener runs last and keeps unsupported controls off
 import './capabilities.js';
+import './hub-link.js';
 import { connect } from './socket.js';
 
 startVideo();

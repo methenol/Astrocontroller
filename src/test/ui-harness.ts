@@ -145,6 +145,7 @@ export async function bootUi(opts: { wide?: boolean; storage?: Record<string, st
     CSS: w.CSS,
     FileReader: w.FileReader,
     ResizeObserver: (w as unknown as { ResizeObserver: unknown }).ResizeObserver,
+    MutationObserver: w.MutationObserver,
     WebSocket: FakeSocket,
     fetch: fakeFetch,
     confirm: () => confirmAnswer,

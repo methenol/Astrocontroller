@@ -61,6 +61,29 @@ The planning side is where the maths lives. The goal is to turn a list of things
 - **Run several telescopes** from one container, each with its own agent, plan, site, library and skills.
 - **Use it from a phone at the scope**: the UI is mobile-first, installable, keyboard-safe, and has a night mode.
 
+### A look around
+
+The live view and the controls stay on the left; the sections sit on the right, picked from the rail along the right edge.
+
+![The Agent tab: the agent's report at the end of a duty, beside the live view and the aiming controls](docs/screenshots/desktop-agent.png)
+
+| | |
+|---|---|
+| ![The Plan tab: tonight's solved schedule as blocks over each target's altitude, and the program](docs/screenshots/desktop-plan.png) | ![The Weather tab: the Rain Guard and tonight's hour-by-hour safety report](docs/screenshots/desktop-weather.png) |
+| **Plan**: the solved night, each block over its target's altitude, the sky forecast and the Moon, and your program below. | **Weather**: the Rain Guard and an hour-by-hour report on whether the scope can stay out. |
+| ![The Database tab: the merged catalog searched and filtered by what is up tonight](docs/screenshots/desktop-database.png) | ![The telescope switcher open over the app: each profile with its status and Activate or Deactivate](docs/screenshots/desktop-switcher.png) |
+| **Database**: about 75,000 objects with tonight's visibility, filterable by type, catalog, constellation and time. | **Profiles**: switch telescopes from the top bar, activate or deactivate one, or open the profile manager. |
+
+On a phone the same page becomes one screen at a time, with a capture bar and a bottom tab bar in reach of your thumb; the telescope switcher opens as a sheet.
+
+<p>
+  <img src="docs/screenshots/phone-view.png" alt="The phone layout: the live views, the aiming pad, the capture bar and the bottom tabs" width="260">
+  &nbsp;
+  <img src="docs/screenshots/phone-switcher.png" alt="The telescope switcher on a phone, as a bottom sheet" width="260">
+</p>
+
+<sub>Taken with no telescope connected, so the live views are empty.</sub>
+
 ## What it currently supports
 
 | | Status |
@@ -184,7 +207,7 @@ The agent's generated config (`models.yml`, `config.yml`, `mcp.json`) is rewritt
 
 ### Several telescopes: profiles
 
-The page at `http://localhost:8080` is a **profile hub**. Each profile is one telescope (type, IP or ZWO account, site, extra variables) with its own process, agent, plan, journal, skills, data folder (`data/profiles/<id>/`) and library folder (`library/<id>/`). Profiles can be activated and deactivated; a deactivated profile has no process at all and a deactivated ZWO profile gives the scope back to the network. Your first start turns the current `.env` into one active profile that keeps its existing data. Each telescope also opens on its own at `/p/<id>/` for a phone at the scope.
+The page at `http://localhost:8080` is a **profile hub**. Each profile is one telescope (type, IP or ZWO account, site, extra variables) with its own process, agent, plan, journal, skills, data folder (`data/profiles/<id>/`) and library folder (`library/<id>/`). Switch between them, and activate or deactivate one, from the telescope's name at the left of the top bar; **Profiles** next to it opens the manager. A deactivated profile has no process at all and a deactivated ZWO profile gives the scope back to the network. Your first start turns the current `.env` into one active profile that keeps its existing data. Each telescope also opens on its own at `/p/<id>/` for a phone at the scope.
 
 ### ZWO Telescope Network and the Seestar key
 
