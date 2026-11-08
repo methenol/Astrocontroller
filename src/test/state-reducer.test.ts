@@ -1,11 +1,32 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyNotification, initialState, type ParamCache } from '../drivers/dwarf/controller/state.js';
+import { applyDeviceStateInfo, applyNotification, initialState, type ParamCache } from '../drivers/dwarf/controller/state.js';
 import type { Notification } from '../drivers/dwarf/link.js';
 
 const RUNNING = 1;
 const IDLE = 0;
 const note = (name: string, data: Record<string, unknown>, ts = Date.now()) => ({ name, data, ts }) as unknown as Notification;
+
+describe('wide camera stream type', () => {
+  test('wide reports are kept, a report without a type is 0, and tele reports are ignored', () => {
+    const st = initialState();
+    const params: ParamCache = new Map();
+    applyNotification(st, params, note('streamType', { streamType: 2 }));
+    assert.equal(st.wideStreamType, undefined);
+    applyNotification(st, params, note('streamType', { streamType: 2, camId: 1 }));
+    assert.equal(st.wideStreamType, 2);
+    applyNotification(st, params, note('streamType', { camId: 1 }));
+    assert.equal(st.wideStreamType, 0);
+  });
+
+  test('a device state read carries it too', () => {
+    const st = initialState();
+    applyDeviceStateInfo(st, { wideCameraStateInfo: { streamType: { streamType: 2, camId: 1 } } });
+    assert.equal(st.wideStreamType, 2);
+    applyDeviceStateInfo(st, { teleCameraStateInfo: {} });
+    assert.equal(st.wideStreamType, 2, 'a read without the wide entry changes nothing');
+  });
+});
 
 describe('dark capture state from the firmware', () => {
   test('a capture the controller did not start follows the firmware and ends with it', () => {

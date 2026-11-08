@@ -34,6 +34,8 @@ const ENTER_CAMERA_MS = 15_000;
 /** the live view is woken at most this often (forced: after a connect or a recovery) */
 const LIVE_VIEW_WAKE_MS = 60_000;
 const LIVE_VIEW_WAKE_FORCED_MS = 5000;
+/** The wide camera's stream type while it serves RTSP live video. */
+const WIDE_STREAM_RTSP = 1;
 const LIVE_VIEW_ENTER_MS = 5000;
 const PREVIEW_QUALITY_MS = 3000;
 /** calibration leaves the wide exposure behind a moment after it reports done */
@@ -148,19 +150,26 @@ export class CameraControl {
    * video. Never while a stack or a dark capture owns the camera or a stack is being prepared on it, never under another
    * caller's operation: the ownership is checked again right before the command is sent, with no
    * wait in between, so a stack start that lands during the lookups is never undercut.
-   * Returns the manual exposure it replaced, or null if it changed nothing.
+   * The wide camera also gets this when the firmware says it is off live video although the
+   * exposure on record could not cause that: polar alignment sets a long wide exposure by itself
+   * and never reports it, and the video stays off until an exposure command arrives.
+   * Returns the manual exposure it replaced, 'unreported' for an exposure the telescope never
+   * reported, or null if it changed nothing.
    */
-  async autoExposureForLiveView(cam: CameraName): Promise<number | null> {
+  async autoExposureForLiveView(cam: CameraName): Promise<number | 'unreported' | null> {
     const { guards } = this.core;
     const free = () => !guards.stackOwnsCamera(cam) && !guards.darkCaptureOwns(cam) && !guards.foreignOperation();
     if (!free()) return null;
     const exp = await this.exposureSeconds(cam);
-    if (exp === null || exp < 1) return null;
+    const known = exp !== null && exp >= 1;
+    const streamType = this.state.wideStreamType;
+    const unreported = !known && cam === 'wide' && streamType !== undefined && streamType !== WIDE_STREAM_RTSP;
+    if (!known && !unreported) return null;
     const def = (await this.schema()).cameras[camId(cam)]?.exp;
     if (!def) return null;
     if (!free()) return null;
     await request(this.core, Cmd.PARAM_SET_EXPOSURE, { paramId: packId(def), mode: 0, value: this.liveValue(def) ?? 0 });
-    return exp;
+    return unreported ? 'unreported' : exp;
   }
 
   /**
@@ -171,7 +180,7 @@ export class CameraControl {
     await sleep(CALIBRATION_SETTLE_MS);
     try {
       const exp = await this.autoExposureForLiveView('wide');
-      if (exp !== null) log.info(`wide exposure was left at ${exp}s by the telescope's calibration; set back to auto for live view`);
+      if (exp !== null) log.info(`wide exposure was left at ${exp === 'unreported' ? 'a value the telescope did not report' : `${exp}s`} by the telescope's routine; set back to auto for live view`);
     } catch (e) {
       log.warn(`could not restore wide exposure: ${e instanceof Error ? e.message : String(e)}`);
     }

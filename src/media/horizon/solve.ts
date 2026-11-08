@@ -40,6 +40,17 @@ const BAND_MIN_CELLS = 40;
 const SKY_MODEL_RANGE = [0.5, 2.5] as const;
 /** Every SAMPLE_STEP-th cell is sampled for the model. */
 const SAMPLE_STEP = 2;
+/** A frame's own sky: bands of altitude, and the cells and share of a band that must be readable. */
+const FRAME_BAND_DEG = 3;
+const FRAME_BAND_MIN_CELLS = 20;
+const FRAME_BAND_MIN_SHARE = 0.2;
+/** Not a silhouette: at least this much of the sky by altitude. */
+const FRAME_NOT_DARK = 0.5;
+/** Smooth: within this much of the texture of the frame's highest readable band. */
+const FRAME_TEXTURE_MARGIN = 1.25;
+/** The most a band may differ from the band above it: brightness (a ratio) and chromaticity. */
+const FRAME_LEVEL_STEP = 1.35;
+const FRAME_COLOUR_STEP = 0.025;
 
 /** Each cell's altitude for a shot (the evidence grid scaled from the frame). */
 function cellAltitudes(s: SurveyShot): Float32Array {
@@ -144,13 +155,96 @@ export function clearHotPixels(shots: SurveyShot[]): number {
   return cleared;
 }
 
+/** One frame's own sky, by altitude. */
+export interface FrameSky {
+  at(altDeg: number): number;
+  colourAt(altDeg: number): { r: number; b: number };
+  /** the sky's texture and level in this frame, at the highest band it could read */
+  texture: number;
+  level: number;
+}
+
+const medianOf = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
+const limited = (v: number, from: number, step: number) => Math.max(from - step, Math.min(from + step, v));
+
+/**
+ * The sky as this frame saw it, band by band of altitude. Frames differ from each other far more
+ * than one sky by altitude allows, and the sky changes inside a frame too: twilight and town glow
+ * brighten toward the horizon, and each still has its own white balance and noise (2026-11-07: whole
+ * frames read as obstruction up to 80°; 2026-11-08: a single level per frame flagged the bright low
+ * sky). Bands are read from the top of the frame down, on the smooth cells that are not silhouettes.
+ * Each band may differ from the one above only by a limited step, which a sky gradient stays within
+ * and the edge of a lit wall does not, so a wall cannot become its own reference.
+ * Null when no band can be read: the frame is then judged against the sky by altitude.
+ */
+export function frameSky(s: SurveyShot, alts: Float32Array, model: SkyModel): FrameSky | null {
+  const { gw, gh, dark, texture, cr, cb } = s.stats;
+  const perBand = new Map<number, number[]>();
+  for (let i = 0; i < gw * gh; i++) {
+    if (alts[i] < 0) continue;
+    const band = Math.floor(alts[i] / FRAME_BAND_DEG);
+    let list = perBand.get(band);
+    if (!list) perBand.set(band, (list = []));
+    list.push(i);
+  }
+  const bands: Array<{ alt: number; level: number; r: number; b: number }> = [];
+  let limit = 0;
+  let tex = 0;
+  let last: { level: number; r: number; b: number } | null = null;
+  for (const key of [...perBand.keys()].sort((x, y) => y - x)) {
+    const cells = perBand.get(key)!;
+    const alt = (key + 0.5) * FRAME_BAND_DEG;
+    const enough = (k: number) => k >= FRAME_BAND_MIN_CELLS && k >= cells.length * FRAME_BAND_MIN_SHARE;
+    const bright = cells.filter((i) => dark[i] >= FRAME_NOT_DARK * Math.max(model.at(alts[i]), 2 / 255));
+    if (!last) {
+      if (!enough(bright.length)) continue;
+      tex = medianOf(bright.map((i) => texture[i]));
+      limit = tex * FRAME_TEXTURE_MARGIN;
+    }
+    const clean = bright.filter((i) => texture[i] <= limit);
+    if (!enough(clean.length)) {
+      if (last) bands.push({ alt, ...last });
+      continue;
+    }
+    const level = medianOf(clean.map((i) => dark[i]));
+    const r = medianOf(clean.map((i) => cr[i]));
+    const b = medianOf(clean.map((i) => cb[i]));
+    const here: { level: number; r: number; b: number } = last
+      ? { level: Math.max(last.level / FRAME_LEVEL_STEP, Math.min(last.level * FRAME_LEVEL_STEP, level)), r: limited(r, last.r, FRAME_COLOUR_STEP), b: limited(b, last.b, FRAME_COLOUR_STEP) }
+      : { level, r, b };
+    last = here;
+    bands.push({ alt, ...here });
+  }
+  if (!bands.length) return null;
+  bands.reverse();
+  const interp = (alt: number, key: 'level' | 'r' | 'b'): number => {
+    if (alt <= bands[0].alt) return bands[0][key];
+    for (let k = 1; k < bands.length; k++) {
+      if (alt <= bands[k].alt) {
+        const t = (alt - bands[k - 1].alt) / (bands[k].alt - bands[k - 1].alt);
+        return bands[k - 1][key] + t * (bands[k][key] - bands[k - 1][key]);
+      }
+    }
+    return bands[bands.length - 1][key];
+  };
+  return {
+    at: (alt) => interp(alt, 'level'),
+    colourAt: (alt) => ({ r: interp(alt, 'r'), b: interp(alt, 'b') }),
+    texture: Math.max(0.5 / 255, tex),
+    level: bands[bands.length - 1].level,
+  };
+}
+
 export function solveShots(shots: SurveyShot[], o: { skyLevel: number; skyTexture?: number; marginDeg: number }): Solved {
   clearHotPixels(shots);
   const alts = shots.map(cellAltitudes);
   const sky = skyByAltitude(shots, o.skyLevel, alts);
   const evidence = shots.map((s, k) => {
     const gw = s.stats.gw;
-    return evidenceOf(s.stats, (gx, gy) => sky.at(alts[k][gy * gw + gx]), { skyTexture: o.skyTexture, skyLevel: o.skyLevel, skyColour: (gx, gy) => sky.colourAt(alts[k][gy * gw + gx]) });
+    const own = frameSky(s, alts[k], sky);
+    const altAt = (gx: number, gy: number) => alts[k][gy * gw + gx];
+    if (!own) return evidenceOf(s.stats, (gx, gy) => sky.at(altAt(gx, gy)), { skyTexture: o.skyTexture, skyLevel: o.skyLevel, skyColour: (gx, gy) => sky.colourAt(altAt(gx, gy)) });
+    return evidenceOf(s.stats, (gx, gy) => own.at(altAt(gx, gy)), { skyTexture: own.texture, skyLevel: own.level, skyColour: (gx, gy) => own.colourAt(altAt(gx, gy)) });
   });
   const frames: PanoFrame[] = shots.map((s, k) => ({ evidence: evidence[k], cam: s.cam, basis: s.basis }));
   const sl = skyline(buildPanorama(frames));

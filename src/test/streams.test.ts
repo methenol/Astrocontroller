@@ -118,6 +118,59 @@ function teleInDso(teleStack = false) {
   return { tele, restore: () => (process.env.PATH = oldPath) };
 }
 
+describe('wide camera source', () => {
+  /** A wide camera whose reader exits at once, as ffmpeg does on a refused session. */
+  function refusedWide(quiet: () => boolean) {
+    const bin = mkdtempSync(path.join(tmpdir(), 'ffmpeg-stub-'));
+    writeFileSync(path.join(bin, 'ffmpeg'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath}`;
+    const heals = { count: 0 };
+    const dwarf = {
+      state: { connected: true, released: false, shootingMode: { id: 2, name: 'DSO' }, stacking: { tele: { state: 'idle' }, wide: { state: 'idle' } } },
+      lastMotionAt: 0,
+      quietPeriod: quiet,
+      stackOwnsCamera: () => false,
+      ensureLiveView: async () => {},
+      autoExposureForLiveView: async () => {
+        heals.count++;
+        return 'unreported';
+      },
+    } as unknown as Dwarf;
+    return { wide: new CameraSource('wide', 1, dwarf), heals, restore: () => (process.env.PATH = oldPath) };
+  }
+  const exited = () => new Promise((r) => setTimeout(r, 300));
+
+  test('a refused session triggers the exposure heal, once per episode', async () => {
+    const { wide, heals, restore } = refusedWide(() => false);
+    try {
+      const off = wide.subscribe(() => {});
+      await exited();
+      assert.equal(heals.count, 1);
+      wide.retryRtsp();
+      await exited();
+      assert.equal(heals.count, 1, 'the heal does not repeat within an episode');
+      off();
+    } finally {
+      wide.forceStop();
+      restore();
+    }
+  });
+
+  test('no heal while the telescope is running an operation', async () => {
+    const { wide, heals, restore } = refusedWide(() => true);
+    try {
+      const off = wide.subscribe(() => {});
+      await exited();
+      assert.equal(heals.count, 0);
+      off();
+    } finally {
+      wide.forceStop();
+      restore();
+    }
+  });
+});
+
 describe('tele camera source', () => {
   test('DSO mode with no stack opens the tele RTSP (it has video there), not the silent stack preview', () => {
     const { tele, restore } = teleInDso();

@@ -7,7 +7,7 @@ import { angleDeg, cameraGeom, fitMount, fromAltAz, pixelToDir, poseBasis, poseF
 import { buildPanorama, frameEvidence, profileOf, skyline, skyLevelOf, type PanoFrame } from '../media/horizon/mask.js';
 import { cappedAzimuths } from '../media/horizon/survey.js';
 import { frameBasis, mountPole, WIDE_HFOV_DEG } from '../drivers/seestar/survey.js';
-import { FrameKeeper, loadSurvey, resolveSurvey } from '../media/horizon/solve.js';
+import { FrameKeeper, frameSky, loadSurvey, resolveSurvey, type SkyModel, type SurveyShot } from '../media/horizon/solve.js';
 import type { FloatImage } from '../media/images.js';
 
 const RANGES = { rotation: [0, 315] as const, pitch: [0, 195] as const };
@@ -295,5 +295,56 @@ describe('horizon masks', () => {
     const hoursBefore = new Map(plain.targets.map((t) => [t.name, t.hoursAboveMin]));
     for (const t of south.targets) if (hoursBefore.has(t.name)) assert.ok(t.hoursAboveMin <= hoursBefore.get(t.name)!);
     assert.ok(south.targets.every((t) => typeof t.obstructedNow === 'boolean'));
+  });
+});
+
+describe('a frame judged against its own sky', () => {
+  const GW = 30;
+  const GH = 30;
+  /** a shot whose top third is at altitude 20°, the rest lower; cells as given */
+  function shot(cell: (top: boolean) => { dark: number; texture: number }, stars = false) {
+    const n = GW * GH;
+    const stats = { gw: GW, gh: GH, dark: new Float32Array(n), darkLow: new Float32Array(n), chroma: new Float32Array(n), texture: new Float32Array(n), stars: new Uint8Array(n), cr: new Float32Array(n).fill(0.3), cb: new Float32Array(n).fill(0.25) };
+    const alts = new Float32Array(n);
+    for (let gy = 0; gy < GH; gy++) {
+      for (let gx = 0; gx < GW; gx++) {
+        const i = gy * GW + gx;
+        const top = gy < GH / 3;
+        const c = cell(top);
+        stats.dark[i] = c.dark;
+        stats.texture[i] = c.texture;
+        alts[i] = top ? 20 + (GH / 3 - gy) : 10;
+        if (stars && gx % 3 === 0 && gy % 3 === 0) stats.stars[i] = 1;
+      }
+    }
+    return { s: { stats, thumb: { width: 1, height: 1, rgb: new Float32Array(3) }, cam: { width: GW, height: GH, f: 30, cx: 15, cy: 15 }, basis: { b: [1, 0, 0], u: [0, 1, 0], r: [0, 0, 1] } } as unknown as SurveyShot, alts };
+  }
+  const model = { at: () => 0.1, colourAt: () => null, bands: [] } as SkyModel;
+
+  test('a frame brighter than the model takes its level from its own sky', () => {
+    const { s, alts } = shot(() => ({ dark: 0.3, texture: 0.01 }));
+    const own = frameSky(s, alts, model);
+    assert.ok(own);
+    assert.ok(Math.abs(own.at(25) - 0.3) < 0.01);
+    assert.ok(Math.abs(own.texture - 0.01) < 1e-6);
+  });
+
+  test('a sky that brightens toward the horizon is followed', () => {
+    const { s, alts } = shot((top) => ({ dark: top ? 0.3 : 0.36, texture: 0.01 }));
+    const own = frameSky(s, alts, model);
+    assert.ok(own);
+    assert.ok(Math.abs(own.at(10) - 0.36) < 0.01);
+  });
+
+  test('a lit wall below the sky cannot become its own reference', () => {
+    const { s, alts } = shot((top) => ({ dark: top ? 0.2 : 0.8, texture: 0.01 }));
+    const own = frameSky(s, alts, model);
+    assert.ok(own);
+    assert.ok(own.at(10) <= 0.2 * 1.35 + 1e-6, `reference ${own.at(10)} followed the wall`);
+  });
+
+  test('a frame that is all silhouette has no reference of its own', () => {
+    const { s, alts } = shot(() => ({ dark: 0.01, texture: 0.01 }));
+    assert.equal(frameSky(s, alts, model), null);
   });
 });

@@ -8,7 +8,10 @@
  *    calibration, motion or a mode change. A session with no frame for 8 s (12 s for a new one) is
  *    closed and reopened, with backoff 1 → 15 s; one frame resets everything. Expected pauses (the
  *    mount moving, GoTo / calibration / stacking, a still being taken) are waited out first.
- *  - A long manual exposure (≥ 1 s) stops a camera's video: set back to auto once per episode.
+ *  - A long manual exposure (≥ 1 s) stops a camera's video: set back to auto once per episode, and
+ *    again after any operation, which may have set a long exposure of its own. Polar alignment does
+ *    that on the wide camera without reporting it (2026-11-08): the RTSP server then accepts
+ *    connections and never answers, until an exposure command arrives.
  *  - In the astro modes the telescope serves the tele on RTSP or on its astro preview (:8092), and
  *    switches between them by itself (fw 1.5.3, 2026-10-17, DSO mode: RTSP at 28 fps, then minutes
  *    later RTSP 454 and the live view on :8092 at ~1 fps). So there the tele tries RTSP, and keeps
@@ -170,6 +173,8 @@ export class CameraSource extends Source {
       this.nextAttemptAt = 0;
       return;
     }
+    // an operation may have left a new long exposure behind: the heal is available again
+    if (this.dwarf.quietPeriod()) this.healedThisEpisode = false;
     const mode = st.shootingMode?.id ?? null;
     if (mode !== this.probedMode) {
       this.probedMode = mode;
@@ -265,16 +270,7 @@ export class CameraSource extends Source {
     this.recoveringSince = since;
     const proc = this.proc;
     try {
-      // a long manual exposure stops the video in any mode; a stack's exposure is the stack's
-      // (the device re-checks the stack ownership right before it sends anything)
-      if (!this.healedThisEpisode && !this.dwarf.stackOwnsCamera(this.camera)) {
-        const exp = await this.bounded(this.dwarf.autoExposureForLiveView(this.camera));
-        if (exp !== null) {
-          this.healedThisEpisode = true;
-          log.warn(`${this.name}: no video with a ${exp} s manual exposure set: exposure set to auto (long exposures stop the telescope's live video)`);
-          this.note = `${this.name} exposure was set to auto to restore live video`;
-        }
-      }
+      await this.healExposure();
       // the telescope call took a while: the viewers may have left, the reader been replaced, or video come back
       if (!this.running || this.proc !== proc || this.lastFrameAt >= since) return;
       if (!hadFrames) this.noteSilentProbe(mode);
@@ -282,6 +278,20 @@ export class CameraSource extends Source {
     } finally {
       this.recovering = false;
     }
+  }
+
+  /**
+   * A long exposure stops the video in any mode: set it back to auto. A stack's exposure is the
+   * stack's (the device re-checks the stack ownership right before it sends anything).
+   */
+  private async healExposure(): Promise<void> {
+    if (this.healedThisEpisode || this.dwarf.stackOwnsCamera(this.camera)) return;
+    const exp = await this.bounded(this.dwarf.autoExposureForLiveView(this.camera));
+    if (exp === null) return;
+    this.healedThisEpisode = true;
+    const what = exp === 'unreported' ? 'a long exposure the telescope set by itself' : `a ${exp} s manual exposure set`;
+    log.warn(`${this.name}: no video with ${what}: exposure set to auto (long exposures stop the telescope's live video)`);
+    this.note = `${this.name} exposure was set to auto to restore live video`;
   }
 
   /** The tele in an astro mode: two probes without a frame and this mode has no tele RTSP (until it changes). */
@@ -391,7 +401,11 @@ export class CameraSource extends Source {
       const msg = errTail.split('\n').filter((l) => l && !DECODER_NOISE.test(l)).pop();
       this.lastError = msg && /454|4XX/.test(msg) ? 'the telescope is not serving this stream right now (RTSP 454)' : (msg ?? why);
       log.debug(`${this.name} ffmpeg ended (${why})${msg ? `: ${msg}` : ''} after ${frames} frames`);
-      if (frames === 0) this.noteSilentProbe(this.dwarf.state.shootingMode?.id ?? null);
+      if (frames === 0) {
+        this.noteSilentProbe(this.dwarf.state.shootingMode?.id ?? null);
+        // a refused session gets the same exposure check as a silent one
+        if (!this.dwarf.quietPeriod()) void this.healExposure();
+      }
       this.restart(frames ? 'live video ended' : `could not start live video (${this.lastError})`);
     };
     proc.on('error', (err) => {

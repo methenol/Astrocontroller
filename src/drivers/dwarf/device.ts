@@ -447,7 +447,7 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     return this.camera.ensureLiveView(force);
   }
 
-  autoExposureForLiveView(cam: CameraName): Promise<number | null> {
+  autoExposureForLiveView(cam: CameraName): Promise<number | 'unreported' | null> {
     return this.camera.autoExposureForLiveView(cam);
   }
 

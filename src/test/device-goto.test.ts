@@ -1,7 +1,7 @@
 import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeDwarf } from './fake-dwarf.js';
-import { FakeHttpApi } from './fake-http.js';
+import { FakeHttpApi, dsoSchema } from './fake-http.js';
 import { config } from '../config.js';
 import { Dwarf, AstroServiceHungError } from '../drivers/dwarf/device.js';
 import { daylightRefusal } from '../drivers/dwarf/controller/astro.js';
@@ -234,6 +234,44 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
     assert.equal(dwarf.state.eqSolving.result?.azimuthErrorDeg, 1.25);
   });
 
+  test('polar alignment: an unreported wide exposure that stopped the video is set back to auto', async () => {
+    api.route('POST /shootingMode/getParamAndSetting', () => ({ data: dsoSchema() }));
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async (_req, f) => {
+      await f.notify('eqSolvingState', { state: 1 });
+      await f.notify('streamType', { streamType: 2, camId: 1 });
+      await sleep(50);
+      return { code: 0, aziErr: 1.25, altErr: -0.5 };
+    });
+    await dwarf.measurePolarAlignment();
+    const set = fake.requestsFor(Cmd.PARAM_SET_EXPOSURE);
+    assert.equal(set.length, 1);
+    assert.equal(set[0].data.mode ?? 0, 0);
+  });
+
+  test('polar alignment that fails still gives the wide camera its live video back', async () => {
+    api.route('POST /shootingMode/getParamAndSetting', () => ({ data: dsoSchema() }));
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async (_req, f) => {
+      await f.notify('eqSolvingState', { state: 1 });
+      await f.notify('streamType', { streamType: 2, camId: 1 });
+      await sleep(50);
+      return { code: -11516 };
+    });
+    await assert.rejects(dwarf.measurePolarAlignment());
+    assert.equal(fake.requestsFor(Cmd.PARAM_SET_EXPOSURE).length, 1);
+  });
+
+  test('polar alignment that leaves the wide camera on live video sends no exposure command', async () => {
+    api.route('POST /shootingMode/getParamAndSetting', () => ({ data: dsoSchema() }));
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async (_req, f) => {
+      await f.notify('eqSolvingState', { state: 1 });
+      await f.notify('streamType', { streamType: 1, camId: 1 });
+      await sleep(50);
+      return { code: 0, aziErr: 1.25, altErr: -0.5 };
+    });
+    await dwarf.measurePolarAlignment();
+    assert.equal(fake.requestsFor(Cmd.PARAM_SET_EXPOSURE).length, 0);
+  });
+
   test('polar alignment report: the adjustment in words, published for the web UI', async () => {
     fake.on(Cmd.ASTRO_START_EQ_SOLVING, async (_req, f) => {
       await f.notify('eqSolvingState', { state: 1 });
@@ -276,7 +314,7 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
   test('polar alignment that the telescope ignores fails at the silence limit and is stopped', async () => {
     fake.silent(Cmd.ASTRO_START_EQ_SOLVING);
     await assert.rejects(dwarf.measurePolarAlignment(), AstroServiceHungError);
-    await fake.nextRequest(Cmd.ASTRO_STOP_EQ_SOLVING, 1000);
+    assert.equal(fake.requestsFor(Cmd.ASTRO_STOP_EQ_SOLVING).length, 1);
   });
 
   test('polar alignment whose solve ends without a result fails with the reason', async () => {

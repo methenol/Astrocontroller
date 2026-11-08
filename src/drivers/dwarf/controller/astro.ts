@@ -347,34 +347,39 @@ export class AstroControl {
     const t = this.timing;
     let res: PolarError | undefined;
     let ran = false;
-    await this.routines.follow({
-      what: 'polar alignment',
-      cmd: Cmd.ASTRO_START_EQ_SOLVING,
-      params: { lon: loc.lon, lat: loc.lat },
-      totalMs: t.eqSolvingMs,
-      stopCmds: [Cmd.ASTRO_STOP_EQ_SOLVING],
-      activity: new Set(['eqSolvingState']),
-      // the result comes in the reply, when the solve has finished; a reply without the errors is only
-      // the start's acknowledgement (proto3 omits a 0, so one of the two is enough)
-      onReply: (r, c) => {
-        if (r.aziErr === undefined && r.altErr === undefined) return;
-        const azimuthErrorDeg = Number(r.aziErr ?? 0);
-        const altitudeErrorDeg = Number(r.altErr ?? 0);
-        if (!Number.isFinite(azimuthErrorDeg) || !Number.isFinite(altitudeErrorDeg)) return c.finish(new Error(`polar alignment replied with an unreadable result (${JSON.stringify(r)})`));
-        res = { azimuthErrorDeg, altitudeErrorDeg };
-        c.finish(null);
-      },
-      onNotify: (n, c) => {
-        if (n.name !== 'eqSolvingState') return;
-        const st = opState(n.data.state);
-        if (st === 'running') ran = true;
-        else if (ran && (st === 'stopped' || st === 'idle')) {
-          c.ended(t.gotoEndGraceMs, () => (res ? null : new Error(`polar alignment ended (state ${st}) without a result: the plate solves did not succeed (stars in the tele view? clouds?)`)));
-        }
-      },
-      atDeadline: () => new Error(`polar alignment gave no result within ${Math.round(t.eqSolvingMs / 60000)} min`),
-      done: () => '',
-    });
+    try {
+      await this.routines.follow({
+        what: 'polar alignment',
+        cmd: Cmd.ASTRO_START_EQ_SOLVING,
+        params: { lon: loc.lon, lat: loc.lat },
+        totalMs: t.eqSolvingMs,
+        stopCmds: [Cmd.ASTRO_STOP_EQ_SOLVING],
+        activity: new Set(['eqSolvingState']),
+        // the result comes in the reply, when the solve has finished; a reply without the errors is only
+        // the start's acknowledgement (proto3 omits a 0, so one of the two is enough)
+        onReply: (r, c) => {
+          if (r.aziErr === undefined && r.altErr === undefined) return;
+          const azimuthErrorDeg = Number(r.aziErr ?? 0);
+          const altitudeErrorDeg = Number(r.altErr ?? 0);
+          if (!Number.isFinite(azimuthErrorDeg) || !Number.isFinite(altitudeErrorDeg)) return c.finish(new Error(`polar alignment replied with an unreadable result (${JSON.stringify(r)})`));
+          res = { azimuthErrorDeg, altitudeErrorDeg };
+          c.finish(null);
+        },
+        onNotify: (n, c) => {
+          if (n.name !== 'eqSolvingState') return;
+          const st = opState(n.data.state);
+          if (st === 'running') ran = true;
+          else if (ran && (st === 'stopped' || st === 'idle')) {
+            c.ended(t.gotoEndGraceMs, () => (res ? null : new Error(`polar alignment ended (state ${st}) without a result: the plate solves did not succeed (stars in the tele view? clouds?)`)));
+          }
+        },
+        atDeadline: () => new Error(`polar alignment gave no result within ${Math.round(t.eqSolvingMs / 60000)} min`),
+        done: () => '',
+      });
+    } finally {
+      // a solve, finished or failed, leaves the wide camera off live video
+      await this.camera.restoreWideLiveView();
+    }
     if (!res) throw new Error('polar alignment ended without a result');
     this.core.store.publish({ eqSolving: { state: 'idle', result: { ...res, at: Date.now() } } });
     return res;

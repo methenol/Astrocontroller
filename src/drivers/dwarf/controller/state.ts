@@ -136,6 +136,12 @@ export interface TelescopeState {
   /** ND filter fitted for dark frames: nothing may move the scope or take light frames. */
   ndLock?: { since: number; note: string } | null;
   eqSolving: { state: string; result?: { azimuthErrorDeg: number; altitudeErrorDeg: number; at: number } };
+  /**
+   * How the firmware serves the wide camera: 1 is RTSP live video, anything else is no live video.
+   * It follows the real exposure, including one the firmware sets by itself and never reports
+   * (polar alignment), so it can disagree with the exposure in the parameter cache.
+   */
+  wideStreamType?: number;
   autofocus: { state: string; astro?: string };
   /** the polar alignment in progress or last run (mcp/tools/astro.ts publishes it here) */
   polarAlign?: PolarAlign;
@@ -289,6 +295,10 @@ export function applyNotification(st: TelescopeState, params: ParamCache, n: Not
     case 'eqSolvingState':
       st.eqSolving = { ...st.eqSolving, state: opState(d.state) };
       break;
+    case 'streamType':
+      // proto3 omits 0: the tele's reports carry no camId, and a report without streamType is type 0
+      if (d.camId === 1) st.wideStreamType = d.streamType ?? 0;
+      break;
     case 'autoFocusState':
       st.autofocus = { ...st.autofocus, state: opState(d.state) };
       break;
@@ -371,6 +381,7 @@ export function applyDeviceStateInfo(
   const wide = s.wideCameraStateInfo ?? {};
   if (tele.hFov) st.fov.tele = fov(tele);
   if (wide.hFov) st.fov.wide = fov(wide);
+  if (wide.streamType) st.wideStreamType = wide.streamType.streamType ?? 0;
   if (tele.cmosTemperature) st.cmosTempC.tele = tele.cmosTemperature.temperature ?? 0;
   if (wide.cmosTemperature) st.cmosTempC.wide = wide.cmosTemperature.temperature ?? 0;
   const dev = s.deviceStateInfo ?? {};
