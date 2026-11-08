@@ -23,6 +23,8 @@ export interface CatalogQuery {
   minFovPercent?: number;
   /** only objects with a common name */
   named?: boolean;
+  /** only these objects, by catalog id */
+  ids?: ReadonlySet<string>;
   /** "now": above minAlt now; "tonight": at least minHours above minAlt during darkness */
   up?: 'now' | 'tonight';
   minAlt?: number;
@@ -170,6 +172,7 @@ export function queryCatalog(query: CatalogQuery, site: Site | null, tz: string,
 
   const hits: { o: DsoObject; rank: number; vis?: Vis }[] = [];
   for (const o of all) {
+    if (query.ids && !query.ids.has(o.id)) continue;
     if (types && !types.has(o.type)) continue;
     if (con && o.constellation.toLowerCase() !== con) continue;
     if (cat && !(cat === 'messier' ? isMessier(o) : cat === 'caldwell' ? isCaldwell(o) : o.sources.includes(cat))) continue;

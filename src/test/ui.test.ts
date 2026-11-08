@@ -526,3 +526,29 @@ test('the Switches group reads the switches when opened and sets one with On/Off
   assert.deepEqual(calls.find((c) => (c.body as { action?: string })?.action === 'switch')?.body, { action: 'switch', id: 'lens_defog', on: true });
   assert.match(toastText(), /Dew heater on/);
 });
+
+test('the calendar ranks targets, shows their progress, and opens a sheet with their actions', async () => {
+  const nights = Array.from({ length: 60 }, (_, i) => ({ date: `2026-12-${String((i % 28) + 1).padStart(2, '0')}`, hours: 10, moonPercent: i * 2 }));
+  const hrs = Array.from({ length: 60 }, () => 8);
+  const target = (key: string, group: string, deadline: number, extra = {}) => ({ key, name: key, displayName: key, gotoName: key, catalogId: key, raHours: 1, decDeg: 40, typeName: 'galaxy', constellation: 'And', mag: 4, majorArcmin: 60, aliases: [], inProgram: false, enabled: true, priority: null, goalMin: 600, goalSource: 'general', collectedMin: 300, collectedNights: 2, altitudeNow: 50, up: hrs, clear: hrs, optimal: { current: [0, deadline], next: null, runs: [[0, deadline]] }, collectable: { current: [0, 100], next: null }, group, deadline, needH: 5, expectedOptimalH: 12, expectedTotalH: 30, verdict: 'on-track', ...extra });
+  route('GET catalog/meta', () => ({ groups: [{ key: 'galaxy', count: 5 }], lists: [], sources: [], constellations: [], total: 5 }));
+  route('GET catalog/object', () => ({ tonight: null }));
+  route('GET calendar', () => ({ generatedAt: 0, minAltitude: 25, minBlockMin: 45, efficiency: 0.75, generalGoalMin: 600, catalogTotal: 2, limit: 60, nights, targets: [target('Late Peak', 'peak', 80), target('Soon Gone', 'closing', 12, { inProgram: true, priority: 4, goalSource: 'program' })] }));
+  route('POST control', () => ({ result: 'ok' }));
+  openTab('calendar');
+  await until(() => !!ui.document.querySelector('#cal-list .cal-card'), 'the calendar cards');
+  const names = [...ui.document.querySelectorAll('#cal-list .cal-name')].map((e) => e.textContent ?? '');
+  assert.match(names[0], /^Soon Gone/, 'the closing group comes first');
+  assert.match(text('#cal-list'), /5 \/ 10 h/);
+  assert.match(text('#cal-list'), /Needs 5 h/);
+  click('#cal-list [data-cal-open="Soon Gone"]');
+  await until(() => !ui.$('#cal-sheet').hidden, 'the detail sheet');
+  assert.match(text('#cal-sheet'), /program goal/);
+  assert.ok(ui.$('#cal-sheet [data-sky]') && ui.$('#cal-sheet [data-research]') && ui.$('#cal-sheet [data-prog-add]'), 'Stellarium, Research and Add to program are offered');
+  assert.equal(ui.$('#cal-sheet button[type=submit]').textContent, 'Update program');
+  answerConfirm(true);
+  click('#cal-sheet [data-cal-goto]');
+  await until(() => calls.some((c) => c.method === 'POST' && c.path.includes('control') && (c.body as { action?: string })?.action === 'goto'), 'the GoTo');
+  click('#cal-sheet [data-cal-close]');
+  assert.equal(ui.$('#cal-sheet').hidden, true);
+});

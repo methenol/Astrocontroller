@@ -44,7 +44,7 @@ import { hm } from './clock.js';
 
 export const SLOT_MIN = 10;
 const SLOT_MS = SLOT_MIN * 60e3;
-const MOON_HORIZON = -0.8333;
+export const MOON_HORIZON = -0.8333;
 const SYNODIC_DAYS = 29.53;
 /** below this fraction of the required separation a moonlit slot is lost; at the requirement it is whole */
 const MOON_HARD_FRACTION = 0.6;
@@ -60,8 +60,8 @@ const SEASON_WEIGHT = 0.8;
 const SEASON_DAYS = 90;
 const SEASON_STEP_D = 10;
 /** of the nights ahead, the fraction expected clear enough to use, and the share of one a target gets among the others */
-const CLEAR_NIGHTS = 0.45;
-const NIGHT_SHARE = 0.5;
+export const CLEAR_NIGHTS = 0.45;
+export const NIGHT_SHARE = 0.5;
 /** the sidereal day is shorter than the solar: the sky at a clock time runs this much ahead each night */
 const SIDEREAL_SHIFT_MS = 235.9e3;
 /** seeing / transparency: 7Timer indices (1 best … 8 worst), the ramp's good and bad ends, and the most they cost */

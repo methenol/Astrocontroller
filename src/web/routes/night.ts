@@ -6,8 +6,8 @@ import * as sky from '../../astro/sky.js';
 import { addTarget, loadSettings, PlanSettingsSchema, ProgramTargetInput, removeTarget, reorderProgram, resetSettings, saveSettings, updateTarget, PLAN_DEFAULTS } from '../../night/program.js';
 import { PLAN_OBJECTIVE } from '../../night/service.js';
 import { summarize } from '../../night/journal.js';
-import { body, notFound, queryString, route, HttpError } from '../http.js';
-import type { WebContext } from '../context.js';
+import { body, notFound, queryNumber, queryString, route, HttpError } from '../http.js';
+import { teleFovArcmin, type WebContext } from '../context.js';
 
 const HoldBody = z.object({
   action: z.enum(['obscured', 'skip', 'pin', 'sky', 'release']),
@@ -24,7 +24,7 @@ const NoteBody = z.object({ text: z.string().min(1).max(4000), target: z.string(
 const OrderBody = z.object({ ids: z.array(z.string()) });
 const NIGHT = /^\d{4}-\d{2}-\d{2}$/;
 
-export function nightRoutes({ night, duty }: WebContext): Router {
+export function nightRoutes({ night, duty, scope }: WebContext): Router {
   const api = express.Router();
   const need = () => {
     if (!night) throw new HttpError(503, 'the night plan is not running in this process');
@@ -120,6 +120,30 @@ export function nightRoutes({ night, duty }: WebContext): Router {
       const plan = await n.plan.plan();
       if (Date.now() >= plan.window.end) throw new Error("tonight's plan has ended");
       return duty.start({ objective: PLAN_OBJECTIVE, until: new Date(plan.window.end).toISOString(), by: 'user' });
+    }),
+  );
+
+  // ---- the calendar: the same filters as the Database, over the coming nights
+  api.get(
+    '/calendar',
+    route(async (req) => {
+      const types = queryString(req, 'types');
+      return need().plan.calendar({
+        filters: {
+          q: queryString(req, 'q'),
+          types: types?.split(',').map((x) => x.trim()).filter(Boolean),
+          constellation: queryString(req, 'constellation'),
+          catalog: queryString(req, 'catalog'),
+          maxMag: queryNumber(req, 'maxMag'),
+          minSize: queryNumber(req, 'minSize'),
+          maxSize: queryNumber(req, 'maxSize'),
+          minFovPercent: queryNumber(req, 'minFovPercent'),
+          named: queryString(req, 'named') === '1' || undefined,
+        },
+        programOnly: queryString(req, 'scope') === 'program',
+        teleFovWidthArcmin: teleFovArcmin(scope).w,
+        limit: queryNumber(req, 'limit'),
+      });
     }),
   );
 

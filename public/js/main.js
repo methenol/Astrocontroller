@@ -11,6 +11,7 @@ import { startGuardWatch } from './weather.js';
 import './plan.js';
 import './journal.js';
 import './database.js';
+import './calendar.js';
 import './stellarium.js';
 import './research.js';
 import './album.js';

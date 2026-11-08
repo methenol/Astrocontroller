@@ -11,7 +11,7 @@ import { draft } from './chat.js';
 import { imagingRequest } from './tonight.js';
 import { findInProgram, programFormHtml, wireProgramForms } from './program-add.js';
 
-const GROUPS = [
+export const GROUPS = [
   ['galaxy', 'galaxies'], ['nebula', 'nebulae'], ['emission', 'emission nebulae'], ['reflection', 'reflection nebulae'], ['dark', 'dark nebulae'],
   ['planetary', 'planetary nebulae'], ['supernova_remnant', 'supernova remnants'], ['cluster', 'star clusters'], ['open_cluster', 'open clusters'],
   ['globular', 'globular clusters'], ['galaxy_cluster', 'galaxy groups & clusters'], ['star', 'stars'],
@@ -177,7 +177,7 @@ function render(append) {
 }
 
 /** Tonight's altitude across the dark window, with the minimum altitude and "now". */
-function altitudeChart(t) {
+export function altitudeChart(t) {
   const W = 320;
   const H = 96;
   const pad = 2;

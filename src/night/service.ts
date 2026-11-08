@@ -31,6 +31,7 @@ import { targetKey, loadRest, restSettings, restState } from '../astro/rest.js';
 import type { HourConditions } from '../astro/weather.js';
 import { addTarget, loadProgram, loadSettings, type PlanSettings, type ProgramTarget } from './program.js';
 import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
+import { buildCalendar, type CalendarOptions } from './calendar.js';
 import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
 import { adviseFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
@@ -1004,6 +1005,13 @@ export class PlanService extends SafeEmitter {
       const c = progress.get(key);
       return { ...t, key, collectedMin: c?.totalMin ?? 0, journalOnlyMin: c?.journalOnlyMin ?? 0, nights: c?.nights ?? 0, lastNight: c?.lastNight ?? null, tonight: plan?.outlook.find((x) => x.key === key) ?? null };
     });
+  }
+
+  /** The Calendar tab: each target's coming nights, windows and progress towards its goal. */
+  async calendar(o: Pick<CalendarOptions, 'filters' | 'programOnly' | 'teleFovWidthArcmin' | 'limit'>): Promise<Awaited<ReturnType<typeof buildCalendar>>> {
+    const site = this.site();
+    const settings = loadSettings();
+    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal), now: this.now() });
   }
 
   /** The program or the settings changed: solve again shortly. */
