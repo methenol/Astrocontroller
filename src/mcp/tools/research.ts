@@ -22,6 +22,7 @@ const IMAGE_MAX_PX = 1280;
 const HEADERS = { 'User-Agent': 'Astrocontroller/1.0 (smart-telescope agent; object lookup)' };
 
 const SIMBAD_TAP = 'https://simbad.cds.unistra.fr/simbad/sim-tap/sync';
+const SIMBAD_MIRROR_TAP = 'https://simbad.harvard.edu/simbad/sim-tap/sync';
 const WIKI_REST = 'https://en.wikipedia.org/api/rest_v1/page/summary/';
 const WIKI_API = 'https://en.wikipedia.org/w/api.php';
 const NASA_IMAGES = 'https://images-api.nasa.gov/search';
@@ -68,20 +69,33 @@ interface TapResult {
 export function simbadQuery(id: string): string {
   const lit = id.replace(/'/g, "''");
   return [
-    'SELECT TOP 1 b.main_id, b.otype_txt, b.ra, b.dec, b.galdim_majaxis, b.galdim_minaxis, b.morph_type, b.sp_type, b.rvz_redshift, b.rvz_radvel, b.plx_value, f.B, f.V,',
-    `(SELECT TOP 1 d.dist || ' ' || d.unit FROM mesDistance d WHERE d.oidref = b.oid) AS distance`,
-    'FROM basic b JOIN ident i ON i.oidref = b.oid LEFT JOIN allfluxes f ON f.oidref = b.oid',
+    // ADQL has no scalar subqueries in the select list: the distance is a join (TOP 1 keeps one row)
+    'SELECT TOP 1 b.main_id, b.otype_txt, b.ra, b.dec, b.galdim_majaxis, b.galdim_minaxis, b.morph_type, b.sp_type, b.rvz_redshift, b.rvz_radvel, b.plx_value, f.B, f.V, d.dist, d.unit',
+    'FROM basic b JOIN ident i ON i.oidref = b.oid LEFT JOIN allfluxes f ON f.oidref = b.oid LEFT JOIN mesDistance d ON d.oidref = b.oid',
     `WHERE i.id = '${lit}'`,
   ].join(' ');
 }
 
-async function simbad(names: string[]): Promise<Record<string, unknown> | null> {
+async function simbadAt(tap: string, names: string[]): Promise<Record<string, unknown> | null> {
   for (const id of names) {
-    const r = await getJson<TapResult>(`${SIMBAD_TAP}?${q({ request: 'doQuery', lang: 'adql', format: 'json', query: simbadQuery(id) })}`, SIMBAD_TIMEOUT_MS);
+    const r = await getJson<TapResult>(`${tap}?${q({ request: 'doQuery', lang: 'adql', format: 'json', query: simbadQuery(id) })}`, SIMBAD_TIMEOUT_MS);
     const row = r.data[0];
-    if (row) return Object.fromEntries(r.metadata.map((m, i) => [m.name, row[i]]).filter(([, v]) => v !== null && v !== ''));
+    if (!row) continue;
+    const { dist, unit, ...rec } = Object.fromEntries(r.metadata.map((m, i) => [m.name, row[i]]).filter(([, v]) => v !== null && v !== ''));
+    return { ...rec, ...(dist !== undefined ? { distance: `${dist} ${String(unit ?? '').trim()}`.trim() } : {}) };
   }
   return null;
+}
+
+/** SIMBAD at CDS, then its Harvard mirror when CDS does not answer. */
+async function simbad(names: string[]): Promise<Record<string, unknown> | null> {
+  try {
+    return await simbadAt(SIMBAD_TAP, names);
+  } catch (e) {
+    return simbadAt(SIMBAD_MIRROR_TAP, names).catch((m) => {
+      throw new Error(`CDS: ${errMsg(e)}; Harvard mirror: ${errMsg(m)}`);
+    });
+  }
 }
 
 // ---------------------------------------------------------------- Wikipedia
