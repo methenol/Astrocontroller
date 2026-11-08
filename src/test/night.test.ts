@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import * as sky from '../astro/sky.js';
 import { config } from '../config.js';
 import { findObject } from '../astro/catalog.js';
+import { planNight } from '../astro/planner.js';
 import { PLAN_DEFAULTS, addTarget, removeTarget, type PlanSettings } from '../night/program.js';
 import { setRest, liftRest } from '../astro/rest.js';
 import { alternatesAt, daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
@@ -182,6 +183,93 @@ describe('night plan: the solver', () => {
     const r = solve([cand('M 31'), cand('M 42')], { history: lastNight, idPrefix: 'z' });
     assert.ok(!r.blocks.some((b) => b.past));
     assert.ok(r.blocks.every((b) => b.start >= W.start.getTime()));
+  });
+});
+
+describe('night plan: fillers', () => {
+  const filler = (name: string, o: Partial<Candidate> = {}) => cand(name, { source: 'filler', fillerScore: 60, priority: undefined, goalMin: undefined, collectedMin: undefined, ...o });
+  const minutes = (r: ReturnType<typeof solveNight>, name: string) => targetBlocks(r).filter((b) => b.target!.displayName === name).reduce((a, b) => a + b.expectedMin, 0);
+  const on = { ...SETTINGS, fillers: true };
+
+  test('a filler in progress goes before a better new one', () => {
+    // M 42 and M 45 share their best hours; M 42 is the one started, on a far lower score
+    const r = solve([filler('M 42', { fillerScore: 20, goalMin: 600, collectedMin: 100 }), filler('M 45', { fillerScore: 90 })], { settings: on });
+    const b = targetBlocks(r).find((x) => x.target!.displayName === 'M 42')!;
+    assert.match(b.reason, /in progress \(100 of 600/);
+    assert.ok(b.alt!.max >= Math.max(...r.tracks.find((t) => t.displayName === 'M 42')!.alt) - 3, 'collected at the top of its arc');
+  });
+
+  test('a filler in progress stops at its goal and the night goes on with a new one', () => {
+    const r = solve([filler('M 33', { goalMin: 130, collectedMin: 100 }), filler('M 31')], { settings: on });
+    assert.ok(minutes(r, 'M 33') <= 30 + 10 * 0.75, `M 33 ${minutes(r, 'M 33')} min`);
+    assert.ok(minutes(r, 'M 31') > 0);
+  });
+
+  test('a filler at its goal is an ordinary filler', () => {
+    const r = solve([filler('M 33', { fillerScore: 20, goalMin: 100, collectedMin: 100 }), filler('M 31', { fillerScore: 90 })], { settings: on });
+    assert.ok(minutes(r, 'M 31') > minutes(r, 'M 33'));
+  });
+
+  test('a program target with a goal to meet still beats a filler in progress', () => {
+    const r = solve([cand('M 31', { priority: 5 }), filler('M 33', { goalMin: 600, collectedMin: 100 })], { settings: on });
+    assert.ok(minutes(r, 'M 31') > minutes(r, 'M 33'));
+  });
+});
+
+describe('night plan: a program target is collected at its best', () => {
+  const filler = (name: string) => cand(name, { source: 'filler', fillerScore: 60, priority: undefined, goalMin: undefined, collectedMin: undefined });
+  const on = { ...SETTINGS, fillers: true };
+  const blocksOf = (r: ReturnType<typeof solveNight>, name: string) => targetBlocks(r).filter((b) => b.target!.displayName === name);
+  const peak = (r: ReturnType<typeof solveNight>, name: string) => Math.max(...r.tracks.find((t) => t.displayName === name)!.alt);
+
+  test('a short need waits for the top of its arc, and fillers take the hours before it', () => {
+    const r = solve([cand('M 42', { goalMin: 600, collectedMin: 570 }), filler('M 31')], { settings: on });
+    const [b] = blocksOf(r, 'M 42');
+    assert.ok(b.alt!.max >= peak(r, 'M 42') - 3, `M 42 at ${b.alt!.max}° of ${peak(r, 'M 42')}°`);
+    assert.equal(r.blocks[0].target!.displayName, 'M 31');
+  });
+
+  test('two short needs that want the same hours do not collide, and both are collected', () => {
+    const r = solve([cand('M 42', { goalMin: 600, collectedMin: 570, priority: 4 }), cand('M 45', { goalMin: 600, collectedMin: 570 }), filler('M 31')], { settings: on });
+    assert.ok(blocksOf(r, 'M 42').length && blocksOf(r, 'M 45').length);
+    const [a, b] = [blocksOf(r, 'M 42')[0], blocksOf(r, 'M 45')[0]].sort((x, y) => x.start - y.start);
+    assert.ok(a.end <= b.start);
+  });
+
+  test('a need larger than the night starts as soon as the target is up', () => {
+    const r = solve([cand('M 42', { goalMin: 6000 }), filler('M 31')], { settings: on });
+    const first = r.tracks.find((t) => t.displayName === 'M 42')!.alt.findIndex((a) => a >= 25);
+    const startSlot = Math.round((blocksOf(r, 'M 42')[0].start - W.start.getTime()) / 600e3);
+    assert.ok(startSlot <= first + 6, `started at slot ${startSlot}, up from slot ${first}`);
+  });
+});
+
+describe('the catalog planner: a list that spans the night', () => {
+  const opts = { start: W.start, end: W.end, now: NOON, minAltitude: 25, fovArcmin: { w: 177, h: 100 }, timezone: 'America/Chicago', applyRest: false } as const;
+  const quadrants = (t: { raHours: number; decDeg: number }[], at: Date) => new Set(t.map((x) => sky.altAz(SITE, x.raHours, x.decDeg, at)).filter((a) => a.altitude >= 25).map((a) => quadrantOf(a.azimuth)));
+
+  test('every hour of the night has targets in at least three quadrants', () => {
+    const { targets } = planNight(SITE, { ...opts, limit: 120, spanNight: { blockMin: 45 } });
+    for (let t = W.start.getTime() + 30 * 60e3; t < W.end.getTime(); t += 3600e3) {
+      const q = quadrants(targets.filter((x) => !x.gated), new Date(t));
+      assert.ok(q.size >= 3, `only ${[...q]} at ${new Date(t).toISOString()}`);
+    }
+  });
+
+  test('a started target stays on the list past the limit', () => {
+    const all = planNight(SITE, { ...opts, limit: 200, spanNight: { blockMin: 45 } }).targets;
+    const low = all[all.length - 1];
+    const key = low.name.trim().toLowerCase();
+    const short = planNight(SITE, { ...opts, limit: 8, spanNight: { blockMin: 45 } }).targets;
+    assert.ok(!short.some((t) => t.name === low.name), 'not on the short list by its own rank');
+    const kept = planNight(SITE, { ...opts, limit: 8, spanNight: { blockMin: 45 }, started: new Set([key]) }).targets;
+    assert.ok(kept.some((t) => t.name === low.name));
+  });
+
+  test('without spanNight the order is the one the Tonight tab shows: up at the start first', () => {
+    const { targets } = planNight(SITE, { ...opts, limit: 20 });
+    const up = targets.map((t) => sky.altAz(SITE, t.raHours, t.decDeg, W.start).altitude >= 25);
+    assert.ok(up.lastIndexOf(true) < (up.indexOf(false) === -1 ? Infinity : up.length) && up.indexOf(false) === -1 ? true : up.lastIndexOf(true) < up.indexOf(false));
   });
 });
 

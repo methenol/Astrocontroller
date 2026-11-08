@@ -19,6 +19,10 @@
  *   seeing costs a galaxy or a planetary more than an emission nebula, poor transparency costs
  *   broadband more than a line filter.
  *
+ * A target with a goal (the program, then the fillers in progress) whose need fits in a stretch of
+ * the night is first given the stretch where it stands best, and is not started before it, so its
+ * time is collected high in the sky.
+ *
  * Walking the slots in order, each target is valued at the current slot as
  *   base × mean merit over the next minimum block × urgency,
  * where base is the owner's priority and how far it is from its goal (catalog fillers: their
@@ -73,6 +77,14 @@ const SEEING_MAX_COST = 0.3;
 const TRANS_MAX_COST = 0.3;
 /** a filler gets at most this much of one night */
 const FILLER_CAP_MIN = 240;
+/** how much a filler's value rises as it nears its goal (at the goal: this much more) */
+const FILLER_PROGRESS_WEIGHT = 0.5;
+/** a filler being collected keeps at least this much of its value (the capture rest can take its score to nothing) */
+const FILLER_STARTED_FLOOR = 0.25;
+/** a filler's window stays where it has at least this share of its best merit tonight; so does its claim over new fillers */
+const FILLER_PEAK_SHARE = 0.9;
+/** an alternate in the block's own quadrant must be this far around the sky to clear a vertical obstruction */
+const OWN_QUADRANT_AZ_CLEAR = 15;
 /** alternates offered per block */
 const ALTERNATES = 4;
 /** an hour the forecast puts below the floor keeps this share of its merit (advisory: still planned, fillers and all) */
@@ -304,6 +316,8 @@ export interface Solved {
 interface Curve {
   c: Candidate;
   merit: Float64Array;
+  /** merit for placing a goal's window: altitude, rotation and Moon; the forecast only where it is below the floor (hourly steps above it must not outweigh the arc) */
+  place: Float64Array;
   alt: Float64Array;
   az: Float64Array;
   moonSep: Float64Array;
@@ -315,6 +329,8 @@ interface Curve {
 }
 
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+/** A catalog filler with integration towards its goal, and more still to collect: finished before a new one begins. */
+export const fillerInProgress = (c: Candidate): boolean => c.source === 'filler' && (c.collectedMin ?? 0) > 0 && (c.goalMin ?? 0) > (c.collectedMin ?? 0);
 const ramp = (idx: number, good: number, bad: number) => clamp01((idx - good) / (bad - good));
 const r1 = (x: number) => Math.round(x * 10) / 10;
 
@@ -373,6 +389,8 @@ export function seasonOf(input: Pick<SolveInput, 'site' | 'start' | 'end' | 'set
   };
 }
 
+const currentKeyOf = (input: SolveInput) => input.current?.key ?? null;
+
 function slotsOf(input: SolveInput): SlotInfo[] {
   const { site, start, end, conditions, settings } = input;
   const out: SlotInfo[] = [];
@@ -400,7 +418,7 @@ function curves(input: SolveInput, slots: SlotInfo[], illum: number): Curve[] {
   const moonPos = slots.map((s) => sky.bodyRaDec(site, 'Moon', new Date(s.t + SLOT_MS / 2)));
   return input.candidates.map((c) => {
     const n = slots.length;
-    const cv: Curve = { c, merit: new Float64Array(n), alt: new Float64Array(n), az: new Float64Array(n), moonSep: new Float64Array(n), geom: new Uint8Array(n), geomMoon: new Uint8Array(n), season: null };
+    const cv: Curve = { c, merit: new Float64Array(n), place: new Float64Array(n), alt: new Float64Array(n), az: new Float64Array(n), moonSep: new Float64Array(n), geom: new Uint8Array(n), geomMoon: new Uint8Array(n), season: null };
     const rule = c.narrowband ? settings.moonNarrowband : settings.moonBroadband;
     const req = moonRequiredSep(rule, dFull);
     for (let i = 0; i < n; i++) {
@@ -423,6 +441,7 @@ function curves(input: SolveInput, slots: SlotInfo[], illum: number): Curve[] {
       const seeQ = s.seeingIdx === undefined ? 1 : 1 - SEEING_MAX_COST * (c.seeingSens ?? 0.4) * ramp(s.seeingIdx, SEEING_GOOD, SEEING_BAD);
       const trQ = s.transparencyIdx === undefined ? 1 : 1 - TRANS_MAX_COST * (c.narrowband ? 0.4 : 1) * ramp(s.transparencyIdx, TRANS_GOOD, TRANS_BAD);
       cv.merit[i] = altQ * kh * moonQ * wxQ * seeQ * trQ;
+      cv.place[i] = altQ * kh * moonQ * (s.cloudy ? CLOUDY_MERIT : 1);
     }
     if (c.source === 'program') cv.season = seasonOf(input, c);
     return cv;
@@ -432,7 +451,12 @@ function curves(input: SolveInput, slots: SlotInfo[], illum: number): Curve[] {
 /** A target's value to the plan before its hours are weighed: the owner's priority and how far it is from its goal (with its season), a filler's planner score scaled down. */
 function baseValue(cv: Curve, settings: PlanSettings): number {
   const c = cv.c;
-  if (c.source === 'filler') return settings.fillerWeight * clamp01((c.fillerScore ?? 50) / 100);
+  if (c.source === 'filler') {
+    const score = clamp01((c.fillerScore ?? 50) / 100);
+    if (!fillerInProgress(c)) return settings.fillerWeight * score;
+    const done = clamp01((c.collectedMin ?? 0) / (c.goalMin ?? 1));
+    return settings.fillerWeight * Math.min(1, Math.max(FILLER_STARTED_FLOOR, score) * (1 + FILLER_PROGRESS_WEIGHT * done));
+  }
   const p = PRIORITY_VALUE[c.priority ?? 3] ?? 1;
   const goal = c.goalMin ?? 0;
   const left = Math.max(0, goal - (c.collectedMin ?? 0));
@@ -568,7 +592,7 @@ export function solveNight(input: SolveInput): Solved {
   const remaining = new Map<Curve, number>();
   for (const cv of cvs) {
     const c = cv.c;
-    if (c.source === 'filler') remaining.set(cv, FILLER_CAP_MIN);
+    if (c.source === 'filler') remaining.set(cv, fillerInProgress(c) ? Math.min(FILLER_CAP_MIN, (c.goalMin ?? 0) - (c.collectedMin ?? 0)) : FILLER_CAP_MIN);
     else {
       const left = Math.max(0, (c.goalMin ?? 0) - (c.collectedMin ?? 0));
       remaining.set(cv, left > 0 ? left : c.keepCollecting ? FILLER_CAP_MIN : 0);
@@ -596,6 +620,56 @@ export function solveNight(input: SolveInput): Solved {
     pins.push({ cv, startIdx: a, endIdx: b, overheadMin: 0, expectedMin: 0, pinned: true });
   }
   const pinnedAt = (i: number) => pins.find((p) => i >= p.startIdx && i < p.endIdx) ?? null;
+
+  // Where each goal's time belongs: walking the night forward alone would take a target the moment it
+  // clears, low in the sky, when what it needs fits in its best hours. The program first, then the
+  // fillers in progress, most valued first: each gets the contiguous stretch of its need with the most
+  // merit, and until then the sky goes to whatever else stands best. A target that needs more than any
+  // stretch it has tonight gets no window: it takes all it can, as it comes.
+  const opensAt = new Map<Curve, number>();
+  const taken = new Uint8Array(n);
+  for (const p of pins) taken.fill(1, p.startIdx, p.endIdx);
+  const programFirst = (cv: Curve) => (cv.c.source === 'program' ? 0 : 1);
+  const withGoals = cvs.filter((cv) => (cv.c.source === 'program' || fillerInProgress(cv.c)) && (remaining.get(cv) ?? 0) > 0 && cv.c.key !== currentKeyOf(input)).sort((a, b) => programFirst(a) - programFirst(b) || base(b) - base(a));
+  const peakOf = new Map<Curve, number>();
+  for (const cv of cvs) {
+    let peak = 0;
+    for (let j = firstIdx; j < n; j++) if (usable(cv, j)) peak = Math.max(peak, cv.place[j]);
+    peakOf.set(cv, peak);
+  }
+  const nearPeak = (cv: Curve, i: number) => cv.place[i] > 0 && cv.place[i] >= FILLER_PEAK_SHARE * (peakOf.get(cv) ?? 0);
+  for (const cv of withGoals) {
+    const wallMin = (remaining.get(cv) ?? 0) / input.efficiency + input.overheadMin;
+    let len = Math.min(maxBlockSlots, Math.max(minBlockSlots, Math.ceil(wallMin / SLOT_MIN)));
+    const isFiller = cv.c.source === 'filler';
+    if (isFiller) {
+      // a filler keeps to its own good hours, and takes what is left of them when the program has the rest
+      let near = 0;
+      for (let j = firstIdx; j < n; j++) if (usable(cv, j) && nearPeak(cv, j)) near++;
+      len = Math.min(len, Math.max(minBlockSlots, near));
+    }
+    let bestStart = -1;
+    for (;;) {
+      let bestSum = 0;
+      for (let s = firstIdx; s + len <= n; s++) {
+        let sum = 0;
+        let ok = true;
+        for (let j = s; j < s + len && ok; j++) {
+          ok = !taken[j] && usable(cv, j);
+          sum += cv.place[j];
+        }
+        if (ok && sum > bestSum) {
+          bestSum = sum;
+          bestStart = s;
+        }
+      }
+      if (bestStart >= 0 || !isFiller || len <= minBlockSlots) break;
+      len--;
+    }
+    if (bestStart < 0) continue;
+    taken.fill(1, bestStart, bestStart + len);
+    opensAt.set(cv, bestStart);
+  }
 
   const runs: Run[] = [];
   const st: { cur: Run | null } = { cur: null };
@@ -632,12 +706,17 @@ export function solveNight(input: SolveInput): Solved {
       live.endIdx = i + 1;
       continue;
     }
-    let best: { cv: Curve; v: number } | null = null;
+    const open: Array<{ cv: Curve; v: number; waiting: boolean }> = [];
     const look = Math.min(minBlockSlots, n - i);
     for (const cv of cvs) {
       const isCur = !!live && live.cv === cv;
       const need = isCur ? curLeft : (remaining.get(cv) ?? 0);
       if (need <= 0) continue;
+      // not before its window; a little early only when nothing is running and no minimum block would fit before it
+      const opens = opensAt.get(cv);
+      const waiting = !isCur && opens !== undefined && i < opens && (i <= opens - minBlockSlots || !!(live && curUsable));
+      // the forecast alone never makes a gap: in an hour below the floor a waiting target may run if nothing else can
+      if (waiting && !allSlots[i].cloudy) continue;
       if (isCur ? !curUsable : !usable(cv, i)) continue;
       if (isCur && curLen >= maxBlockSlots) continue;
       let sum = 0;
@@ -652,10 +731,22 @@ export function solveNight(input: SolveInput): Solved {
       }
       if (!ok) continue;
       const meanMerit = sum / look;
-      const urgency = clamp01(need / Math.max(slotYield, available(cv, i)));
-      let v = base(cv) * meanMerit * (1 + URGENCY_WEIGHT * urgency);
+      // a filler has no goal to race the night for: the one about to set is not worth more for it
+      const urgency = cv.c.source === 'filler' ? 0 : clamp01(need / Math.max(slotYield, available(cv, i)));
+      // past its good hours a filler in progress is one filler among the others: better placed ones may take over
+      const value = fillerInProgress(cv.c) && !nearPeak(cv, i) ? settings.fillerWeight * clamp01((cv.c.fillerScore ?? 50) / 100) : base(cv);
+      let v = value * meanMerit * (1 + URGENCY_WEIGHT * urgency);
       if (isCur) v *= 1 + settings.switchHysteresis;
-      if (!best || v > best.v) best = { cv, v };
+      open.push({ cv, v, waiting });
+    }
+    const ready = open.filter((x) => !x.waiting);
+    const choices = ready.length ? ready : open;
+    // a filler being collected, in its good hours, goes before starting another; the program still competes on its value
+    const anyStarted = choices.some((x) => fillerInProgress(x.cv.c) && nearPeak(x.cv, i));
+    let best: { cv: Curve; v: number } | null = null;
+    for (const x of choices) {
+      if (anyStarted && x.cv.c.source === 'filler' && !fillerInProgress(x.cv.c)) continue;
+      if (!best || x.v > best.v) best = x;
     }
     if (!best || best.v <= 0) {
       close();
@@ -739,7 +830,8 @@ export function solveNight(input: SolveInput): Solved {
       const left = Math.max(0, (c.goalMin ?? 0) - (c.collectedMin ?? 0));
       why.push(`program, priority ${c.priority ?? 3}`, left > 0 ? `${Math.round(left)} of ${c.goalMin} min still to collect` : 'goal met, collecting more');
       if (cv.season && cv.season.urgency >= 0.5) why.push(`its season is closing${cv.season.endsAround ? ` (usable until about ${cv.season.endsAround})` : ''}`);
-    } else why.push(`filler (planner score ${Math.round(c.fillerScore ?? 0)})`);
+    } else if (fillerInProgress(c)) why.push(`filler in progress (${Math.round(c.collectedMin ?? 0)} of ${c.goalMin} min collected, planner score ${Math.round(c.fillerScore ?? 0)})`);
+    else why.push(`filler (planner score ${Math.round(c.fillerScore ?? 0)})`);
     why.push(`alt ${Math.round(alts[0])}°→${Math.round(alts[alts.length - 1])}° (max ${Math.round(Math.max(...alts))}°), ${q}`);
     if (moonUp) why.push(`Moon up ${moonUp} min, ≥${Math.round(minSep)}° away`);
     const clouds = cloudsOf(a, b, c.displayName);
@@ -766,9 +858,13 @@ export function solveNight(input: SolveInput): Solved {
   }
 
   function alternatesFor(all: Curve[], own: Curve | null, a: number, b: number, minSlots: number): Alternate[] {
-    const midIdx = Math.floor((a + b - 1) / 2);
-    const ownQ = own ? quadrantOf(own.az[midIdx]) : null;
+    // where things stand when the block starts: on a long block the middle can be another part of the sky
+    const atIdx = a;
+    const ownQ = own ? quadrantOf(own.az[atIdx]) : null;
+    const ownAz = own ? own.az[atIdx] : null;
     const rows: Alternate[] = [];
+    /** new fillers rank after the program and the fillers in progress; azimuth at the block's start */
+    const info = new Map<Alternate, { newFiller: boolean; azMid: number }>();
     for (const cv of all) {
       if (cv === own) continue;
       let k = 0;
@@ -776,9 +872,9 @@ export function solveNight(input: SolveInput): Solved {
       if (k < Math.min(minSlots, b - a)) continue;
       if (cv.c.source === 'program' && base(cv) <= 0) continue;
       const meanMerit = Array.from(cv.merit.slice(a, a + k)).reduce((p, q) => p + q, 0) / k;
-      const q = quadrantOf(cv.az[midIdx]);
+      const q = quadrantOf(cv.az[atIdx]);
       const c = cv.c;
-      rows.push({
+      const row: Alternate = {
         key: c.key,
         displayName: c.displayName,
         gotoName: c.gotoName,
@@ -790,17 +886,23 @@ export function solveNight(input: SolveInput): Solved {
         alt: Math.round(cv.alt[a]),
         usableMin: k * SLOT_MIN,
         value: Math.round(Math.max(base(cv), 0.05) * meanMerit * 100) / 100,
-        reason: `${c.source === 'program' ? `program (priority ${c.priority ?? 3})` : 'filler'}, ${q} at alt ${Math.round(cv.alt[a])}°, usable ${Math.round((k * SLOT_MIN) / 6) / 10} h`,
-      });
+        reason: `${c.source === 'program' ? `program (priority ${c.priority ?? 3})` : fillerInProgress(c) ? 'filler in progress' : 'filler'}, ${q} at alt ${Math.round(cv.alt[a])}°, usable ${Math.round((k * SLOT_MIN) / 6) / 10} h`,
+      };
+      rows.push(row);
+      info.set(row, { newFiller: c.source === 'filler' && !fillerInProgress(c), azMid: cv.az[atIdx] });
     }
-    // the best of each quadrant, other quadrants than the block's own first
-    rows.sort((x, y) => y.value - x.value);
+    const rank = (r: Alternate) => (info.get(r)!.newFiller ? 1 : 0);
+    rows.sort((x, y) => rank(x) - rank(y) || y.value - x.value);
+    const azClear = (r: Alternate) => ownAz !== null && Math.abs(((info.get(r)!.azMid - ownAz + 540) % 360) - 180) >= OWN_QUADRANT_AZ_CLEAR;
     const out: Alternate[] = [];
     const seen = new Set<Quadrant>();
-    for (const pass of [0, 1]) {
+    // the best of each other quadrant (cloud over part of the sky), then one in the block's own quadrant
+    // but around the sky from it (a vertical obstruction), then whatever is left by value
+    for (const pass of [0, 1, 2]) {
       for (const r of rows) {
         if (out.length >= ALTERNATES || out.includes(r)) continue;
         if (pass === 0 && (seen.has(r.quadrant) || r.quadrant === ownQ)) continue;
+        if (pass === 1 && (r.quadrant !== ownQ || seen.has(r.quadrant) || !azClear(r))) continue;
         seen.add(r.quadrant);
         out.push(r);
       }

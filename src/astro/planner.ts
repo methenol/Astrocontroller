@@ -59,6 +59,10 @@ export interface PlanOptions {
   today?: string;
   /** the site's obstructions (astro/horizon.ts): a target counts as up only above them too; without one, minAltitude alone */
   horizon?: Horizon;
+  /** catalog keys (rest.targetKey) with integration towards a goal: always ranked and always on the list, past the funnel and the limit */
+  started?: ReadonlySet<string>;
+  /** choose the list to cover the night: the best of every part of it (a block's length, an hour at least) in every quadrant of the sky */
+  spanNight?: { blockMin: number };
 }
 
 export interface PlannedTarget {
@@ -495,20 +499,23 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
 
   // Cheap funnel: only rows that can ever reach the sky, then only the ones a no-ephemeris
   // proxy puts near the top. The ephemeris is the expensive part; it is paid for ~400 rows.
+  const isStarted = (id: string) => opts.started?.has(id.trim().toLowerCase()) ?? false;
   const reachable = catalog().filter((o) => {
     if (Math.abs(site.lat - o.decDeg) > DEC_PREFILTER_MARGIN) return false;
     if (types.size && !types.has(o.type)) return false;
     if (ONLY_ON_REQUEST.includes(o.type) && !types.has(o.type)) return false;
     const famous = o.aliases.some((a) => FAMOUS.test(a));
     // Bright enough: a magnitude within the limit, or (nebulae have none) a bright or moderate class.
-    if (!famous && !(o.mag !== undefined ? o.mag <= maxMag : o.brightClass !== undefined && o.brightClass <= 2)) return false;
+    // A target already being collected passes the default brightness floor; a magnitude the owner set still applies.
+    const startedPass = opts.maxMagnitude === undefined && isStarted(o.id);
+    if (!famous && !startedPass && !(o.mag !== undefined ? o.mag <= maxMag : o.brightClass !== undefined && o.brightClass <= 2)) return false;
     if ((o.majorArcmin ?? 0) < minSize || (o.majorArcmin ?? 0) > maxSize) return false;
     return 90 - Math.abs(site.lat - o.decDeg) >= opts.minAltitude;
   });
   const funnel: Array<{ proxy: number; o: DsoObject }> = [];
   for (const o of reachable) funnel.push({ proxy: cheapScore(o, site, opts.fovArcmin, glass), o });
   funnel.sort((a, b) => b.proxy - a.proxy);
-  const candidates = funnel.slice(0, FUNNEL_KEEP).map((f) => f.o);
+  const candidates = [...funnel.slice(0, FUNNEL_KEEP), ...funnel.slice(FUNNEL_KEEP).filter((f) => isStarted(f.o.id))].map((f) => f.o);
 
   // What the window's own darkness allows: integration is scored against this, so a two-hour
   // session before dawn is judged on what was on offer, not against a full night.
@@ -633,10 +640,49 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
   // One field, one entry: drop a target whose centre lies inside a better-ranked one that is at
   // least as big (the Maia Nebula inside M 45, a Sharpless region inside an NGC complex).
   const picked: typeof scored = [];
-  for (const c of scored) {
-    const host = picked.find((p) => p.size >= c.size && separationDeg(p.t.raHours, p.t.decDeg, c.t.raHours, c.t.decDeg) * 60 < p.size * SAME_FIELD);
-    if (!host) picked.push(c);
-    if (picked.length >= limit) break;
+  const take = (c: (typeof scored)[number]) => {
+    if (picked.includes(c)) return false;
+    if (picked.some((p) => p.size >= c.size && separationDeg(p.t.raHours, p.t.decDeg, c.t.raHours, c.t.decDeg) * 60 < p.size * SAME_FIELD)) return false;
+    picked.push(c);
+    return true;
+  };
+  if (opts.spanNight) {
+    // Targets already being collected stay on the list whatever their rank; they do not use up the limit.
+    for (const c of scored) if (isStarted(c.t.name)) take(c);
+    const room = limit + picked.length;
+    const byQuality = scored.filter((s) => !s.t.gated).sort((a, b) => b.quality - a.quality);
+    const bandMs = Math.max(60, opts.spanNight.blockMin) * 60e3;
+    // One list per part of the night and quadrant of the sky, best first: a plan needs something usable
+    // in every hour, and an alternate in another direction when cloud or an obstruction takes one out.
+    const cells: Array<typeof scored> = [];
+    for (let t = start.getTime(); t < end.getTime(); t += bandMs) {
+      const bandEnd = Math.min(t + bandMs, end.getTime());
+      const band: Array<typeof scored> = [[], [], [], []];
+      for (const s of byQuality) {
+        if (![t, (t + bandEnd) / 2, bandEnd].every((at) => clears(s.t.raHours, s.t.decDeg, new Date(at)))) continue;
+        const az = altAz(site, s.t.raHours, s.t.decDeg, new Date((t + bandEnd) / 2)).azimuth;
+        band[Math.floor((((az + 45) % 360) + 360) % 360 / 90)].push(s);
+      }
+      cells.push(...band);
+    }
+    // Round-robin over the cells until the list is full, so no hour or direction is crowded out.
+    const next = cells.map(() => 0);
+    let progressed = true;
+    while (progressed && picked.length < room) {
+      progressed = false;
+      for (let i = 0; i < cells.length && picked.length < room; i++) {
+        while (next[i] < cells[i].length) {
+          progressed = true;
+          if (take(cells[i][next[i]++])) break;
+        }
+      }
+    }
+    picked.sort((a, b) => b.quality - a.quality);
+  } else {
+    for (const c of scored) {
+      take(c);
+      if (picked.length >= limit) break;
+    }
   }
 
   const shootable = picked.filter((p) => !p.t.gated).map((p) => p.t);

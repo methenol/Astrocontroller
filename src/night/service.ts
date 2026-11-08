@@ -58,7 +58,9 @@ const OBSTRUCTION_AZ_MAX_DEG = 12;
 /** an obstruction hold is not ended by its own clear check sooner than this (the target was just seen blocked) */
 const HOLD_MIN_MS = 10 * 60_000;
 /** catalog targets the fillers (and Find targets) are drawn from */
-const FILLER_POOL = 40;
+const FILLER_POOL = 120;
+/** a catalog target with at least this much integration counts as started: it is finished before new ones begin */
+const FILLER_STARTED_MIN = 10;
 /** refocus once the forecast temperature has moved this much since the last focus, or after this long */
 const REFOCUS_DELTA_C = 2;
 const REFOCUS_MAX_MIN = 120;
@@ -361,16 +363,30 @@ export class PlanService extends SafeEmitter {
     const defaults = planDefaults();
     const glassFilters = defaults.filter ? [defaults.filter] : defaults.filters.length ? defaults.filters : ['none'];
     const moonIllum = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2)).illuminationPercent / 100;
-    const p = this.catalogPlan(site, w, settings, conditions, { limit: FILLER_POOL, filter });
+    // what has integration towards a goal already: the owner's snoozes and "don't suggest again" still win
+    const progress = programProgress(this.d.journal);
+    const userRests = loadRest().filter((x) => x.role === 'snoozed' || x.role === 'done');
+    const inProgram = new Set(loadProgram().map((t) => targetKey(t.name)));
+    const restGoal = restSettings().integrationTargetMin;
+    const started = new Set<string>();
+    for (const [key, c] of progress) {
+      if (inProgram.has(key) || c.totalMin < FILLER_STARTED_MIN || (restGoal && c.totalMin >= restGoal)) continue;
+      if (!restState(key, w.night, userRests)) started.add(key);
+    }
+    const p = this.catalogPlan(site, w, settings, conditions, { limit: FILLER_POOL, filter, started });
     const candidates: Candidate[] = [];
     const rows = new Map<string, (typeof p.targets)[number]>();
     for (const r of p.targets) {
       if (r.gated) continue;
       const key = targetKey(r.name);
       if (rows.has(key)) continue;
+      // the wider pool must not bring back what the owner rested
+      if (restState(r.name, w.night, userRests)) continue;
       rows.set(key, r);
       const o = findObject(r.name);
       const f = String(r.suggestedFilter ?? '').split(' (')[0];
+      const got = progress.get(key)?.totalMin ?? 0;
+      const goal = restGoal || goalFor(o?.type, r.detectBucket);
       candidates.push({
         key,
         name: r.name,
@@ -380,6 +396,7 @@ export class PlanService extends SafeEmitter {
         decDeg: r.decDeg,
         source: 'filler',
         fillerScore: r.score,
+        ...(started.has(key) && got < goal ? { goalMin: goal, collectedMin: got } : {}),
         filter: f,
         narrowband: classifyFilter(f) !== 'broadband',
         moonKeep: o ? moonlitKeep(chooseGlass(o, { filters: glassFilters, bortle: defaults.bortle, moonStrength: moonIllum }).d, moonIllum) : 1 - 0.7 * moonIllum,
@@ -391,7 +408,7 @@ export class PlanService extends SafeEmitter {
   }
 
   /** The catalog planner over the plan's window, through the plan's target filter (fillers and suggestions). */
-  private catalogPlan(site: sky.Site, w: PlanWindow, settings: PlanSettings, conditions: ((t: Date) => HourConditions | undefined) | null, o: { limit: number; filter?: TargetFilter }) {
+  private catalogPlan(site: sky.Site, w: PlanWindow, settings: PlanSettings, conditions: ((t: Date) => HourConditions | undefined) | null, o: { limit: number; filter?: TargetFilter; started: ReadonlySet<string> }) {
     const defaults = planDefaults();
     const f = o.filter ?? {};
     const types = f.types ?? settings.fillerTypes;
@@ -414,6 +431,8 @@ export class PlanService extends SafeEmitter {
       filters: defaults.filters,
       rig: defaults.rig,
       horizon: settings.useHorizon ? horizonFor(site) : undefined,
+      started: o.started,
+      spanNight: { blockMin: settings.minBlockMin },
     });
   }
 
