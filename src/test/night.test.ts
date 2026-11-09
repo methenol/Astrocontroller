@@ -458,6 +458,128 @@ describe('night journal: the recorder', () => {
   });
 });
 
+describe('night plan: the target being worked', () => {
+  const hour = 3600e3;
+  const twin = (key: string, score: number) => cand('M 31', { key, displayName: key, source: 'filler', fillerScore: score, goalMin: undefined, collectedMin: undefined });
+  const slotAfter = (hours: number) => new Date(W.start.getTime() + Math.round(hours * 6) * 600e3);
+  /** when a target last stands above the plan's minimum altitude in the window */
+  const setsAt = (name: string) => {
+    const o = findObject(name)!;
+    let last = W.start.getTime();
+    for (let t = W.start.getTime(); t < W.end.getTime(); t += 300e3) if (sky.altAz(SITE, o.raHours, o.decDeg, new Date(t)).altitude >= SETTINGS.minAltitude) last = t;
+    return last;
+  };
+
+  test('a running target with less than a minimum block left stays until it sets (the C 34 case)', () => {
+    const sets = setsAt('NGC 7000');
+    const from = new Date(sets - 90 * 60e3);
+    const r = solve([cand('NGC 7000'), cand('M 42', { priority: 5 })], { from, current: { key: 'ngc 7000', since: from.getTime() - 3 * hour }, lock: { key: 'ngc 7000', until: sets + hour } });
+    const first = targetBlocks(r)[0];
+    assert.equal(first.target!.displayName, 'NGC 7000');
+    assert.ok(first.end >= sets - 600e3, `it left ${(sets - first.end) / 60e3} min before setting`);
+  });
+
+  test('the margin protects the running target from a slightly better one, not from a much better one', () => {
+    const from = slotAfter(2);
+    const current = { key: 'a', since: from.getTime() - 3 * hour };
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 55)], { from, current }))[0].target!.key, 'a');
+    const beaten = targetBlocks(solve([twin('a', 50), twin('b', 70)], { from, current }))[0];
+    assert.equal(beaten.target!.key, 'b');
+    assert.equal(beaten.start, from.getTime());
+    assert.ok(Number.isFinite(beaten.alt!.start));
+  });
+
+  test('the minimum block counts from when the scope went to it', () => {
+    const from = slotAfter(2);
+    const fresh = targetBlocks(solve([twin('a', 50), twin('b', 90)], { from, current: { key: 'a', since: from.getTime() - 600e3 } }))[0];
+    assert.equal(fresh.target!.key, 'a');
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 90)], { from, current: { key: 'a', since: from.getTime() - 3 * hour } }))[0].target!.key, 'b');
+  });
+
+  test('a locked target holds to the end of the lock against a much better one, then competes (the Sh2-131 case)', () => {
+    const from = slotAfter(2);
+    const until = slotAfter(3.5).getTime();
+    const first = targetBlocks(solve([twin('a', 50), twin('b', 90)], { from, current: { key: 'a', since: from.getTime() - 3 * hour }, lock: { key: 'a', until } }))[0];
+    assert.equal(first.target!.key, 'a');
+    assert.equal(first.end, until);
+  });
+
+  test('a hold on it, or a pin, ends the lock early', () => {
+    const from = slotAfter(2);
+    const input = { from, current: { key: 'a', since: from.getTime() - 3 * hour }, lock: { key: 'a', until: slotAfter(5).getTime() } };
+    const base = { id: 'h', from: from.getTime(), until: null, reason: 'test', by: 'agent' as const, createdAt: from.getTime() };
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 40)], { ...input, holds: [{ ...base, kind: 'hold', target: 'a', cause: 'cloud' }] }))[0].target!.key, 'b');
+    const pinned = targetBlocks(solve([twin('a', 50), twin('b', 40)], { ...input, holds: [{ ...base, kind: 'pin', target: 'b', until: slotAfter(4).getTime() }] }))[0];
+    assert.equal(pinned.target!.key, 'b');
+  });
+
+  test('a target at its goal is not held by its lock', () => {
+    const from = slotAfter(2);
+    const r = solve([cand('M 31', { goalMin: 300, collectedMin: 300 }), cand('M 33')], { from, current: { key: 'ngc 224', since: from.getTime() - hour }, lock: { key: 'ngc 224', until: slotAfter(5).getTime() } });
+    assert.equal(targetBlocks(r)[0].target!.displayName, 'M 33');
+  });
+
+  test('before the night starts, what the scope is on does not take the first block', () => {
+    const r = solve([twin('a', 40), twin('b', 90)], { current: { key: 'a', since: W.start.getTime() - 600e3 } });
+    assert.equal(targetBlocks(r)[0].target!.key, 'b');
+  });
+
+  test('the next block keeps its target by the margin only, and only in its own time', () => {
+    const from = slotAfter(2);
+    const end = W.end.getTime();
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 55)], { from }))[0].target!.key, 'b');
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 55)], { from, incumbent: { key: 'a', start: from.getTime(), end } }))[0].target!.key, 'a');
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 70)], { from, incumbent: { key: 'a', start: from.getTime(), end } }))[0].target!.key, 'b');
+    assert.equal(targetBlocks(solve([twin('a', 50), twin('b', 55)], { from, incumbent: { key: 'a', start: end - hour, end } }))[0].target!.key, 'b');
+  });
+
+  test('the service locks what the scope is on: re-solves plan around it, obscured releases it', async () => {
+    const now = Date.parse('2026-11-02T03:30:00Z');
+    const night = sky.localDate(new Date(now - 12 * hour), config.observer.timezone);
+    const a = addTarget({ name: 'M 33', goalMin: 600, priority: 3 }, night);
+    let active: { target: string; startedAt: number } | null = null;
+    const svc: PlanService = new PlanService({
+      site: () => SITE,
+      fovArcmin: () => ({ w: 83, h: 147 }),
+      journal: new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'lock-j-')) }),
+      active: () => (active ? { night: svc.currentNight().night, session: active as never } : null),
+      now: () => now,
+      conditions: async () => null,
+      forecastStamp: async () => null,
+      dir: fs.mkdtempSync(path.join(os.tmpdir(), 'lock-p-')),
+    });
+    const on = (p: { blocks: Block[] }) => p.blocks.find((b) => b.start <= now && b.end > now)?.target?.displayName;
+    await svc.plan();
+    active = { target: 'M 33', startedAt: now - 4 * hour };
+    assert.equal(on(await svc.replan('a session ended')), 'M 33');
+    const b = addTarget({ name: 'M 31', goalMin: 600, priority: 5 }, night);
+    try {
+      assert.equal(on(await svc.replan('the program changed')), 'M 33');
+      assert.equal(on(await svc.replan('the forecast was updated')), 'M 33');
+      const out = await svc.obscured('M 33', { cause: 'cloud', by: 'agent' });
+      assert.notEqual(out.now.block?.target?.displayName, 'M 33');
+    } finally {
+      removeTarget(a.id);
+      removeTarget(b.id);
+    }
+  });
+
+  test('sessions without a GoTo mark count towards the switch overhead, and each figure says if it is learned', () => {
+    const journal = new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'over-j-')) });
+    const night = new Date(Date.now() - 86_400e3).toISOString().slice(0, 10);
+    const at = Date.now() - 20 * hour;
+    for (let i = 0; i < 3; i++) {
+      const s = journal.openSession(night, { target: `M ${i + 1}`, at: at + i * hour });
+      s.marks.push({ kind: 'stack-start', at: at + i * hour + 20 * 60e3 });
+      journal.closeSession(night, s, 'done', 'test');
+    }
+    const l = learn(journal);
+    assert.equal(l.overheadMin, 20);
+    assert.equal(l.overheadLearned, true);
+    assert.equal(l.efficiencyLearned, false);
+  });
+});
+
 describe('night plan: obstruction holds follow the sky', () => {
   test('rising in the east: held until it clears; setting in the west: out for the night; cloud: for a while', async () => {
     const now = Date.parse('2026-11-02T03:30:00Z');

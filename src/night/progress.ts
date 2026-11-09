@@ -40,6 +40,9 @@ export interface Learned {
   efficiency: number;
   /** how many sessions they were learned from (0 = defaults) */
   samples: number;
+  /** whether each is learned from the journal (enough sessions) or still the default */
+  overheadLearned?: boolean;
+  efficiencyLearned?: boolean;
 }
 
 /** Without a journal to learn from. */
@@ -121,10 +124,11 @@ export function learn(journal: Pick<Journal, 'recentSessions'> | null): Learned 
   const overheads: number[] = [];
   const effs: number[] = [];
   for (const s of sessions) {
-    const firstGoto = s.marks.find((m) => m.kind === 'goto-start')?.at;
+    // a session opened on a target the scope was already sent to has no GoTo mark: it counts from its start
+    const began = s.marks.find((m) => m.kind === 'goto-start')?.at ?? s.startedAt;
     const firstStack = s.marks.find((m) => m.kind === 'stack-start')?.at;
-    if (firstGoto && firstStack && firstStack > firstGoto) {
-      const min = (firstStack - firstGoto) / 60e3;
+    if (firstStack && firstStack > began) {
+      const min = (firstStack - began) / 60e3;
       if (min > 0.5 && min < 60) overheads.push(min);
     }
     if (s.stats.efficiencyPct && s.stats.stackS && s.stats.stackS > 15 * 60) effs.push(s.stats.efficiencyPct / 100);
@@ -133,5 +137,7 @@ export function learn(journal: Pick<Journal, 'recentSessions'> | null): Learned 
     overheadMin: overheads.length >= MIN_SAMPLES ? Math.round(median(overheads) * 10) / 10 : LEARNED_DEFAULTS.overheadMin,
     efficiency: effs.length >= MIN_SAMPLES ? Math.round(Math.max(0.2, Math.min(1, median(effs))) * 100) / 100 : LEARNED_DEFAULTS.efficiency,
     samples: Math.min(overheads.length, effs.length),
+    overheadLearned: overheads.length >= MIN_SAMPLES,
+    efficiencyLearned: effs.length >= MIN_SAMPLES,
   };
 }

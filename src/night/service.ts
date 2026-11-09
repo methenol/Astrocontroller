@@ -7,6 +7,8 @@
  *   forecast was refetched, a session ended (what is collected moved), a hold was set or ran out,
  *   the program or the settings were edited; and every half hour regardless. What is past is kept
  *   as it was planned, so the Plan tab shows the night as a whole.
+ * - The target being worked is locked to the end of its block: a re-solve plans around it. Only a
+ *   hold on it (obscured, a sky hold, a skip), a pin, its goal or its leaving the sky ends that early.
  * - Holds are the plan's say from the night itself: a target obscured (by a tree or a cloud: a
  *   filler takes its place until it clears), skipped for the night, pinned to a time, or a part of
  *   the sky out for a while.
@@ -69,6 +71,8 @@ const REJECT_WINDOW_MIN = 15;
 const REJECT_FLAG = 0.5;
 const REJECT_MIN_FRAMES = 6;
 const NIGHTS_KEPT = 90;
+/** re-solves nothing about the night has really changed for: the next block's target keeps its place by the switch margin */
+const ROUTINE_REASONS = new Set(['the forecast was updated', 'half-hourly refresh', 'a session ended']);
 
 export interface PlannedNight extends Solved {
   night: string;
@@ -87,6 +91,8 @@ export interface PlannedNight extends Solved {
 interface NightFile {
   plan: PlannedNight | null;
   holds: Hold[];
+  /** the target being worked, and until when it stays */
+  lock?: { key: string; until: number } | null;
 }
 
 /**
@@ -164,7 +170,7 @@ const newId = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().to
 export const PLAN_OBJECTIVE = [
   "Carry out tonight's night plan (the Plan tab) until its end, maximising integration on the owner's program targets.",
   "1. Every sample shows the plan's current block. Be on that target: goto_target name=<its goto name>, autofocus, star_focus, start_stacking. Nothing is stacked before the plan starts; before that, get ready (connect, open the arm).",
-  '2. When the plan moves to the next block, stop_stacking and move to its target the same way. Follow the plan rather than choosing targets yourself; night_plan action=now says what to do at any time.',
+  '2. When the plan moves to the next block, stop_stacking and move to its target the same way. Follow the plan rather than choosing targets yourself; night_plan action=now says what to do at any time. The target you are working is locked to the end of its block: forecast updates and re-solves plan around it.',
   '3. If the target is blocked (tele_visibility, view_camera) or clouded, tell the plan: night_plan action=obscured target=<name> cause=obstruction|cloud, then go to the target it gives. night_plan action=alternates lists other parts of the sky; a cloud bank in one direction: night_plan action=sky_hold quadrant=N|E|S|W minutes=<n>.',
   '4. Record what matters for the owner in the journal (journal action=note): why a target was left, focus or tracking trouble, what you saw.',
   '5. At the end of the duty: stop stacking, park, and transfer the night\'s sessions that are not in the library yet.',
@@ -218,7 +224,7 @@ export class PlanService extends SafeEmitter {
       const plan = raw.plan ?? null;
       // blocks outside the plan's own window (another night's, filed here by mistake) are dropped
       if (plan) plan.blocks = plan.blocks.filter((b) => b.end > plan.window.start && b.start < plan.window.end);
-      f = { plan, holds: Array.isArray(raw.holds) ? raw.holds : [] };
+      f = { plan, holds: Array.isArray(raw.holds) ? raw.holds : [], lock: raw.lock ?? null };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`ignoring unreadable ${this.file(night)}: ${errMsg(e)}`);
     }
@@ -613,8 +619,8 @@ export class PlanService extends SafeEmitter {
       ...l,
       overheadMin: settings.overheadMin ?? l.overheadMin,
       efficiency: settings.efficiency ?? l.efficiency,
-      overheadSource: settings.overheadMin !== null ? 'settings' : l.samples ? 'journal' : 'default',
-      efficiencySource: settings.efficiency !== null ? 'settings' : l.samples ? 'journal' : 'default',
+      overheadSource: settings.overheadMin !== null ? 'settings' : l.overheadLearned ? 'journal' : 'default',
+      efficiencySource: settings.efficiency !== null ? 'settings' : l.efficiencyLearned ? 'journal' : 'default',
     };
   }
 
@@ -648,6 +654,7 @@ export class PlanService extends SafeEmitter {
       conditions: conditions ?? undefined,
       mount: planDefaults().rig.mount,
       current,
+      lock: current ? (f.lock ?? null) : null,
       excluded,
       history: f.plan?.blocks ?? [],
       idPrefix: `${w.night}-${Date.now().toString(36)}-`,
@@ -656,9 +663,37 @@ export class PlanService extends SafeEmitter {
     return { input, w, settings, f, learned, horizonSummary: horizon?.summary ?? null, buildMs };
   }
 
+  /**
+   * The lock follows the night: the scope on the plan's current block locks that target to the
+   * block's end; it ends with the block, or when the scope or the plan has left the target.
+   */
+  private syncLock(night: string): void {
+    const f = this.load(night);
+    const now = this.now();
+    const active = this.d.active?.();
+    const key = active && active.night === night ? targetKey(active.session.target) : null;
+    const block = f.plan?.blocks.find((b) => b.start <= now && b.end > now);
+    const onBlock = !!key && block?.kind === 'target' && block.target?.key === key;
+    const before = f.lock ?? null;
+    let lock = before && before.until > now && before.key === key && onBlock ? before : null;
+    if (!lock && onBlock) lock = { key: key!, until: block!.end };
+    if (lock?.key === before?.key && lock?.until === before?.until) return;
+    f.lock = lock;
+    this.save(night);
+    log.info(lock ? `${block!.target!.displayName} locked until ${hm(lock.until)}` : `lock on ${before!.key} ended`);
+  }
+
+  /** The next target block of the plan in force, after the one running now. */
+  private nextBlockOf(plan: PlannedNight | null, now: number): SolveInput['incumbent'] {
+    const b = plan?.blocks.find((x) => x.kind === 'target' && x.start > now);
+    return b?.target ? { key: b.target.key, start: b.start, end: b.end } : null;
+  }
+
   private async solve(reason: string): Promise<PlannedNight> {
     const t0 = Date.now();
+    this.syncLock(this.currentNight().night);
     const { input, w, f, learned, horizonSummary, buildMs } = await this.inputs(this.now());
+    if (ROUTINE_REASONS.has(reason)) input.incumbent = this.nextBlockOf(f.plan, this.now());
     const t1 = Date.now();
     const solved = solveNight(input);
     const solveMs = Date.now() - t1;
@@ -689,6 +724,7 @@ export class PlanService extends SafeEmitter {
     f.plan = plan;
     this.lastForecast = stamp?.fetchedAt ?? this.lastForecast;
     this.save(w.night);
+    this.syncLock(w.night);
     log.info(`plan for ${w.night} solved (${reason}) in ${Date.now() - t0} ms (candidates ${buildMs} ms, schedule ${solveMs} ms, the rest waiting on the forecast): ${plan.blocks.filter((b) => b.kind === 'target' && !b.past).length} blocks, ${plan.totals.programMin} min program, ${plan.totals.fillerMin} min fillers`);
     if (changedSequence) this.d.journal.event(w.night, 'plan', `plan ${reason === 'first look at the night' || reason === 'a new night' ? 'made' : `changed (${reason})`}: ${plan.blocks.filter((b) => b.kind === 'target' && !b.past).map((b) => `${b.target!.displayName} ${hm(b.start)}–${hm(b.end)}`).join(', ') || 'no target blocks'}`, this.now());
     this.emit('plan', plan);
@@ -719,6 +755,7 @@ export class PlanService extends SafeEmitter {
       const settings = loadSettings();
       const w = planWindow(site, new Date(now), settings);
       const f = this.load(w.night);
+      this.syncLock(w.night);
       const during = now >= w.start.getTime() - LEAD_MS && now < w.end.getTime();
       const localHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.observer.timezone, hour: '2-digit', hourCycle: 'h23' }).format(new Date(now)));
       if (!f.plan) {

@@ -31,8 +31,11 @@
  * rises as its remaining usable time tonight shrinks toward what it still needs (the one about
  * to set goes first). The running target is
  * kept unless another beats it by the hysteresis margin, and never before it has had its minimum
- * block. A switch costs the overhead (GoTo, centring, focus, learned from the journal) before any
- * integration counts. A target leaves when its goal is met, it sets, or a hold takes it out.
+ * block, counted from when the scope went to it, across re-solves. The target being worked is
+ * locked to the end of its block (SolveInput.lock): only a hold on it, a pin, its goal or its
+ * leaving the sky ends that early. A switch costs the overhead (GoTo, centring, focus, learned from
+ * the journal) before any integration counts. A target leaves when its goal is met, it sets, or a
+ * hold takes it out.
  *
  * Each block carries alternates in other quadrants of the sky, for when its target is blocked or
  * clouded, and every program target an outlook: planned tonight, collected, still to go, or why
@@ -294,6 +297,10 @@ export interface SolveInput {
   mount?: Mount;
   /** the target the scope is on now, and since when (it is continued without a switch cost) */
   current?: { key: string; since: number } | null;
+  /** the target being worked stays until this time, whatever else the solve finds (it must be `current`) */
+  lock?: { key: string; until: number } | null;
+  /** the next block of the plan in force: on a routine re-solve its target holds it by the hysteresis margin */
+  incumbent?: { key: string; start: number; end: number } | null;
   /** program targets that are in the program but not candidates tonight, with why */
   excluded?: Array<Pick<TargetOutlook, 'key' | 'programId' | 'displayName' | 'gotoName' | 'priority' | 'goalMin' | 'collectedMin' | 'status' | 'reason'>>;
   /** blocks before `from` kept from the plan in force then */
@@ -563,6 +570,8 @@ interface Run {
   overheadMin: number;
   expectedMin: number;
   pinned: boolean;
+  /** slots it has already run before this solve (the running target's), towards its minimum block */
+  ranSlots?: number;
 }
 
 export function solveNight(input: SolveInput): Solved {
@@ -621,6 +630,13 @@ export function solveNight(input: SolveInput): Solved {
   }
   const pinnedAt = (i: number) => pins.find((p) => i >= p.startIdx && i < p.endIdx) ?? null;
 
+  // the running target goes on from where it is: it is not a new block that has to earn its place
+  // (not before the night has started: what the scope is doing while it gets ready is not the plan's)
+  const runningCv = from > input.start.getTime() && input.current ? (cvs.find((x) => x.c.key === input.current!.key) ?? null) : null;
+  const running = runningCv && usable(runningCv, firstIdx) && (remaining.get(runningCv) ?? 0) > 0 && !pinnedAt(firstIdx) ? runningCv : null;
+  const lock = running && input.lock?.key === running.c.key ? input.lock : null;
+  const lockedAt = (i: number) => !!lock && allSlots[i].t < lock.until;
+
   // Where each goal's time belongs: walking the night forward alone would take a target the moment it
   // clears, low in the sky, when what it needs fits in its best hours. The program first, then the
   // fillers in progress, most valued first: each gets the contiguous stretch of its need with the most
@@ -629,6 +645,8 @@ export function solveNight(input: SolveInput): Solved {
   const opensAt = new Map<Curve, number>();
   const taken = new Uint8Array(n);
   for (const p of pins) taken.fill(1, p.startIdx, p.endIdx);
+  // what the lock holds is not there for the other targets' windows
+  for (let i = firstIdx; running && i < n && lockedAt(i) && usable(running, i) && !pinnedAt(i); i++) taken[i] = 1;
   const programFirst = (cv: Curve) => (cv.c.source === 'program' ? 0 : 1);
   const withGoals = cvs.filter((cv) => (cv.c.source === 'program' || fillerInProgress(cv.c)) && (remaining.get(cv) ?? 0) > 0 && cv.c.key !== currentKeyOf(input)).sort((a, b) => programFirst(a) - programFirst(b) || base(b) - base(a));
   const peakOf = new Map<Curve, number>();
@@ -672,11 +690,16 @@ export function solveNight(input: SolveInput): Solved {
   }
 
   const runs: Run[] = [];
-  const st: { cur: Run | null } = { cur: null };
+  const st: { cur: Run | null } = { cur: running ? { cv: running, startIdx: firstIdx, endIdx: firstIdx, overheadMin: 0, expectedMin: 0, pinned: false, ranSlots: Math.max(0, Math.floor((from - input.current!.since) / SLOT_MS)) } : null };
   const currentKey = input.current?.key ?? null;
   const yieldOf = (r: Run, slots: number) => Math.max(0, wSum(r.startIdx, r.startIdx + slots) * SLOT_MIN - r.overheadMin) * input.efficiency;
   const close = () => {
     if (!st.cur) return;
+    // the running target, replaced in the very first slot: it has no block
+    if (st.cur.endIdx <= st.cur.startIdx) {
+      st.cur = null;
+      return;
+    }
     st.cur.expectedMin = yieldOf(st.cur, st.cur.endIdx - st.cur.startIdx);
     remaining.set(st.cur.cv, Math.max(0, (remaining.get(st.cur.cv) ?? 0) - st.cur.expectedMin));
     runs.push(st.cur);
@@ -698,11 +721,12 @@ export function solveNight(input: SolveInput): Solved {
     }
     if (st.cur && st.cur.pinned) close();
     const live: Run | null = st.cur;
-    const curLen = live ? i - live.startIdx : 0;
-    const curLeft = live ? (remaining.get(live.cv) ?? 0) - yieldOf(live, curLen) : 0;
+    const curRun = live ? i - live.startIdx : 0;
+    const curLen = curRun + (live?.ranSlots ?? 0);
+    const curLeft = live ? (remaining.get(live.cv) ?? 0) - yieldOf(live, curRun) : 0;
     const curUsable = !!live && usable(live.cv, i) && curLeft > 0;
-    // a block keeps its minimum length unless its target can no longer be shot
-    if (live && curUsable && curLen < minBlockSlots) {
+    // a block keeps its minimum length unless its target can no longer be shot; the locked one, its whole block
+    if (live && curUsable && (curLen < minBlockSlots || (live.cv === running && lockedAt(i)))) {
       live.endIdx = i + 1;
       continue;
     }
@@ -736,7 +760,7 @@ export function solveNight(input: SolveInput): Solved {
       // past its good hours a filler in progress is one filler among the others: better placed ones may take over
       const value = fillerInProgress(cv.c) && !nearPeak(cv, i) ? settings.fillerWeight * clamp01((cv.c.fillerScore ?? 50) / 100) : base(cv);
       let v = value * meanMerit * (1 + URGENCY_WEIGHT * urgency);
-      if (isCur) v *= 1 + settings.switchHysteresis;
+      if (isCur || (input.incumbent?.key === cv.c.key && allSlots[i].t >= input.incumbent.start && allSlots[i].t < input.incumbent.end)) v *= 1 + settings.switchHysteresis;
       open.push({ cv, v, waiting });
     }
     const ready = open.filter((x) => !x.waiting);
