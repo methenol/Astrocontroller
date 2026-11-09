@@ -13,6 +13,9 @@ import { setRest, liftRest } from '../astro/rest.js';
 import { alternatesAt, daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
 import { Journal } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
+import { dwarfProbe } from '../drivers/dwarf/journal.js';
+import type { Dwarf } from '../drivers/dwarf/device.js';
+import type { StreamHub } from '../media/streams.js';
 import { learn } from '../night/progress.js';
 import { nightOfStamp, planWindow } from '../night/clock.js';
 import { PlanService } from '../night/service.js';
@@ -342,6 +345,72 @@ describe('night journal: the recorder', () => {
     // 2 then 3 within the burst window are one mark, the 1 ten minutes later another
     assert.deepEqual(s[0].marks.filter((m) => m.kind === 'reject').map((m) => m.n), [5, 1]);
     assert.ok(st.altStart !== undefined && st.moonIllumPct !== undefined);
+  });
+
+  describe('the Dwarf probe, on what the telescope really sends (wire log, 2026-11-08, C 34)', () => {
+    const rig = () => {
+      const st: Record<string, any> = { connected: true, released: false, goto: { state: 'idle' }, tracking: { state: 'idle' }, autofocus: { state: 'idle' }, stacking: { tele: { state: 'idle' } } };
+      const journal = new Journal({ dir: dir() });
+      let t = t0;
+      const dwarf = Object.assign(new EventEmitter(), { state: st }) as unknown as Dwarf;
+      const rec = new JournalRecorder({ journal, probe: dwarfProbe(dwarf, null as unknown as StreamHub), site: () => SITE, now: () => t, settleMs: 0 });
+      rec.observe();
+      const step = (s: number, f: () => void) => {
+        t += s * 1000;
+        f();
+        rec.observe();
+      };
+      const oneClick = (d: Record<string, unknown>, at = Date.now()) => (st.oneClickGoto = { ...d, at });
+      const session = () => journal.night(night).sessions[0];
+      return { st, step, oneClick, session, journal };
+    };
+
+    test('a one-click GoTo is timed, though it never reports as gotoState', () => {
+      const { st, step, oneClick, session, journal } = rig();
+      const name = 'M 31';
+      step(1, () => oneClick({ astroGotoState: { state: 1, targetName: name } }));
+      step(6, () => oneClick({ astroGotoState: { state: 4, targetName: name } }));
+      step(10, () => oneClick({ astroGotoState: { state: 3, targetName: name } }));
+      // the stage's end, seen before the tracking that follows it, is not the GoTo failing
+      assert.ok(!session().marks.some((m) => m.kind === 'goto-failed' || m.kind === 'goto-done'));
+      step(0, () => {
+        oneClick({ astroTrackingState: { state: 1, targetName: name } });
+        st.tracking = { state: 'running', target: name };
+      });
+      assert.equal(session().target, name);
+      assert.equal(session().stats.acquireS, 16);
+      assert.equal(journal.summary(night).acquireMin, 0.3, 'a short GoTo does not round away to 0 min');
+      assert.equal(session().stats.gotoAttempts, 1);
+      assert.deepEqual(session().marks.map((m) => m.kind), ['goto-start', 'goto-done']);
+    });
+
+    test('a one-click GoTo that stops without tracking failed', () => {
+      const { step, oneClick, session } = rig();
+      step(1, () => oneClick({ astroGotoState: { state: 1, targetName: 'M 31' } }));
+      step(10, () => oneClick({ astroGotoState: { state: 3, targetName: 'M 31' } }, Date.now() - 5_000));
+      assert.deepEqual(session().marks.map((m) => m.kind), ['goto-start', 'goto-failed']);
+    });
+
+    test('the integration uses the sub length that only arrives with the progress', () => {
+      const { st, step, session } = rig();
+      step(1, () => (st.stacking.tele = { state: 'running', target: 'M 31' }));
+      assert.equal(session().stats.subS, undefined);
+      step(90, () => (st.stacking.tele = { state: 'running', target: 'M 31', currentCount: 1, stackedCount: 1, expIndex: 163 }));
+      step(1710, () => (st.stacking.tele = { state: 'running', target: 'M 31', currentCount: 21, stackedCount: 20, expIndex: 163 }));
+      assert.equal(session().stats.subS, 90);
+      assert.equal(session().stats.integrationS, 1800);
+      assert.equal(session().stats.rejected, 1);
+    });
+
+    test("the horizon survey's slews are not sessions", () => {
+      const { st, step, oneClick, journal } = rig();
+      step(1, () => oneClick({ astroGotoState: { state: 1, targetName: 'survey anchor NE' } }));
+      step(20, () => {
+        oneClick({ astroTrackingState: { state: 1, targetName: 'survey anchor NE' } });
+        st.tracking = { state: 'running', target: 'survey anchor NE' };
+      });
+      assert.equal(journal.night(night).sessions.length, 0);
+    });
   });
 
   test('the next target opens a new session and closes the last one', () => {

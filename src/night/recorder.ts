@@ -257,6 +257,8 @@ export class JournalRecorder {
     st.rejected = rejected;
     st.framesTaken = stacked + rejected;
     st.rejectionPct = st.framesTaken ? Math.round((rejected / st.framesTaken) * 1000) / 10 : 0;
+    // the Dwarf only says its sub length in the progress of the first frames, after the stack has started
+    st.subS = snap.stack.subS ?? st.subS;
     st.integrationS = snap.stack.integrationS ?? (st.subS ? Math.round(stacked * st.subS) : st.integrationS);
     const firstStack = s.marks.find((m) => m.kind === 'stack-start')?.at;
     if (firstStack) st.stackS = Math.round((t - firstStack) / 1000);

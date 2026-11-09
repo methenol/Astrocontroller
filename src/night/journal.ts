@@ -161,7 +161,8 @@ export function summarize(n: JournalNight): NightSummary {
     integrationMin: Math.round(sum((s) => s.stats.integrationS) / 60),
     stacked: sum((s) => s.stats.stacked),
     rejected: sum((s) => s.stats.rejected),
-    acquireMin: Math.round(sum((s) => s.stats.acquireS) / 60),
+    // to a tenth: a one-click GoTo takes under half a minute, so whole minutes read 0
+    acquireMin: Math.round(sum((s) => s.stats.acquireS) / 6) / 10,
     focusMin: Math.round(sum((s) => s.stats.focusS) / 60),
     notes: n.notes.length,
     firstAt: ats.length ? Math.min(...ats) : null,

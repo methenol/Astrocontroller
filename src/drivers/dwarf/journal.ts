@@ -3,9 +3,28 @@ import { analyze, loadImage } from '../../media/images.js';
 import type { StreamHub } from '../../media/streams.js';
 import type { JournalProbe, OpState, ScopeSnapshot } from '../../night/recorder.js';
 import { PARAMS_RANGE } from './wire/generated/params.generated.js';
+import { astroState } from './controller/util.js';
+import type { TelescopeState } from './controller/state.js';
 import type { Dwarf } from './device.js';
 
 const ACTIVE = new Set(['running', 'plate_solving', 'stopping']);
+/** A one-click GoTo's stage reads as ended about 40 ms before tracking is reported: not an end until this long has passed. */
+const ONE_CLICK_END_GRACE_MS = 2_000;
+/** The horizon survey's slews (media/horizon/survey.ts) are not visits to a target. */
+const SURVEY_ANCHOR = /^survey anchor\b/i;
+
+interface OneClickStage {
+  state?: number;
+  targetName?: string;
+}
+
+/** A one-click GoTo reports only as oneClickGotoState, never as gotoState: is it moving, and toward what? */
+function oneClickGoto(st: TelescopeState): { running: boolean; target?: string } {
+  const oc = st.oneClickGoto as { astroCalibrationState?: OneClickStage; astroGotoState?: OneClickStage; astroTrackingState?: OneClickStage; at?: number } | undefined;
+  const stage = oc?.astroCalibrationState ?? oc?.astroGotoState;
+  const target = (stage ?? oc?.astroTrackingState)?.targetName;
+  return { running: !!stage && (ACTIVE.has(astroState(stage.state)) || Date.now() - (oc?.at ?? 0) < ONE_CLICK_END_GRACE_MS), target };
+}
 
 /** Sub length from the firmware's exposure index ("15" → 15 s, "1/100" → 0.01 s). */
 function expSeconds(index: number | undefined): number | undefined {
@@ -23,13 +42,15 @@ export function dwarfProbe(dwarf: Dwarf, hub: StreamHub): JournalProbe {
       const st = dwarf.state;
       const tele = st.stacking.tele;
       // the Dwarf reports no GoTo result: one that ends tracking got there
-      const goto: OpState = ACTIVE.has(st.goto.state) ? 'running' : st.tracking.state === 'running' ? 'complete' : 'failed';
+      const oneClick = oneClickGoto(st);
+      const surveying = SURVEY_ANCHOR.test(oneClick.target ?? '');
+      const goto: OpState = surveying ? 'idle' : ACTIVE.has(st.goto.state) || oneClick.running ? 'running' : st.tracking.state === 'running' ? 'complete' : 'failed';
       const af = ACTIVE.has(st.autofocus.astro ?? '') || ACTIVE.has(st.autofocus.state) ? 'running' : 'complete';
       const taken = tele.currentCount;
       const stacked = tele.stackedCount;
       return {
         connected: st.connected && !st.released,
-        goto: { state: goto, target: st.goto.target ?? st.pointing?.target },
+        goto: { state: goto, target: (surveying ? undefined : oneClick.target) ?? st.goto.target ?? st.pointing?.target },
         autofocus: { state: af },
         fineFocus: { running: !!st.focusTune?.running, result: st.focusTune?.best ? `best ${st.focusTune.best.position} (HFR ${st.focusTune.best.hfrPx.toFixed(2)} px)` : undefined },
         focusPosition: st.focusPosition,
