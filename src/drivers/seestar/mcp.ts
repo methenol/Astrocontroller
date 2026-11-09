@@ -26,6 +26,7 @@ import type { DutyLoop } from '../../agent/duty.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
 import type { NightServices } from '../../night/index.js';
 import { registerNightTools } from '../../mcp/tools/night.js';
+import { registerMosaicTools } from '../../mcp/tools/mosaic.js';
 import { registerAcquisitionTools } from '../../mcp/tools/acquisition.js';
 import { seestarFacts } from './acquisition.js';
 import type { McpSpec } from '../types.js';
@@ -70,7 +71,22 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
       // sessions on the Seestar, transfers, the library and processing
       registerLibraryTools(tool, { device: true, transferHold: () => nights?.transferHold() ?? null });
       if (duty) registerDutyTools(tool, { duty });
-      if (night) registerNightTools(tool, night);
+      if (night) {
+        registerNightTools(tool, night);
+        registerMosaicTools(tool, night, {
+          field: () => {
+            const f = scope.state.fov ?? NOMINAL_FOV;
+            return { w: f.h * 60, h: f.v * 60 };
+          },
+          facts: seestarFacts(scope),
+          startNative: async (project) => {
+            const angle = project.footprint.angleDeg - 90;
+            // star_map_angle = 361 + angle, the value the Seestar community documents; the scale is how many frames the mosaic spans
+            const r = await scope.gotoTarget({ raHours: project.footprint.raHours, decDeg: project.footprint.decDeg, name: project.gotoName, stack: true, mosaic: { scale: Math.max(project.nativeScale!.x, project.nativeScale!.y), angle, star_map_angle: 361 + angle, star_map_ratio: 1 } });
+            return `GoTo ${r.goto.state}; stacking ${r.stacking}`;
+          },
+        });
+      }
       if (nights) {
         tool(
           'starfront_roof',

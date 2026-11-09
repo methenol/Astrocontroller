@@ -24,6 +24,7 @@ import { isPlainName } from '../library/sessions.js';
 import * as studioApi from './studio.js';
 import { OutboxStore, isOpen, type ProcessingItem } from './store.js';
 import { withoutCredentials } from '../util/url.js';
+import { applyStudioReport, manifestFor, type MosaicManifest, type MosaicProject } from '../night/mosaics.js';
 import { SafeEmitter } from '../util/events.js';
 
 export type { ItemState, ProcessingItem } from './store.js';
@@ -43,7 +44,7 @@ const CALIBRATION_KINDS = ['dark', 'flat', 'bias'];
 /** Longest target name accepted (it labels the job on the server). */
 const MAX_TARGET_CHARS = 200;
 
-export type StudioClient = Pick<typeof studioApi, 'health' | 'resolve' | 'submit' | 'job' | 'cancel' | 'uploads' | 'uploadFile' | 'download'>;
+export type StudioClient = Pick<typeof studioApi, 'health' | 'resolve' | 'submit' | 'submitMosaic' | 'job' | 'cancel' | 'uploads' | 'uploadFile' | 'download'>;
 
 /** The item was cancelled or retried while this step was in flight: stop quietly. */
 class Superseded extends Error {
@@ -127,7 +128,7 @@ export class ProcessingQueue {
   }
 
   /** Queue sessions (DWARF_RAW_… folder names in the library; several = one target over several nights). */
-  enqueue(o: { sessions: string[]; target: string; profile?: string; kind?: string; origin?: string }): ProcessingItem {
+  enqueue(o: { sessions: string[]; target: string; profile?: string; kind?: string; origin?: string; roiCropPercent?: number; mosaic?: MosaicManifest }): ProcessingItem {
     if (!config.studio.url) throw new Error('ASTROPHOTO_URL is not set in .env: processing is off');
     const target = o.target.trim();
     if (!target || target.length > MAX_TARGET_CHARS) throw new Error(`the target name must be 1-${MAX_TARGET_CHARS} characters`);
@@ -147,6 +148,8 @@ export class ProcessingQueue {
       profile: o.profile || config.studio.profile,
       kind: o.kind || 'all',
       origin: o.origin || 'agent',
+      ...(o.roiCropPercent ? { roiCropPercent: o.roiCropPercent } : {}),
+      ...(o.mosaic ? { mosaic: o.mosaic } : {}),
       createdAt: Date.now(),
       state: 'waiting',
       generation: 0,
@@ -305,18 +308,30 @@ export class ProcessingQueue {
     it.access = access;
     if (access === 'upload') await this.uploadSessions(it, live);
     const sp = config.studio.stackParams;
-    const res = await this.studio.submit({
-      paths: access === 'upload' ? it.sessions.map((s) => posix('library', s)) : it.sessions.map(sharedPath),
+    const where = (s: string) => (access === 'upload' ? posix('library', s) : sharedPath(s));
+    const common = {
       source: access === 'upload' ? 'uploads' : 'images',
-      kind: it.kind,
       profile: it.profile,
       stack_params: Object.keys(sp).length ? sp : undefined,
       params: Object.keys(config.studio.params).length ? config.studio.params : undefined,
       preset: config.studio.preset || undefined,
       client_ref: `${it.id}.${it.generation}`,
       origin: 'automation',
-      label: it.sessions.length > 1 ? `${it.target} (${it.sessions.length} sessions)` : it.target,
-    });
+    };
+    const res = it.mosaic
+      ? await this.studio.submitMosaic({
+          ...common,
+          ...it.mosaic,
+          panels: it.mosaic.panels.map(({ sessions, ...p }) => ({ ...p, paths: sessions.map(where) })),
+          label: it.target,
+        })
+      : await this.studio.submit({
+          ...common,
+          paths: it.sessions.map(where),
+          kind: it.kind,
+          label: it.sessions.length > 1 ? `${it.target} (${it.sessions.length} sessions)` : it.target,
+          ...(it.roiCropPercent ? { roi_crop_percent: it.roiCropPercent } : {}),
+        });
     try {
       live();
     } catch (e) {
@@ -443,6 +458,7 @@ export class ProcessingQueue {
       const outputs = config.studio.fetchOutputs ? await this.fetchOutputs(it, j, live) : (j.outputs ?? []).map((o) => `${withoutCredentials(config.studio.url)}${o.url}`);
       live();
       Object.assign(it, { outputs, state: 'done', finishedAt: Date.now() });
+      if (it.mosaic && j.result?.mosaic) applyStudioReport(it.mosaic.project_id, j.result.mosaic, { jobId: j.id, outputs });
       it.message = `done in ${Math.round((j.active ?? 0) / 60)} min${outputs.length ? `: ${outputs.map((o) => path.basename(o)).join(', ')}` : ''}`;
       log.info(`${it.target}: processing finished (${it.message})`);
     } else if (j.state === 'interrupted' && (it.resends ?? 0) < MAX_RESENDS) {
@@ -516,6 +532,13 @@ export const listItems = (limit?: number) => outbox.listItems(limit);
 export const getItem = (id: string) => outbox.getItem(id);
 export const reachability = () => outbox.reachability();
 export const enqueueProcessing = (o: Parameters<ProcessingQueue['enqueue']>[0]) => outbox.enqueue(o);
+
+/** Send a mosaic project to Studio: every panel's library sessions, as one job. */
+export function enqueueMosaic(project: MosaicProject, profile?: string, origin?: string): ProcessingItem {
+  const mosaic = manifestFor(project);
+  const sessions = mosaic.panels.flatMap((p) => p.sessions);
+  return outbox.enqueue({ sessions, target: project.displayName, profile, origin: origin ?? 'agent', kind: 'mosaic', mosaic });
+}
 export const cancelItem = (id: string) => outbox.cancel(id);
 export const retryItem = (id: string) => outbox.retry(id);
 export const startProcessing = () => outbox.start();

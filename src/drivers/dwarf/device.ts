@@ -562,6 +562,10 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     return this.astro.calibrate();
   }
 
+  startMosaic(o: { horizontalScale: number; verticalScale: number; rotation?: number; irIndex?: number }): Promise<void> {
+    return this.astro.startMosaic(o);
+  }
+
   gotoRaDec(raHours: number, decDeg: number, name: string, oneClick: boolean): Promise<string> {
     return this.astro.gotoRaDec(raHours, decDeg, name, oneClick);
   }

@@ -1,4 +1,5 @@
 /** Live snapshots, the SD-card album, the library, transfers, processing and agent captures. */
+import { roiForTarget } from '../../processing/roi.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -247,7 +248,7 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
       const sessions = [...new Set([...(b.sessions ?? []), ...(b.session ? [b.session] : []), ...(b.target ? targetSessions(b.target, b.camera) : [])].filter(Boolean))];
       if (!sessions.length) throw badRequest('give session(s) or a target with sessions in the library');
       const target = b.target ?? library.parseSessionFolder(sessions[0])?.target ?? sessions[0];
-      return processing.enqueueProcessing({ sessions, target, profile: b.profile || undefined, origin: 'ui' });
+      return processing.enqueueProcessing({ sessions, target, profile: b.profile || undefined, origin: 'ui', roiCropPercent: roiForTarget(target) });
     }),
   );
   // a finished job's output (JPEG, TIFF, JSON), shown in the browser: the library copy, or streamed from the server

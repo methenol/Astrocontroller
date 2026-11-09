@@ -90,6 +90,8 @@ export interface GotoRequest {
   lpFilter?: boolean;
   /** start stacking once the GoTo arrives (unless the scope's stack_after_goto already did) */
   stack?: boolean;
+  /** run the firmware's own mosaic around the target */
+  mosaic?: { scale: number; angle: number; star_map_angle: number; star_map_ratio: number };
 }
 
 export interface SeestarOptions {
@@ -757,7 +759,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
               if (this.viewRunning() && this.exposing !== 'tele') await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
               this.stackTarget = g.name;
               this.pointingChanged = true;
-              const res = await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF.tele, target_ra_dec: [g.raHours, g.decDeg], target_name: g.name, lp_filter: !!g.lpFilter }, { timeoutMs: VIEW_TIMEOUT_MS });
+              const res = await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF.tele, target_ra_dec: [g.raHours, g.decDeg], target_name: g.name, lp_filter: !!g.lpFilter, ...(g.mosaic ? { mosaic: g.mosaic } : {}) }, { timeoutMs: VIEW_TIMEOUT_MS });
               this.st.camera = 'tele';
               this.st.view.state = 'working';
               this.st.view.mode = 'star';

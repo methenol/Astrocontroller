@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { errMsg } from '../log.js';
-import { enqueueProcessing } from '../processing/queue.js';
+import { enqueueMosaic, enqueueProcessing } from '../processing/queue.js';
+import { roiForTarget } from '../processing/roi.js';
+import { mosaicProgress, panelOf } from '../night/mosaics.js';
+import { collected } from '../night/progress.js';
 import { deviceLibrary } from './device-library.js';
 import { startJob, type FailedFile, type Job } from './jobs.js';
 import { isTransferred, sessionLocalDir, librarySessionsLike, filterFromNames, sessionDevice, SESSION_META, type DeviceSession } from './sessions.js';
@@ -46,13 +49,23 @@ function queueProcessing(s: DeviceSession, failed: FailedFile[], opts: TransferO
   if (!opts.includeSubframes || !(opts.process ?? config.studio.autoProcess) || !config.studio.url) return undefined;
   const lightsMissing = missingLights(s, failed);
   if (lightsMissing.length) return `not queued: ${lightsMissing.length} light frame(s) are still missing; run the transfer again`;
+  // a mosaic's panel is not an image of its own: the project is processed as one, once every panel has its integration
+  const mosaic = panelOf(s.target);
+  if (mosaic) {
+    if (!mosaicProgress(mosaic.project, collected(null, { filterOf: () => mosaic.project.filter })).integrated) return `not queued: ${s.target} is a panel of mosaic ${mosaic.project.id}, which still has panels to finish`;
+    try {
+      return enqueueMosaic(mosaic.project, opts.profile, opts.origin === 'ui' ? 'ui-transfer' : 'transfer');
+    } catch (err) {
+      return `not queued: ${errMsg(err)}`;
+    }
+  }
   // pool: this night together with every earlier library session of the target that stacks with it
   // (the same camera, the same maker's scope, the same filter: a Duo-Band night and an Astro night are two images)
   const pooled = (opts.pool ?? config.studio.poolSessions) ? librarySessionsLike(s.folder) : [];
   const sessions = pooled.includes(s.folder) ? pooled : [...pooled, s.folder];
   // the files are here whatever happens next: a refusal to queue is reported, it does not fail the transfer
   try {
-    return enqueueProcessing({ sessions, target: s.target, profile: opts.profile, origin: opts.origin === 'ui' ? 'ui-transfer' : 'transfer' });
+    return enqueueProcessing({ sessions, target: s.target, profile: opts.profile, origin: opts.origin === 'ui' ? 'ui-transfer' : 'transfer', roiCropPercent: roiForTarget(s.target) });
   } catch (err) {
     return `not queued: ${errMsg(err)}`;
   }

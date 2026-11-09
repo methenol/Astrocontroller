@@ -16,6 +16,7 @@ import { Journal } from './journal.js';
 import { JournalRecorder, type JournalProbe } from './recorder.js';
 import { PlanService } from './service.js';
 import { nightKey } from './clock.js';
+import { setFrameField } from '../processing/roi.js';
 import type { FactsSource } from '../astro/acquisition/index.js';
 
 const log = logger('night');
@@ -40,6 +41,7 @@ export interface NightDeps {
 }
 
 export function createNight(d: NightDeps): NightServices {
+  setFrameField(d.fovArcmin);
   const journal = new Journal();
   let plan: PlanService | null = null;
   const tz = config.observer.timezone;

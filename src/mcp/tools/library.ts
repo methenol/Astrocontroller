@@ -1,4 +1,5 @@
 /** Copying sessions and files into the library, background jobs, and AstroPhoto Studio processing. */
+import { roiForTarget } from '../../processing/roi.js';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { errMsg } from '../../log.js';
@@ -143,14 +144,16 @@ export function registerLibraryTools(all: ToolFn, o: { device: boolean; transfer
       label: z.string().optional().describe('name of the pooled image (default: the target)'),
       profile: z.string().optional(),
       kind: z.string().optional().describe('job kind (default "all" = analyse, stack, restore, star remover, export)'),
+      roi_crop_percent: z.number().min(0).lt(100).optional().describe("Studio crops the finished image to this percentage of the frame's width and height, around its centre (0 = no crop). Default: worked out from the target's catalog size, when cropping is on for it (roi_crop in plan_program, roiCropEnabled in the plan settings)"),
     },
-    async ({ sessions, target, camera, label, profile, kind }) => {
+    async ({ sessions, target, camera, label, profile, kind, roi_crop_percent }) => {
       const names = (sessions ?? []).map((s) => s.replace(/\/+$/, '').split('/').pop()!).filter(Boolean);
       if (target) names.push(...library.librarySessionsFor(target, camera ?? 'tele'));
       const unique = [...new Set(names)];
       if (!unique.length) throw new Error(target ? `no library sessions of "${target}" (list_library)` : 'give sessions and/or target');
       const targets = [...new Set(unique.map((n) => library.parseSessionFolder(n)?.target ?? n))];
-      const it = processing.enqueueProcessing({ sessions: unique, target: label ?? target ?? targets[0], profile, kind, origin: 'agent' });
+      const roiCropPercent = roi_crop_percent ?? roiForTarget(target ?? targets[0]);
+      const it = processing.enqueueProcessing({ sessions: unique, target: label ?? target ?? targets[0], profile, kind, origin: 'agent', roiCropPercent });
       return text({ ...it, note: `${unique.length} session(s) pooled into one image${targets.length > 1 ? ` (folder targets: ${targets.join(', ')})` : ''}` });
     },
   );

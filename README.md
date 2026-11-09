@@ -286,3 +286,14 @@ Issues, questions, and pull requests are welcome, especially from people with ha
 ## License
 
 MIT for Astrocontroller's own code (see `package.json`). Vendored components keep their own licences, listed above.
+
+## Mosaics and target cropping
+
+Both are off by default and switched on globally (Plan tab, **Settings → Mosaics & cropping**) or per target (a program target's **Edit**: on, off, or *as the settings*). A target's own choice wins.
+
+**Mosaics.** A program target too big for the frame (catalog size plus a margin, against the connected scope's field) becomes a fixed grid of panels, kept in `DATA_DIR/plan/mosaics.json`. It stays one target to the scheduler: its goal is per panel, so 2 h on four panels is 8 h. Each panel is shot under its own name (`NGC 7000 P2`), so the journal and the library count its accepted integration across nights and restarts. AstroPhoto Studio's report feeds back the frames its grading refused and any panel that left a hole in the coverage. The agent's tools are `plan_mosaic`, `get_mosaic_progress`, `get_next_mosaic_panel`, `start_native_mosaic` and `process_mosaic`.
+
+Panels are planned as squares of the frame's short side unless the scope is in EQ mode and `mosaicCameraAngleDeg` is set (a rectangle only holds its place when its orientation is known); in alt-az the overlap is widened too. Panel-by-panel GoTo is the default on both scopes. `mosaicAllowNative` lets the firmware's own mosaic run when the target fits inside it (Dwarf 3: 1.8 × 1.8 frames, EQ only; Seestar: `mosaic` of `iscope_start_view`); their scale units are not confirmed on hardware, see `devices/README.md`.
+
+**Cropping.** When a target spans at most `roiCropMaxFillPct` of the frame, the processing request carries `roi_crop_percent`: the percentage of the frame's width and height to keep, from the catalog size plus `roiCropMarginPct`, so there is room to frame it tighter afterwards. AstroPhoto Studio does the crop.
+

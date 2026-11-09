@@ -90,6 +90,20 @@ export const DeviceSpecSchema = z.object({
     everySubsLong: z.number().int().positive().optional(),
   }),
   mount: z.object({ eqCapable: z.boolean().default(false) }),
+  /** the mosaic the firmware can run by itself; without it, mosaics are panel-by-panel GoTo */
+  mosaic: z
+    .object({
+      native: z.object({
+        maxScaleX: pos,
+        maxScaleY: pos,
+        requiresEq: z.boolean().default(false),
+        /** the protocol's integer per 1× of frame, where the protocol takes integers */
+        wireScale: pos.optional(),
+        /** true once the scale units have been confirmed on the hardware */
+        verified: z.boolean().default(false),
+      }),
+    })
+    .optional(),
   filters: z.array(FilterSchema).min(1),
   sources: z.array(z.string()).default([]),
   notes: z.array(z.string()).default([]),

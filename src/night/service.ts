@@ -15,6 +15,8 @@
  * - The plan never starts a duty by itself: the owner starts it (the Plan tab's run, the duty bar),
  *   or Starfront's autonomous nights do when the roof opens (agent/starfront.ts).
  */
+import { pickDevice } from '../astro/acquisition/devices.js';
+import { existingProject, ensureProject, isMosaicOn, mosaicProgress, panelFilters, parentKey, type MosaicProject } from './mosaics.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config, planDefaults } from '../config.js';
@@ -106,6 +108,7 @@ function programProgress(journal: Journal | null): ReturnType<typeof collected> 
     const key = targetKey(t.name);
     if (t.filter && t.filter !== 'auto' && !filters.has(key)) filters.set(key, t.filter);
   }
+  for (const [key, filter] of panelFilters()) filters.set(key, filter);
   return collected(journal, { filterOf: (key) => filters.get(key) });
 }
 
@@ -169,7 +172,7 @@ const newId = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().to
 
 export const PLAN_OBJECTIVE = [
   "Carry out tonight's night plan (the Plan tab) until its end, maximising integration on the owner's program targets.",
-  "1. Every sample shows the plan's current block. Be on that target: goto_target name=<its goto name>, autofocus, star_focus, start_stacking. Nothing is stacked before the plan starts; before that, get ready (connect, open the arm).",
+  "1. Every sample shows the plan's current block. Be on that target: goto_target name=<its goto name>, autofocus, star_focus, start_stacking. A mosaic block is worked panel by panel as its sample line says; autofocus at the block's start, not at each panel. Nothing is stacked before the plan starts; before that, get ready (connect, open the arm).",
   '2. When the plan moves to the next block, stop_stacking and move to its target the same way. Follow the plan rather than choosing targets yourself; night_plan action=now says what to do at any time. The target you are working is locked to the end of its block: forecast updates and re-solves plan around it.',
   '3. If the target is blocked (tele_visibility, view_camera) or clouded, tell the plan: night_plan action=obscured target=<name> cause=obstruction|cloud, then go to the target it gives. night_plan action=alternates lists other parts of the sky; a cloud bank in one direction: night_plan action=sky_hold quadrant=N|E|S|W minutes=<n>.',
   '4. Record what matters for the owner in the journal (journal action=note): why a target was left, focus or tracking trouble, what you saw.',
@@ -177,6 +180,7 @@ export const PLAN_OBJECTIVE = [
 ].join('\n');
 
 export class PlanService extends SafeEmitter {
+  private lastFacts: Awaited<ReturnType<PlanService['facts']>> = null;
   private timer: NodeJS.Timeout | null = null;
   private debounce: NodeJS.Timeout | null = null;
   private chain: Promise<unknown> = Promise.resolve();
@@ -309,6 +313,7 @@ export class PlanService extends SafeEmitter {
 
   /** The candidates of a night: the program's targets, then the catalog planner's best as fillers. */
   private candidates(site: sky.Site, w: PlanWindow, settings: PlanSettings, conditions: ((t: Date) => HourConditions | undefined) | null): { list: Candidate[]; excluded: NonNullable<SolveInput['excluded']> } {
+    const facts = this.lastFacts;
     const defaults = planDefaults();
     const moonIllum = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2)).illuminationPercent / 100;
     const glassFilters = defaults.filter ? [defaults.filter] : defaults.filters.length ? defaults.filters : ['none'];
@@ -319,10 +324,14 @@ export class PlanService extends SafeEmitter {
     // the owner's own say in the target memory (Tonight / Plan: snooze, don't suggest again); a capture's rest is the program's goal here
     const userRests = loadRest().filter((r) => r.role === 'snoozed' || r.role === 'done');
     const restDays = restSettings().restDays;
-    for (const t of program) {
-      const key = targetKey(t.name);
+    for (const target of program) {
+      const key = targetKey(target.name);
       const prog = progress.get(key);
-      const got = prog?.totalMin ?? 0;
+      // a mosaic stays one target: its goal is every panel's, and only what each panel is owed counts as collected
+      const project = isMosaicOn(target, settings) ? this.projectOf(target, settings, facts, w.night) : null;
+      const mp = project ? mosaicProgress(project, progress) : null;
+      const t = mp ? { ...target, goalMin: mp.goalS / 60 } : target;
+      const got = mp ? Math.round(mp.acceptedS / 60) : (prog?.totalMin ?? 0);
       const row = { key, programId: t.id, displayName: t.displayName, gotoName: t.gotoName, priority: t.priority, goalMin: t.goalMin, collectedMin: got };
       if (!t.enabled) {
         excluded.push({ ...row, status: 'disabled', reason: 'disabled in the program' });
@@ -347,7 +356,7 @@ export class PlanService extends SafeEmitter {
         excluded.push({ ...row, status: 'waiting', reason: `waits until ${t.notBefore}` });
         continue;
       }
-      list.push(this.programCandidate(t, key, got, glassFilters, moonIllum));
+      list.push({ ...this.programCandidate(t, key, got, glassFilters, moonIllum), ...(project ? { mosaic: { projectId: project.id, panels: project.panels.length, execution: project.execution } } : {}) });
     }
     if (settings.fillers) {
       try {
@@ -577,6 +586,14 @@ export class PlanService extends SafeEmitter {
     }
   }
 
+  /** A program target's mosaic project for the frame in use (made on first need, then fixed). */
+  private projectOf(t: ProgramTarget, settings: PlanSettings, facts: Awaited<ReturnType<PlanService['facts']>>, today: string): MosaicProject | null {
+    const field = this.d.fovArcmin();
+    const eqMode = facts?.eqMode;
+    const native = facts ? pickDevice(facts).spec.mosaic?.native : undefined;
+    return ensureProject(t, { field, mount: eqMode === true ? 'eq' : eqMode === false ? 'altaz' : 'unknown', eqMode, native, settings }, today);
+  }
+
   private programCandidate(t: ProgramTarget, key: string, got: number, glassFilters: string[], moonIllum: number): Candidate {
     const o = findObject(t.name);
     let filter = t.filter && t.filter !== 'auto' ? t.filter : undefined;
@@ -634,12 +651,13 @@ export class PlanService extends SafeEmitter {
     const conditions = settings.useForecast ? await this.conditions().catch(() => null) : null;
     this.lastConditions = conditions;
     const tc = Date.now();
+    this.lastFacts = settings.mosaicEnabled || loadProgram().some((t) => t.mosaic === 'on') ? await this.facts() : null;
     const { list, excluded } = this.candidates(site, w, settings, conditions);
     const buildMs = Date.now() - tc;
     const horizon = settings.useHorizon ? horizonFor(site) : undefined;
     const learned = this.learned(settings);
     const active = this.d.active?.();
-    const current = active && active.night === w.night ? { key: targetKey(active.session.target), since: active.session.startedAt } : null;
+    const current = active && active.night === w.night ? { key: parentKey(active.session.target), since: active.session.startedAt } : null;
     const input: SolveInput = {
       site,
       start: w.start,
@@ -979,6 +997,7 @@ export class PlanService extends SafeEmitter {
     if (!plan) return ['- night plan: not solved yet (night_plan action=show solves it)'];
     const v = this.viewOf(plan, at);
     const lines = [`- night plan: ${v.instruction}`];
+    if (v.block?.target?.mosaic?.execution === 'panels') lines.push(`- mosaic: this block's target is ${v.block.target.mosaic.panels} panels (project ${v.block.target.mosaic.projectId}). Do not goto the target itself: get_next_mosaic_panel gives the panel, its coordinates and how long to stack; goto_target with that name, ra_hours and dec_deg, stack, then ask it again.`);
     const alts = v.block?.alternates ?? [];
     if (v.phase === 'night' && alts.length) lines.push(`- plan alternates now: ${alts.slice(0, 3).map((a) => `${a.gotoName} (${a.quadrant}, alt ${a.alt}°)`).join(', ')}`);
     if (v.phase === 'night') lines.push(...this.sessionChecks(at));
@@ -1039,7 +1058,7 @@ export class PlanService extends SafeEmitter {
   blockFor(target: string, at: number): { id: string } | null {
     try {
       const plan = this.load(this.currentNight().night).plan;
-      const key = targetKey(target);
+      const key = parentKey(target);
       const b = plan?.blocks.find((x) => x.target?.key === key && x.start - 30 * 60e3 <= at && x.end > at);
       return b ? { id: b.id } : null;
     } catch {
@@ -1056,10 +1075,15 @@ export class PlanService extends SafeEmitter {
     } catch {
       /* no site */
     }
-    return loadProgram().map((t) => {
-      const key = targetKey(t.name);
+    const settings = loadSettings();
+    const field = this.d.fovArcmin();
+    return loadProgram().map((target) => {
+      const key = targetKey(target.name);
       const c = progress.get(key);
-      return { ...t, key, collectedMin: c?.totalMin ?? 0, journalOnlyMin: c?.journalOnlyMin ?? 0, nights: c?.nights ?? 0, lastNight: c?.lastNight ?? null, tonight: plan?.outlook.find((x) => x.key === key) ?? null };
+      const project = isMosaicOn(target, settings) ? existingProject(key, field) : undefined;
+      const mp = project ? mosaicProgress(project, progress) : null;
+      const t = mp ? { ...target, goalMin: mp.goalS / 60 } : target;
+      return { ...t, key, collectedMin: mp ? Math.round(mp.acceptedS / 60) : (c?.totalMin ?? 0), journalOnlyMin: c?.journalOnlyMin ?? 0, nights: c?.nights ?? 0, lastNight: c?.lastNight ?? null, tonight: plan?.outlook.find((x) => x.key === key) ?? null };
     });
   }
 

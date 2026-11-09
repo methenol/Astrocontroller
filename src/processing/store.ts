@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import { logger, errMsg } from '../log.js';
 import { writeFileAtomic } from '../util/fs.js';
+import type { MosaicManifest } from '../night/mosaics.js';
 
 const log = logger('processing');
 
@@ -28,6 +29,10 @@ export interface ProcessingItem {
   studioJobId?: string;
   studio?: { state: string; progress: number; message?: string; position?: number; startsInS?: number | null; etaS?: number | null; activeS?: number };
   outputs?: string[];
+  /** ask Studio to keep this percentage of the frame's width and height around its centre */
+  roiCropPercent?: number;
+  /** a mosaic project's processing: the sessions per panel go to Studio's mosaic job */
+  mosaic?: MosaicManifest;
   message?: string;
   lastError?: string;
   attempts: number;

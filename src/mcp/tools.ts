@@ -13,6 +13,7 @@ import { registerHorizonTools } from './tools/horizon.js';
 import { registerLibraryTools } from './tools/library.js';
 import { registerMediaTools } from './tools/media.js';
 import { registerMotionTools } from './tools/motion.js';
+import { registerMosaicTools } from './tools/mosaic.js';
 import { registerNightTools } from './tools/night.js';
 import { DEFAULT_TELE_FOV, registerPlanningTools } from './tools/planning.js';
 import { registerResearchTools } from './tools/research.js';
@@ -34,7 +35,22 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerLibraryTools(tool);
   registerDarkTools(tool, ctx);
   registerDutyTools(tool, ctx);
-  if (ctx.night) registerNightTools(tool, ctx.night);
+  if (ctx.night) {
+    registerNightTools(tool, ctx.night);
+    registerMosaicTools(tool, ctx.night, {
+      field: () => {
+        const f = ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV;
+        return { w: f.h * 60, h: f.v * 60 };
+      },
+      facts: dwarfFacts(ctx.dwarf),
+      startNative: async (project, native) => {
+        const w = native.wireScale ?? 1;
+        await ctx.dwarf.gotoRaDec(project.footprint.raHours, project.footprint.decDeg, project.gotoName, true);
+        await ctx.dwarf.startMosaic({ horizontalScale: Math.round(project.nativeScale!.x * w), verticalScale: Math.round(project.nativeScale!.y * w), rotation: Math.round(project.footprint.angleDeg) });
+        return 'the Dwarf started its own mosaic';
+      },
+    });
+  }
   registerStellariumTools(tool);
   registerResearchTools(tool, { fov: () => ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV, site: () => ctx.dwarf.requireLocation() });
   registerAcquisitionTools(tool, { site: () => ctx.dwarf.requireLocation(), facts: dwarfFacts(ctx.dwarf), night: ctx.night, sessionSubs: dwarfSessionSubs, darkFrames: dwarfDarkFrames });

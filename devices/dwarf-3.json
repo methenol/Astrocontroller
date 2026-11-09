@@ -30,6 +30,7 @@
     "perSubOverheadS": 0.5
   },
   "dither": { "everySubs": 6, "costS": 0, "costSubs": 1, "longFromS": 60, "everySubsLong": 10 },
+  "mosaic": { "native": { "maxScaleX": 1.8, "maxScaleY": 1.8, "requiresEq": true, "wireScale": 100, "verified": false } },
   "mount": { "eqCapable": true },
   "filters": [
     { "name": "Astro", "aliases": ["astro"], "band": "broadband", "passband": "440–690 nm (passes Hα)" },

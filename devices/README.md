@@ -35,6 +35,7 @@ which number came from where.
 | `exposure.requiresMatchingDarks` | the firmware refuses a sub without a dark of that exposure and gain (Dwarf) |
 | `exposure.perSubOverheadS` | seconds between subs (readout, download) |
 | `dither` | `everySubs`, and its cost: `costS` seconds and/or `costSubs` discarded subs; `longFromS` + `everySubsLong` for a longer interval from that sub length |
+| `mosaic.native` | the firmware's own mosaic: `maxScaleX`, `maxScaleY` (frames covered per axis), `requiresEq`, `wireScale` (protocol integer per 1× frame, Dwarf), `verified` (false until the scale units are confirmed on hardware). Without it, or with `mosaicAllowNative` off, mosaics are panel-by-panel GoTo |
 | `filters` | `name` (as the driver's tools take it), `aliases` (PLAN_FILTERS' spellings), `band` (`broadband`, `uhc`, `duo_wide`, `duo_tight`, `line`), optional `skyFraction` (share of a broadband sky passed), `deepSky: false` for daytime glass |
 | `sources`, `notes` | where the numbers come from; shown with the device |
 

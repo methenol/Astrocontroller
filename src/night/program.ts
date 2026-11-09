@@ -47,7 +47,15 @@ export interface ProgramTarget {
   /** the owner's note to the agent about this target (framing, mosaic, filter…) */
   notes: string;
   addedAt: string;
+  /** this target's say on mosaics and on cropping to the target; absent = the plan's setting */
+  mosaic?: TargetSwitch;
+  roiCrop?: TargetSwitch;
 }
+
+export type TargetSwitch = 'inherit' | 'on' | 'off';
+
+/** A feature's state for one target: its own 'on' or 'off', otherwise the global setting. */
+export const effectiveSwitch = (global: boolean, own: TargetSwitch | undefined): boolean => (own === 'on' ? true : own === 'off' ? false : global);
 
 const MoonRule = z.object({
   /** the separation required at full Moon, degrees */
@@ -93,6 +101,20 @@ export const PlanSettingsSchema = z.object({
   fillerMaxSizeArcmin: z.number().min(0).max(1200).nullable(),
   /** a filler's value relative to a normal-priority program target (0–1) */
   fillerWeight: z.number().min(0).max(1),
+  /** shoot a target too big for the frame as a mosaic (each target can override it) */
+  mosaicEnabled: z.boolean(),
+  mosaicOverlapPct: z.number().min(5).max(50),
+  mosaicMaxPanels: z.number().int().min(2).max(64),
+  /** let the telescope's own mosaic run when the target fits inside it; off = always panel by panel */
+  mosaicAllowNative: z.boolean(),
+  /** the sensor's width axis on the sky in EQ mode, degrees from east through north; null = not measured */
+  mosaicCameraAngleDeg: z.number().min(-180).max(180).nullable(),
+  /** ask Studio to crop to the target when it is small in the frame (each target can override it) */
+  roiCropEnabled: z.boolean(),
+  /** request a crop only for targets spanning at most this share of the frame's long side */
+  roiCropMaxFillPct: z.number().min(1).max(95),
+  /** how far outside the target's own share of the frame the crop goes, to leave room for reframing */
+  roiCropMarginPct: z.number().min(0).max(200),
 });
 export type PlanSettings = z.infer<typeof PlanSettingsSchema>;
 
@@ -120,6 +142,14 @@ export const PLAN_DEFAULTS: PlanSettings = {
   fillerMinSizeArcmin: null,
   fillerMaxSizeArcmin: null,
   fillerWeight: 0.5,
+  mosaicEnabled: false,
+  mosaicOverlapPct: 25,
+  mosaicMaxPanels: 16,
+  mosaicAllowNative: false,
+  mosaicCameraAngleDeg: null,
+  roiCropEnabled: false,
+  roiCropMaxFillPct: 25,
+  roiCropMarginPct: 20,
 };
 
 export const ProgramTargetInput = z.object({
@@ -135,6 +165,8 @@ export const ProgramTargetInput = z.object({
   filter: z.string().max(40).optional(),
   notBefore: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   notes: z.string().max(2000).optional(),
+  mosaic: z.enum(['inherit', 'on', 'off']).optional(),
+  roiCrop: z.enum(['inherit', 'on', 'off']).optional(),
 });
 export type ProgramTargetInput = z.infer<typeof ProgramTargetInput>;
 
@@ -229,6 +261,8 @@ export function addTarget(input: ProgramTargetInput, today: string): ProgramTarg
     notBefore: input.notBefore ?? undefined,
     notes: input.notes ?? '',
     addedAt: today,
+    mosaic: input.mosaic,
+    roiCrop: input.roiCrop,
   };
   saveProgram([...targets, t]);
   log.info(`program: added ${t.displayName} (${t.goalMin} min, priority ${t.priority})`);
@@ -249,6 +283,8 @@ export function updateTarget(ref: string, patch: Partial<ProgramTargetInput>): P
     filter: patch.filter ?? t.filter,
     notBefore: patch.notBefore === null ? undefined : (patch.notBefore ?? t.notBefore),
     notes: patch.notes ?? t.notes,
+    mosaic: patch.mosaic ?? t.mosaic,
+    roiCrop: patch.roiCrop ?? t.roiCrop,
   };
   saveProgram(targets.map((x) => (x.id === t.id ? next : x)));
   return next;

@@ -96,6 +96,9 @@ export function listDeviceSessions(withCounts = true): Promise<{ sessions: Devic
 }
 
 /** The library's session folders, read without failing on one unreadable entry. */
+/** Every library session, as parsed from its folder name. */
+export const allLibrarySessions = (): DeviceSession[] => librarySessions();
+
 function librarySessions(): DeviceSession[] {
   const root = config.paths.library;
   let entries: fs.Dirent[];

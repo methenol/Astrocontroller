@@ -30,6 +30,10 @@ function fakeStudio() {
       calls.push('submit');
       return job();
     },
+    submitMosaic: async (_b: Record<string, unknown>) => {
+      calls.push('submitMosaic');
+      return job();
+    },
     job: async (_id: string) => job({ state: 'running', progress: 0.5 }),
     cancel: async (id: string) => {
       calls.push(`cancel ${id}`);

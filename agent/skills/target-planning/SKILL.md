@@ -9,7 +9,7 @@ description: Choosing what to image tonight — visibility windows, Moon, framin
 1. `sky_conditions` → darkness window, Moon phase/rise/set, planets. `weather_forecast` → is it worth setting up, and when is the clear window? Plan targets that are well placed *during the clear window*.
 2. `plan_targets` (optionally `types=["emission"]`, `["galaxy"]`, …, `min_altitude`, `start`/`end`). The score already weights hours above minimum altitude, peak altitude, framing, brightness and Moon separation. With a site obstruction map (`map_obstructions`) "up" also means above the mapped trees and buildings in that direction; `obstructedNow: true` = behind them right now.
 3. Sanity-check the top picks:
-   - **Framing**: tele field is 177′ × 100′. Objects under ~8′ look tiny. Objects larger than the field need a mosaic or the wide camera.
+   - **Framing**: tele field is 177′ × 100′. Objects under ~8′ look tiny. Objects larger than the field need a mosaic (`plan_mosaic`, see below) or the wide camera.
    - **Altitude**: in Alt-Az plan each target's slot in the **30–65°** band. Below that, haze and extinction; above ~65° field rotation trails the frame edges even at 15 s (table in acquisition-profiles). East/west of the meridian rotates least. In EQ mode only the low limit matters.
    - **Moon**: > 50% illuminated → emission nebulae with Duo-Band, or keep > 60° from the Moon.
    - **Meridian/timing**: image each target around its `bestTime`. Order targets so each one is high when you shoot it (east-rising targets later).
@@ -19,3 +19,13 @@ description: Choosing what to image tonight — visibility windows, Moon, framin
 6. `suggestedFilter` starts with the filter to use: `Astro` or `Duo-Band` (the planner picks per target from the Dwarf 3's own filters).
 
 Record per-target outcomes in `session-log.jsonl` (session-qc); skills and NOTES.md hold operational rules only, never site or scene information.
+
+## Mosaics and cropping
+
+Both are the owner's choice: a global setting (`plan_program action=settings`: `mosaicEnabled`, `roiCropEnabled`) and a per-target `mosaic` / `roi_crop` of `on`, `off` or `inherit`. A target's own setting wins.
+
+- A mosaic is one program target whose goal is per panel: 2 h on a 4-panel mosaic is 8 h of accepted integration. `plan_mosaic` computes the panels; never work out positions yourself.
+- During its block use `get_next_mosaic_panel`: goto_target with exactly the name, `ra_hours` and `dec_deg` it gives, stack for `stack_minutes`, then ask again. The name is how the panel's integration is counted across nights. Autofocus at the start of the block, not at each panel.
+- `get_mosaic_progress` is the record of what is done (accepted integration, never time spent). `process_mosaic` sends the project to AstroPhoto Studio, which reports back rejected frames and any panel to shoot again.
+- `mosaicAllowNative` is off by default: the firmware mosaics' scale units are not confirmed on hardware. Use `start_native_mosaic` only for a project planned that way, and check the first frames.
+- Cropping has nothing to do with the telescope. AstroPhoto Studio crops; the processing request carries the percentage of the frame to keep, worked out from the catalog size when cropping is on. `process_session roi_crop_percent` overrides it.

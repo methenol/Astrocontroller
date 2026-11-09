@@ -134,6 +134,12 @@ export class AstroControl {
     });
   }
 
+  /** The firmware's own tele mosaic on the target it is tracking (EQ mode only). Scales are the protocol's integers; forceStart keeps it from asking. */
+  async startMosaic(o: { horizontalScale: number; verticalScale: number; rotation?: number; irIndex?: number }): Promise<void> {
+    this.assertMayMove('mosaic');
+    await request(this.core, Cmd.ASTRO_START_TELE_MOSAIC, { horizontalScale: o.horizontalScale, verticalScale: o.verticalScale, rotation: o.rotation ?? 0, irIndex: o.irIndex ?? 0, forceStart: true });
+  }
+
   /** GoTo a deep-sky position (RA hours, Dec degrees). Requires a prior calibration unless oneClick. */
   async gotoRaDec(raHours: number, decDeg: number, name: string, oneClick: boolean): Promise<string> {
     this.assertMayMove('GoTo');

@@ -126,6 +126,8 @@ export interface Candidate {
   /** 0–1: how much its result depends on the seeing (detect.seeingSensitivity) */
   seeingSens?: number;
   notes?: string;
+  /** shot as a mosaic: the scheduler sees one target; which panel comes next is get_next_mosaic_panel's */
+  mosaic?: { projectId: string; panels: number; execution: 'panels' | 'native' };
 }
 
 /** What the coming weeks hold for a target: its season, and the nights it should still take. */
@@ -220,6 +222,7 @@ export interface BlockTarget {
   filter?: string;
   notes?: string;
   advice?: TargetAdvice;
+  mosaic?: Candidate['mosaic'];
 }
 
 export interface Block {
@@ -865,7 +868,7 @@ export function solveNight(input: SolveInput): Solved {
       kind: 'target',
       start: Math.max(allSlots[a].t, from),
       end: Math.min(allSlots[b - 1].t + SLOT_MS, input.end.getTime()),
-      target: { key: c.key, name: c.name, displayName: c.displayName, gotoName: c.gotoName, raHours: c.raHours, decDeg: c.decDeg, source: c.source, programId: c.programId, filter: c.filter, notes: c.notes || undefined },
+      target: { key: c.key, name: c.name, displayName: c.displayName, gotoName: c.gotoName, raHours: c.raHours, decDeg: c.decDeg, source: c.source, programId: c.programId, filter: c.filter, mosaic: c.mosaic, notes: c.notes || undefined },
       overheadMin: r.overheadMin,
       expectedMin: Math.round(r.expectedMin),
       alt: { start: r1(alts[0]), end: r1(alts[alts.length - 1]), max: r1(Math.max(...alts)) },

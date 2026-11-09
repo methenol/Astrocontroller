@@ -13,6 +13,7 @@ import { pipeline } from 'node:stream/promises';
 import { config } from '../config.js';
 import { errMsg } from '../log.js';
 import { splitCredentials, withoutCredentials } from '../util/url.js';
+import type { StudioMosaicReport } from '../night/mosaics.js';
 
 export interface StudioJob {
   id: string;
@@ -36,6 +37,8 @@ export interface StudioJob {
   started?: number | null;
   ended?: number | null;
   outputs: Array<{ kind: string; name: string; bytes: number; url: string }>;
+  /** a done job's result; a mosaic job's has `mosaic`, what it measured */
+  result?: { mosaic?: StudioMosaicReport; [k: string]: unknown };
   duplicate?: boolean;
   traceback?: string;
 }
@@ -140,6 +143,7 @@ export const health = () => call<{ ok: boolean; version: string; busy: boolean; 
 export const info = () => call<StudioInfo>('GET', '/api/v1', undefined, INFO_TIMEOUT_MS);
 export const resolve = (body: { paths: string[]; source?: 'images' | 'uploads' }) => call<ResolveResult>('POST', '/api/v1/datasets/resolve', body);
 export const submit = (body: Record<string, unknown>) => call<StudioJob & { dataset_info?: ResolveResult }>('POST', '/api/v1/jobs', body, SUBMIT_TIMEOUT_MS);
+export const submitMosaic = (body: Record<string, unknown>) => call<StudioJob & { dataset_info?: ResolveResult }>('POST', '/api/v1/mosaics', body, SUBMIT_TIMEOUT_MS);
 export const job = (id: string) => call<StudioJob>('GET', `/api/v1/jobs/${encodeURIComponent(id)}`);
 export const jobs = (q: { state?: string; client_ref?: string; limit?: number } = {}) => call<{ jobs: StudioJob[] }>('GET', `/api/v1/jobs?${query(q)}`);
 export const cancel = (id: string) => call<StudioJob>('POST', `/api/v1/jobs/${encodeURIComponent(id)}/cancel`);

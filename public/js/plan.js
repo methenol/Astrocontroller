@@ -349,6 +349,8 @@ function renderProgram() {
     .join('')}</table>`;
 }
 
+const switchSelect = (name, v) => `<select name="${name}">${[['inherit', 'as the settings'], ['on', 'on'], ['off', 'off']].map(([k, l]) => `<option value="${k}" ${(v ?? 'inherit') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+
 function editRow(t) {
   const tr = $(`#np-program tr[data-id="${CSS.escape(t.id)}"]`);
   if (!tr || tr.nextElementSibling?.classList.contains('np-edit')) return;
@@ -359,6 +361,8 @@ function editRow(t) {
     <label>min altitude <input name="minAltitude" type="number" min="0" max="85" value="${esc(t.minAltitude ?? '')}" placeholder="plan's"> °</label>
     <label>not before <input name="notBefore" type="date" value="${esc(t.notBefore ?? '')}"></label>
     <label><input name="keepCollecting" type="checkbox" ${t.keepCollecting ? 'checked' : ''}> keep collecting after the goal</label>
+    <label title="Shoot it as a mosaic when it is too big for the frame; the goal is then per panel">mosaic ${switchSelect('mosaic', t.mosaic)}</label>
+    <label title="Ask AstroPhoto Studio to crop to the target when it is small in the frame">crop to target ${switchSelect('roiCrop', t.roiCrop)}</label>
     <label class="np-notes">note for the agent <input name="notes" value="${esc(t.notes ?? '')}" placeholder="framing, mosaic, filter…"></label>
     <button class="primary" type="submit">Save</button><button class="ghost" type="button" data-cancel>Cancel</button></form></td>`;
   tr.after(row);
@@ -373,6 +377,8 @@ function editRow(t) {
       notBefore: f.get('notBefore') ? String(f.get('notBefore')) : null,
       keepCollecting: f.get('keepCollecting') === 'on',
       notes: String(f.get('notes') ?? ''),
+      mosaic: String(f.get('mosaic')),
+      roiCrop: String(f.get('roiCrop')),
     });
     if (r) {
       toast(`${t.displayName} saved`);
@@ -410,6 +416,16 @@ const SETTINGS = [
     ['moonBroadband.widthDays', 'width', 'number', { min: 0.5, max: 30, step: 0.5, unit: 'days' }],
     ['moonNarrowband.distanceDeg', 'narrowband: distance at full', 'number', { min: 0, max: 180, unit: '°' }],
     ['moonNarrowband.widthDays', 'width', 'number', { min: 0.5, max: 30, step: 0.5, unit: 'days' }],
+  ]],
+  ['Mosaics & cropping', [
+    ['mosaicEnabled', 'mosaics', 'checkbox', { title: 'shoot program targets too big for the frame as mosaics (each target can override it)' }],
+    ['mosaicOverlapPct', 'panel overlap', 'number', { min: 5, max: 50, unit: '%' }],
+    ['mosaicMaxPanels', 'most panels', 'number', { min: 2, max: 64 }],
+    ['mosaicCameraAngleDeg', 'camera angle (EQ)', 'number', { min: -180, max: 180, step: 0.5, unit: '°', nullable: true, title: "the sensor's width axis on the sky, degrees from east through north; empty = not measured (panels are planned as squares)" }],
+    ['mosaicAllowNative', "the scope's own mosaic", 'checkbox', { title: 'use the firmware mosaic when the target fits inside it; not confirmed on hardware. Off: always panel by panel' }],
+    ['roiCropEnabled', 'crop to the target', 'checkbox', { title: 'ask AstroPhoto Studio to crop targets that are small in the frame (each target can override it)' }],
+    ['roiCropMaxFillPct', 'crop targets up to', 'number', { min: 1, max: 95, unit: '% of the frame' }],
+    ['roiCropMarginPct', 'room around the target', 'number', { min: 0, max: 200, unit: '%' }],
   ]],
   ['Fillers', [
     ['fillerWeight', 'filler value', 'number', { min: 0, max: 1, step: 0.05, title: "a filler's value next to a normal-priority program target (their filter: Find targets)" }],

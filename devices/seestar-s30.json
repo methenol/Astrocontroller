@@ -30,6 +30,7 @@
     "perSubOverheadS": 3
   },
   "dither": { "everySubs": 5, "costS": 17 },
+  "mosaic": { "native": { "maxScaleX": 3.5, "maxScaleY": 3.5, "requiresEq": false, "verified": false } },
   "mount": { "eqCapable": true },
   "filters": [
     { "name": "IRCUT", "aliases": ["IR-cut", "UV/IR cut", "ir cut", "none"], "band": "broadband", "passband": "400–700 nm" },
