@@ -1,8 +1,16 @@
 /** The three live sources (tele, wide, stack), kept in step with the telescope's state. */
+import fs from 'node:fs';
+import path from 'node:path';
+import { config } from '../../config.js';
 import type { CameraName, Dwarf } from '../../drivers/dwarf/device.js';
+import { isBlackJpeg } from '../image/decode.js';
+import { BlankWatch } from './blank-watch.js';
 import { CameraSource } from './camera.js';
 import { StackSource } from './stack.js';
 
+/** Frames this soon after the mount moved are not judged. */
+const BLANK_MOTION_GRACE_MS = 4000;
+const BLANK_EVIDENCE_KEPT = 20;
 /** After the link comes back, reconnect once the telescope has settled. */
 const RECONNECT_DELAY_MS = 1500;
 /** After a mode change, re-check RTSP once the telescope has switched. */
@@ -12,6 +20,7 @@ export class StreamHub {
   readonly tele: CameraSource;
   readonly wide: CameraSource;
   readonly stack = new StackSource();
+  readonly blank: BlankWatch;
   private stackHeld = false;
   private wasConnected: boolean;
   private lastModeId: number | undefined;
@@ -24,6 +33,27 @@ export class StreamHub {
     // While a tele stack runs, or a mode refuses the tele RTSP, the tele view is the telescope's :8092 preview.
     this.tele.fallback = this.stack;
     this.stack.allowed = () => dwarf.state.connected && !dwarf.state.released;
+    this.blank = new BlankWatch({
+      frame: () => this.tele.latest,
+      isBlack: isBlackJpeg,
+      canWatch: () => {
+        const st = dwarf.state;
+        return st.connected && !st.released && st.darkCapture?.state !== 'running' && !dwarf.stackOwnsCamera('tele') && !dwarf.quietPeriod() && Date.now() - dwarf.lastMotionAt >= BLANK_MOTION_GRACE_MS;
+      },
+      raiseGain: async () => {
+        const r = await dwarf.raiseLiveViewGain('tele');
+        return r && `raised the live-view gain from ${r.from} to ${r.to}`;
+      },
+      reenterCamera: async () => {
+        await dwarf.ensureLiveView(true);
+        this.tele.retryRtsp();
+      },
+      rearmCamera: async () => {
+        await dwarf.rearmLiveView('tele');
+        this.tele.retryRtsp();
+      },
+      saveEvidence: () => this.saveBlankEvidence(),
+    });
     this.wasConnected = dwarf.state.connected;
     dwarf.on('state', this.onState);
   }
@@ -46,6 +76,23 @@ export class StreamHub {
       this.stackHeld = stacking;
       this.stack.hold(stacking);
     }
+  }
+
+  /** What each feed showed and how the camera was set when the tele went black. */
+  private async saveBlankEvidence(): Promise<string> {
+    const root = path.join(config.paths.captures, 'blank');
+    const name = new Date().toISOString().replace(/[:.]/g, '-');
+    const dir = path.join(root, name);
+    await fs.promises.mkdir(dir, { recursive: true });
+    const feeds = { tele: this.tele, preview: this.stack, wide: this.wide };
+    for (const [label, src] of Object.entries(feeds)) if (src.latest) await fs.promises.writeFile(path.join(dir, `${label}.jpg`), src.latest.jpeg);
+    const st = this.dwarf.state;
+    const camera = await this.dwarf.cameraSettings('tele').catch(() => null);
+    const report = { at: new Date().toISOString(), mode: st.shootingMode, focus: st.focusPosition, teleStreamType: st.teleStreamType, camera: camera?.settings, streams: this.status() };
+    await fs.promises.writeFile(path.join(dir, 'state.json'), JSON.stringify(report, null, 1));
+    const old = (await fs.promises.readdir(root)).sort().slice(0, -BLANK_EVIDENCE_KEPT);
+    for (const d of old) await fs.promises.rm(path.join(root, d), { recursive: true, force: true });
+    return `captures/blank/${name}`;
   }
 
   private later(ms: number, fn: () => void): void {
@@ -86,6 +133,7 @@ export class StreamHub {
   /** Close all readers cleanly (ffmpeg sends RTSP TEARDOWN) before the process exits. */
   shutdown(): void {
     this.dwarf.off('state', this.onState);
+    this.blank.stop();
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     for (const src of [this.tele, this.wide, this.stack]) src.forceStop();

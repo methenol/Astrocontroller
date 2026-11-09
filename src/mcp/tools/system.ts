@@ -50,6 +50,7 @@ export function registerSystemTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
               return [n, { phase: v.phase, lastFrameAgoS: v.lastFrameAt ? Math.round((Date.now() - v.lastFrameAt) / 1000) : null, note: v.note ?? undefined }];
             }),
           ),
+          teleBlackFrames: hub.blank.status(),
         },
       });
     },

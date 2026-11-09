@@ -8,6 +8,12 @@ const MAX_INPUT_PIXELS = 400_000_000;
 /** isFlatJpeg works on a thumbnail this size. */
 const FLAT_W = 160;
 const FLAT_H = 90;
+/** isBlackJpeg samples this size with nearest-neighbour, so that stars survive (a thumbnail averages them away). */
+const BLACK_W = 640;
+const BLACK_H = 360;
+/** Below this brightest-to-darkest span (of 255), and with a dark median: nothing was recorded. */
+const BLACK_RANGE = 6;
+const BLACK_MEDIAN = 30;
 
 /**
  * The full scale of FITS data from its largest value: a DWARF 3 writes 12-bit values (0-4095)
@@ -67,6 +73,14 @@ export async function decode(buf: Buffer, source: string): Promise<FloatImage> {
   }
   // 16-bit PNGs from the telescope are linear stacks.
   return { width: info.width, height: info.height, channels: 3, data: out, linear: sixteen, source, camera };
+}
+
+/** True for a frame with no picture in it at all: dark, with not even stars above the background. */
+export async function isBlackJpeg(jpeg: Buffer): Promise<boolean> {
+  const { data } = await sharp(jpeg).resize(BLACK_W, BLACK_H, { fit: 'fill', kernel: 'nearest' }).removeAlpha().greyscale().raw().toBuffer({ resolveWithObject: true });
+  const v = Uint8Array.from(data).sort();
+  const at = (p: number) => v[Math.floor(v.length * p)];
+  return at(0.999) - at(0.01) < BLACK_RANGE && at(0.5) < BLACK_MEDIAN;
 }
 
 /**

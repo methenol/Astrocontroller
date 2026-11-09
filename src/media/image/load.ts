@@ -12,6 +12,7 @@ import type { CameraName } from '../../drivers/dwarf/device.js';
 import { isFits } from '../fits.js';
 import type { CameraSource, StreamHub } from '../streams.js';
 import { decode, isFlatJpeg } from './decode.js';
+import { stillGainFloor } from '../focus/gain-floor.js';
 import type { FloatImage } from './types.js';
 
 /** Normal mode: the one shooting mode with tele video. */
@@ -35,6 +36,8 @@ const RETRY_FRAME_TIMEOUT_MS = 10_000;
 /** The live stack's preview is refreshed per sub: one up to this old is current. */
 const STACK_MAX_AGE_MS = 15_000;
 const STACK_FRAME_TIMEOUT_MS = 30_000;
+/** A still taken right after a gain change is shot at the old one. */
+const GAIN_SETTLE_MS = 500;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const isCamera = (s: string): s is CameraName => s === 'tele' || s === 'wide';
@@ -118,10 +121,19 @@ async function stillAtExposure(hub: StreamHub, camera: CameraName, exposureS: nu
     // the still stops this camera's live video: tell the stream supervisor, and reconnect it after
     cam.expectPause(exposureS * 1000 + STILL_PAUSE_EXTRA_MS);
     const before = await dwarf.exposureSeconds(camera).catch(() => null);
+    // a low imaging gain left by a stack shoots black at a short exposure (the tele: 2026-11-09)
+    const reported = camera === 'tele' ? ((await dwarf.cameraSettings(camera).catch(() => null))?.settings.gain as { current?: unknown } | undefined)?.current : undefined;
+    const gainBefore = typeof reported === 'number' && reported < stillGainFloor(exposureS) ? reported : undefined;
     try {
       await dwarf.setSetting(camera, 'exposure', String(exposureS));
+      if (gainBefore !== undefined) {
+        await dwarf.setSetting(camera, 'gain', stillGainFloor(exposureS));
+        await sleep(GAIN_SETTLE_MS);
+      }
       return await still(hub, camera, `${exposureS}s`);
     } finally {
+      // gain first: a gain write switches an auto exposure to manual
+      if (gainBefore !== undefined) await dwarf.setSetting(camera, 'gain', gainBefore).catch((e) => log.warn(`could not restore the ${camera} gain to ${gainBefore}: ${errMsg(e)}`));
       // Back to the previous short exposure, or auto: never leave a long manual exposure on a live camera.
       const back = before === null || before >= STILL_EXPOSURE_S ? 'auto' : String(before);
       await dwarf.setSetting(camera, 'exposure', back).catch((e) => log.warn(`could not restore the ${camera} exposure to ${back}: ${errMsg(e)}`));

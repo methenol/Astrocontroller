@@ -61,6 +61,8 @@ const RTSP_REPROBE_MS = 60000;
 const RTSP_REPROBE_MAX_MS = 300000;
 /** In astro modes the :8092 standby's frames are shown once RTSP has been quiet this long. */
 const PREVIEW_TAKEOVER_MS = 2000;
+/** The standby is dropped only after RTSP has delivered without a gap for this long. */
+const PREVIEW_RELEASE_MS = 10000;
 /** While reconnecting, a warning every this many attempts (the first is logged at info). */
 const WARN_EVERY_ATTEMPTS = 4;
 const BACKOFF_BASE_MS = 1000;
@@ -86,6 +88,8 @@ export class CameraSource extends Source {
   private closingSince = 0;
   private connectedAt = 0;
   private lastFrameAt = 0;
+  /** when RTSP last resumed after a gap */
+  private rtspSteadySince = 0;
   private attempts = 0;
   private nextAttemptAt = 0;
   private pauseUntil = 0;
@@ -213,7 +217,10 @@ export class CameraSource extends Source {
       return;
     }
     // astro modes: the :8092 standby stays connected while RTSP is not delivering, and takes over the view
-    this.setPreview(astroMode && now - this.lastFrameAt > PREVIEW_TAKEOVER_MS);
+    // on after a gap, off only once RTSP has delivered steadily: a feed with gaps does not flip the source
+    const rtspQuiet = now - this.lastFrameAt > PREVIEW_TAKEOVER_MS;
+    const rtspSteady = !rtspQuiet && now - this.rtspSteadySince >= PREVIEW_RELEASE_MS;
+    this.setPreview(astroMode && (this.previewActive ? !rtspSteady : rtspQuiet));
     // the telescope's address changed: a reader still on the old one is replaced at once
     if (this.proc && this.procUrl !== this.url) {
       this.stopReader('telescope address changed');
@@ -375,6 +382,7 @@ export class CameraSource extends Source {
         this.phase = 'live';
         this.refusals = 0;
       }
+      if (now - this.lastFrameAt > PREVIEW_TAKEOVER_MS) this.rtspSteadySince = now;
       this.lastFrameAt = now;
       this.attempts = 0;
       this.healedThisEpisode = false;

@@ -53,6 +53,7 @@ function create({ agent }: DriverDeps): DriverRuntime {
       travelGuard.start();
       stackSupervisor.start();
       night?.start();
+      hub.blank.start((t) => duty.event(t));
       if (config.agent.enabled) chargeWatch = watchCharging(dwarf, agent);
     },
     shutdownSteps: () => [

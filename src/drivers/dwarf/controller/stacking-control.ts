@@ -94,7 +94,10 @@ export class StackingControl {
     };
     const applied: string[] = [];
     if (o.exposure !== undefined) applied.push(await set('exposure', o.exposure));
-    if (o.gain !== undefined) applied.push(await set('gain', o.gain));
+    // a stack that names no gain shoots at the imaging gain, not at one raised for the live view
+    const remembered = await this.camera.takeImagingGain(camera);
+    const gain = o.gain ?? remembered;
+    if (gain !== undefined) applied.push(await set('gain', gain));
     let filterIndex: number | undefined;
     if (o.filter !== undefined) {
       if (camera === 'tele') {

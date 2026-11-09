@@ -13,7 +13,7 @@ import { Cmd } from '../protocol.js';
 import type { CameraName } from '../stacking.js';
 import { busyWith, request, sendConfirmed, type Core } from './core.js';
 import { markPhotoStuck, photoInFlight, stuckPhotoMessage } from './photo-watch.js';
-import { finishEndedSession } from './session-finish.js';
+import { finishEndedSession, GO_LIVE_MS } from './session-finish.js';
 import type { SystemControl } from './system.js';
 import { camId, describeParam, exposureLabelSeconds, FILTERS, matchExposure, nearest, resolveFilter, sleep, snake, WB_SCENES } from './util.js';
 
@@ -36,6 +36,8 @@ const LIVE_VIEW_WAKE_MS = 60_000;
 const LIVE_VIEW_WAKE_FORCED_MS = 5000;
 /** The wide camera's stream type while it serves RTSP live video. */
 const WIDE_STREAM_RTSP = 1;
+/** Below this gain the auto-exposed live view is black at night (2026-11-09: black at 60). */
+const LIVE_VIEW_MIN_GAIN = 120;
 const LIVE_VIEW_ENTER_MS = 5000;
 const PREVIEW_QUALITY_MS = 3000;
 /** calibration leaves the wide exposure behind a moment after it reports done */
@@ -64,6 +66,7 @@ const packId = (def: http.ParamDef) => Long.fromString(String(def.paramId), fals
 
 export class CameraControl {
   private lastLiveViewWake = 0;
+  private readonly imagingGain: Partial<Record<CameraName, { from: number; to: number }>> = {};
 
   constructor(
     private readonly core: Core,
@@ -162,14 +165,57 @@ export class CameraControl {
     if (!free()) return null;
     const exp = await this.exposureSeconds(cam);
     const known = exp !== null && exp >= 1;
-    const streamType = this.state.wideStreamType;
-    const unreported = !known && cam === 'wide' && streamType !== undefined && streamType !== WIDE_STREAM_RTSP;
-    if (!known && !unreported) return null;
     const def = (await this.schema()).cameras[camId(cam)]?.exp;
     if (!def) return null;
+    const off = (type: number | undefined) => type !== undefined && type !== WIDE_STREAM_RTSP;
+    // the tele reads 2 under any manual exposure, so only an exposure nobody has reported counts: a
+    // process restarted in the middle of a sweep inherits its manual exposure (2026-11-09: RTSP 454)
+    const unreported = !known && (cam === 'wide' ? off(this.state.wideStreamType) : off(this.state.teleStreamType) && !this.core.params.get(String(def.paramId)));
+    if (!known && !unreported) return null;
     if (!free()) return null;
     await request(this.core, Cmd.PARAM_SET_EXPOSURE, { paramId: packId(def), mode: 0, value: this.liveValue(def) ?? 0 });
     return unreported ? 'unreported' : exp;
+  }
+
+  /**
+   * Raise a gain too low to show anything in the live view, for a camera on auto exposure that nothing
+   * else is using. The firmware's auto exposure stays short at night, so a low imaging gain left behind
+   * by a stack gives a black view. The gain it replaced is remembered for the next stack.
+   */
+  async raiseLiveViewGain(cam: CameraName): Promise<{ from: number; to: number } | null> {
+    const { guards } = this.core;
+    const free = () => !guards.stackOwnsCamera(cam) && !guards.darkCaptureOwns(cam) && !guards.foreignOperation();
+    if (!free()) return null;
+    const defs = (await this.schema()).cameras[camId(cam)];
+    if (!defs?.gain || !defs.exp) return null;
+    const from = this.liveValue(defs.gain);
+    if (from === undefined || from >= LIVE_VIEW_MIN_GAIN) return null;
+    if (this.core.params.get(String(defs.exp.paramId))?.mode !== 0) return null;
+    if (!free()) return null;
+    await this.setSetting(cam, 'gain', LIVE_VIEW_MIN_GAIN);
+    this.imagingGain[cam] = { from, to: LIVE_VIEW_MIN_GAIN };
+    return { from, to: LIVE_VIEW_MIN_GAIN };
+  }
+
+  /**
+   * The imaging gain the live view replaced, once: a stack that names no gain must not inherit the
+   * live view's. Nothing if the gain has been changed to something else since.
+   */
+  async takeImagingGain(cam: CameraName): Promise<number | undefined> {
+    const memo = this.imagingGain[cam];
+    delete this.imagingGain[cam];
+    if (!memo) return undefined;
+    const def = (await this.schema()).cameras[camId(cam)]?.gain;
+    return def && this.liveValue(def) === memo.to ? memo.from : undefined;
+  }
+
+  /** Go live and enter the camera again: never under a stack, a dark capture or another operation. */
+  async rearmLiveView(cam: CameraName): Promise<void> {
+    const { guards } = this.core;
+    if (guards.stackOwnsCamera(cam) || guards.darkCaptureOwns(cam) || guards.foreignOperation()) return;
+    await request(this.core, cam === 'wide' ? Cmd.ASTRO_WIDE_GO_LIVE : Cmd.ASTRO_GO_LIVE, {}, { timeout: GO_LIVE_MS, allowError: true, bestEffort: true }).catch(() => null);
+    this.lastLiveViewWake = 0;
+    await this.ensureLiveView(true);
   }
 
   /**

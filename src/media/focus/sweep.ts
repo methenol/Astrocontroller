@@ -80,6 +80,8 @@ function filterNotes(filter: string, exposureS: number | null, tracking: boolean
 
 /** The tele filter in use, by name ('' when the scope does not say). */
 export const filterOf = async (dwarf: Dwarf): Promise<string> => String(currentOf((await dwarf.cameraSettings('tele').catch(() => null))?.settings.filter) ?? '');
+import { stillGainFloor } from './gain-floor.js';
+
 /** A fitted optimum this close to the best sample is the best sample. */
 const FIT_MIN_SHIFT = 2;
 /** The best sample beats the start by more than this percentage to count as an improvement. */
@@ -124,15 +126,20 @@ async function resolveShot(dwarf: Dwarf, o: { exposureS?: number; gain?: number 
   const wantExp = chooseExposure(o.exposureS, curSecs, filter);
   const changeExposure = wantExp !== null && (curSecs === null || Math.abs(curSecs - wantExp) > 0.01);
   const notes: string[] = [];
+  // a low imaging gain left by a stack shoots black at these exposures: only a gain the caller names goes below the floor
+  const floor = stillGainFloor(wantExp ?? curSecs ?? null);
+  const raise = o.gain === undefined && typeof gainNow === 'number' && gainNow < floor;
+  if (raise) notes.push(`gain raised from ${gainNow} to ${floor} for this measurement (a short still at the lower gain comes out black); restored afterwards`);
+  const gain = raise ? floor : o.gain;
   // never a gain change that cannot be put back
-  const changeGain = o.gain !== undefined && typeof gainNow === 'number' && gainNow !== o.gain;
+  const changeGain = gain !== undefined && typeof gainNow === 'number' && gainNow !== gain;
   if (o.gain !== undefined && typeof gainNow !== 'number') notes.push(`gain left as it was: the camera has not reported its current gain, so a change could not be restored afterwards`);
   // Hand the camera back exactly what it reported, label and all: whatever it was on is the imaging
   // setting, and a long manual exposure must not come back as auto. Nothing to restore if it never said.
   // ("unknown (not reported since connect)" is a description, not a setting: it cannot be sent back)
   const reported = expLabel !== '' && !expLabel.startsWith('unknown');
   const restoreExp = reported ? expLabel : curSecs !== null ? String(curSecs) : 'auto';
-  return { filter, curSecs, expLabel, restoreExp, effExp: wantExp ?? curSecs ?? null, wantExp, changeExposure, gainNow, gain: o.gain, changeGain, notes };
+  return { filter, curSecs, expLabel, restoreExp, effExp: wantExp ?? curSecs ?? null, wantExp, changeExposure, gainNow, gain, changeGain, notes };
 }
 
 const shotLabel = (s: Shot) =>

@@ -10,7 +10,7 @@
  */
 import { logger } from '../../../log.js';
 import type { Notification } from '../link.js';
-import { Cmd } from '../protocol.js';
+import { Cmd, errorText } from '../protocol.js';
 import { request, sendStop, type Core } from './core.js';
 import type { Routines } from './follow.js';
 import { FOCUS_MAX, sleep } from './util.js';
@@ -41,6 +41,8 @@ const AF_CENTER = { x: 960, y: 540 };
 const AF_RUNNING = 1;
 const AF_DONE = 3;
 const AF_IDLE = 0;
+/** How long after the routine ends its result code is still awaited. */
+const AF_RESULT_GRACE_MS = 400;
 
 export interface FocusTiming {
   /** one single step every `stepMs` */
@@ -188,27 +190,19 @@ export class Focuser {
     let ran = false;
     let timedOut = false;
     let secs = 0;
-    await this.routines.follow({
-      what: `autofocus (${kind})`,
-      cmd: astro ? Cmd.FOCUS_START_ASTRO_AUTO_FOCUS : Cmd.FOCUS_AUTO_FOCUS,
-      params: astro ? { mode: 0 } : { mode: 0, centerX: Math.round(x), centerY: Math.round(y) },
-      totalMs: limitMs,
-      stopCmds: astro ? [Cmd.FOCUS_STOP_ASTRO_AUTO_FOCUS] : [],
-      activity: new Set([...names, 'focusPosition']),
-      onReply: () => {},
-      onNotify: (n, c) => {
-        if (!names.has(n.name)) return;
-        const st = Number(n.data.state ?? 0);
-        if (st === AF_RUNNING) ran = true;
-        // an end state after our start ends it, also when the running state was not seen
-        else if (st === AF_DONE || (ran && st === AF_IDLE)) c.finish(null);
-      },
-      atDeadline: () => {
-        timedOut = true;
-        return null;
-      },
-      done: (s) => String((secs = s)),
-    });
+    const cmd = astro ? Cmd.FOCUS_START_ASTRO_AUTO_FOCUS : Cmd.FOCUS_AUTO_FOCUS;
+    // the reply with the result code lands just after the state that ends the routine (2026-11-09: 110 ms)
+    let code = 0;
+    const onResult = (r: { cmd: number; data: Record<string, any> }) => {
+      if (r.cmd === cmd) code = Number(r.data?.code ?? 0);
+    };
+    this.core.link.on('reply', onResult);
+    try {
+      await this.followAutofocus(kind, cmd, astro, limitMs, names, (v) => (ran = v), () => ran, () => (timedOut = true), (s) => (secs = s), x, y);
+      if (!timedOut) await sleep(AF_RESULT_GRACE_MS);
+    } finally {
+      this.core.link.off('reply', onResult);
+    }
     if (timedOut) {
       if (astro) await sendStop(this.core, Cmd.FOCUS_STOP_ASTRO_AUTO_FOCUS, STOP_MS);
       const now = await position();
@@ -222,6 +216,46 @@ export class Focuser {
         `astro autofocus FAILED: it ended after ${secs} s WITHOUT MOVING THE FOCUSER (position ${before} before, ${after} after). The telescope gave up; the focus is unchanged and not verified. Measure it (star_sharpness); if the stars are soft or ring-shaped, run star_focus (a sweep with measured positions). Common causes: no or too few stars in the tele view (cloud, wrong exposure), or the stars too far out of focus to detect — start from focus_position action=infinity.`,
       );
     }
-    return `autofocus (${kind}) finished in ${secs} s: focus position ${before ?? '?'} → ${after ?? '?'}`;
+    const warned = code < 0 ? ` — WARNING: the telescope reported ${errorText(code)}, so this position is not verified. Measure it (star_sharpness) or run star_focus before relying on it.` : '';
+    return `autofocus (${kind}) finished in ${secs} s: focus position ${before ?? '?'} → ${after ?? '?'}${warned}`;
+  }
+
+  private followAutofocus(
+    kind: 'normal' | 'astro',
+    cmd: number,
+    astro: boolean,
+    limitMs: number,
+    names: Set<string>,
+    setRan: (v: boolean) => void,
+    getRan: () => boolean,
+    onTimeout: () => void,
+    setSecs: (s: number) => void,
+    x: number,
+    y: number,
+  ): Promise<string> {
+    return this.routines.follow({
+      what: `autofocus (${kind})`,
+      cmd,
+      params: astro ? { mode: 0 } : { mode: 0, centerX: Math.round(x), centerY: Math.round(y) },
+      totalMs: limitMs,
+      stopCmds: astro ? [Cmd.FOCUS_STOP_ASTRO_AUTO_FOCUS] : [],
+      activity: new Set([...names, 'focusPosition']),
+      onReply: () => {},
+      onNotify: (n, c) => {
+        if (!names.has(n.name)) return;
+        const st = Number(n.data.state ?? 0);
+        if (st === AF_RUNNING) setRan(true);
+        // an end state after our start ends it, also when the running state was not seen
+        else if (st === AF_DONE || (getRan() && st === AF_IDLE)) c.finish(null);
+      },
+      atDeadline: () => {
+        onTimeout();
+        return null;
+      },
+      done: (s) => {
+        setSecs(s);
+        return String(s);
+      },
+    });
   }
 }

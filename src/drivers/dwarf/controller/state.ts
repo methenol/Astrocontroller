@@ -142,6 +142,8 @@ export interface TelescopeState {
    * (polar alignment), so it can disagree with the exposure in the parameter cache.
    */
   wideStreamType?: number;
+  /** The same for the tele, where 2 is also normal: in the astro modes it follows any manual exposure. */
+  teleStreamType?: number;
   autofocus: { state: string; astro?: string };
   /** the polar alignment in progress or last run (mcp/tools/astro.ts publishes it here) */
   polarAlign?: PolarAlign;
@@ -298,6 +300,7 @@ export function applyNotification(st: TelescopeState, params: ParamCache, n: Not
     case 'streamType':
       // proto3 omits 0: the tele's reports carry no camId, and a report without streamType is type 0
       if (d.camId === 1) st.wideStreamType = d.streamType ?? 0;
+      else st.teleStreamType = d.streamType ?? 0;
       break;
     case 'autoFocusState':
       st.autofocus = { ...st.autofocus, state: opState(d.state) };
@@ -382,6 +385,7 @@ export function applyDeviceStateInfo(
   if (tele.hFov) st.fov.tele = fov(tele);
   if (wide.hFov) st.fov.wide = fov(wide);
   if (wide.streamType) st.wideStreamType = wide.streamType.streamType ?? 0;
+  if (tele.streamType) st.teleStreamType = tele.streamType.streamType ?? 0;
   if (tele.cmosTemperature) st.cmosTempC.tele = tele.cmosTemperature.temperature ?? 0;
   if (wide.cmosTemperature) st.cmosTempC.wide = wide.cmosTemperature.temperature ?? 0;
   const dev = s.deviceStateInfo ?? {};
