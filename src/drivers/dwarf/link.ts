@@ -4,7 +4,7 @@ import { requestType, responseType, decodeWith, decodeNotification, errorText, t
 import { MESSAGE_TYPE, decodePacket, encodePacket, headerFor, moduleIdForCmd } from './wire/index.js';
 import { config } from '../../config.js';
 import { logger, errMsg } from '../../log.js';
-import { assertLinked, gate } from './gate.js';
+import { assertCommandAllowed, assertLinked, gate } from './gate.js';
 import { wire, cmdName } from './wirelog.js';
 import { SafeEmitter } from '../../util/events.js';
 
@@ -657,6 +657,7 @@ export class DwarfLink extends SafeEmitter {
   /** Send a command and wait for its reply. Fails at once while the telescope is not responding. */
   async request(cmd: number, params: Record<string, unknown> = {}, opts: RequestOptions = {}): Promise<Record<string, unknown> | null> {
     assertLinked();
+    assertCommandAllowed(cmdName(cmd));
     if (this.unresponsiveSince) {
       const now = Date.now();
       if (now - this.lastUnresponsiveLog > UNRESPONSIVE_LOG_MS) {
@@ -741,6 +742,7 @@ export class DwarfLink extends SafeEmitter {
    */
   async post(cmd: number, params: Record<string, unknown> = {}): Promise<void> {
     assertLinked();
+    assertCommandAllowed(cmdName(cmd));
     if (this.unresponsiveSince) throw new TelescopeUnresponsiveError(`telescope not responding: ${this.health().detail}`);
     const ws = this.ws;
     if (!ws || !this.connected) throw new Error('telescope not connected');

@@ -246,6 +246,26 @@ export class AstroControl {
   }
 
   /** Stop any GoTo, and end the wait of a running calibration/GoTo at once. */
+  /** E-Stop: every astro routine and tracking the firmware can stop, together. Never throws. */
+  async haltAll(): Promise<void> {
+    const cmds = [
+      Cmd.ASTRO_STOP_ONE_CLICK_GOTO,
+      Cmd.ASTRO_STOP_GOTO,
+      Cmd.ASTRO_STOP_CALIBRATION,
+      Cmd.ASTRO_STOP_TRACK_SPECIAL_TARGET,
+      Cmd.ASTRO_STOP_SKY_TARGET_FINDER,
+      Cmd.ASTRO_STOP_EQ_SOLVING,
+      Cmd.ASTRO_STOP_CAPTURE_CALI_FRAME,
+      Cmd.ASTRO_STOP_RESTACKED,
+      Cmd.ASTRO_STOP_MAKE_FITS_THUMB,
+      Cmd.TRACK_STOP_TRACK,
+      Cmd.SENTRY_MODE_STOP,
+      Cmd.FOCUS_STOP_ASTRO_AUTO_FOCUS,
+    ];
+    await Promise.all(cmds.map((c) => sendStop(this.core, c, STOP_MS)));
+    this.routines.failAll(new Error(STOPPED_BY_REQUEST));
+  }
+
   async stopGoto(): Promise<void> {
     await sendStop(this.core, Cmd.ASTRO_STOP_GOTO, STOP_MS);
     await sendStop(this.core, Cmd.ASTRO_STOP_ONE_CLICK_GOTO, STOP_MS);

@@ -122,6 +122,12 @@ h3 { margin: 0 0 8px; font-size: 14px; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--err); margin-right: 6px; vertical-align: 1px; }
 .chip.ok .dot { background: var(--ok); }
 .top-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.estop-btn { min-height: 38px; padding: 0 14px; font-weight: 800; letter-spacing: .5px; color: #fff; background: #dc2626; border: 2px solid #fca5a5; }
+.estop-btn:hover:not(:disabled) { background: #b91c1c; }
+.estop-btn:disabled { opacity: 1; color: #fca5a5; background: #450a0a; border-color: #dc2626; cursor: default; }
+.estop-banner { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; color: #fff; background: #7f1d1d; border-bottom: 2px solid #ef4444; font-weight: 600; }
+.estop-banner[hidden] { display: none; }
+.estop-banner button { flex: none; min-height: 38px; font-weight: 700; color: #7f1d1d; background: #fff; border-color: #fff; }
 .menu { display: none; position: absolute; top: calc(100% - 2px); right: 6px; flex-direction: column; gap: 4px; padding: 8px; min-width: 210px; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: 0 18px 40px rgba(0, 0, 0, .65); z-index: 46; }
 .menu.open { display: flex; }
 .menu button { width: 100%; text-align: left; }

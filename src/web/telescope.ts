@@ -107,6 +107,8 @@ export interface WebTelescope {
   teleFovDeg(): { h: number; v: number };
   connectLink(): void;
   release(): void;
+  /** E-Stop: stop all movement and operations, keeping the link. Returns what could not be confirmed stopped. */
+  emergencyHalt(): Promise<string[]>;
   setHost(host: string): void;
   /** a manual control the route has validated (and checked against `capabilities`) */
   control(b: ControlAction): Promise<unknown>;

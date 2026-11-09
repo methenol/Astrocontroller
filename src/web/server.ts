@@ -14,6 +14,8 @@ import { skyRoutes } from './routes/sky.js';
 import { horizonRoutes } from './routes/horizon.js';
 import { mediaRoutes, streamRoute, ThumbCache } from './routes/media.js';
 import { controlRoutes } from './routes/control.js';
+import { estopRoutes } from './routes/estop.js';
+import { estop } from '../safety/estop.js';
 import { agentRoutes } from './routes/agent.js';
 import { stellariumRoutes } from './routes/stellarium.js';
 import { weatherRoutes } from './routes/weather.js';
@@ -39,6 +41,10 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   const ctx: WebContext = { ...deps, broadcast: sockets.broadcast };
   const thumbs = new ThumbCache();
   guard.start();
+  if (estop.engaged) {
+    log.warn('starting with the E-Stop engaged (CONTROL_ENABLED_ON_STARTUP=false): no telescope control until Enable Control is pressed');
+    deps.duty.pause('E-Stop');
+  }
 
   const api = express.Router();
   api.use(rejectCrossSite);
@@ -46,6 +52,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(skyRoutes(ctx));
   api.use(horizonRoutes(ctx));
   api.use(mediaRoutes(ctx, thumbs));
+  api.use(estopRoutes(ctx));
   api.use(controlRoutes(ctx));
   api.use(agentRoutes(ctx));
   api.use(stellariumRoutes());

@@ -1,5 +1,6 @@
 /** The site's obstruction map for the Tonight tab: status, the survey (started in the background), clear, import and export. */
 import express, { type Router } from 'express';
+import { estop } from '../../safety/estop.js';
 import { z } from 'zod';
 import { errMsg, logger } from '../../log.js';
 import { clearMasks, describeMask, maskFor, newMaskId, parseHorizonText, saveMask, toHorizonText, unknownSectors } from '../../astro/horizon.js';
@@ -39,6 +40,7 @@ export function horizonRoutes({ scope, duty }: WebContext): Router {
       const survey = scope.horizonSurvey;
       if (!survey) throw unsupported(scope, 'The obstruction survey');
       if (b.rehearsal && scope.driver !== 'seestar') throw unsupported(scope, 'A survey rehearsal');
+      estop.assertClear();
       survey.assertAllowed({ rehearsal: b.rehearsal });
       duty.event('the user started the obstruction survey (map_obstructions) from the web UI: the scope pans all round for ~20 min', true);
       survey.start({ calibrate: b.calibrate, rehearsal: b.rehearsal }).then(

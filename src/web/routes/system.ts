@@ -6,6 +6,7 @@ import { recentLogs } from '../../log.js';
 import * as library from '../../library/transfer.js';
 import { body, queryNumber, route } from '../http.js';
 import { publicConfig, type WebContext } from '../context.js';
+import { estop } from '../../safety/estop.js';
 
 const DutyBody = z.discriminatedUnion('action', [
   z.object({
@@ -21,7 +22,7 @@ export function systemRoutes(ctx: WebContext, onHostChanged: () => void): Router
   const { scope, agent, duty, broadcast } = ctx;
   const api = express.Router();
 
-  api.get('/state', route(async () => ({ telescope: scope.state, agent: agent.status(), duty: duty.status(), jobs: library.listJobs(), config: publicConfig(scope) })));
+  api.get('/state', route(async () => ({ telescope: scope.state, agent: agent.status(), duty: duty.status(), jobs: library.listJobs(), config: publicConfig(scope), estop: estop.status() })));
 
   // Everything recently exchanged with the telescope (the full log is data/telescope-wire.log).
   api.get(

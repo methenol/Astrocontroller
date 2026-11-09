@@ -12,6 +12,7 @@ import { resolveSkyTarget } from '../../astro/sky-target.js';
 import { body, notFound, badRequest, route } from '../http.js';
 import { requireSite, type WebContext } from '../context.js';
 import { unsupported, type Capabilities } from '../telescope.js';
+import { estop } from '../../safety/estop.js';
 
 /** GoTo from the UI refuses targets lower than this (the firmware would fail them anyway). */
 const MIN_GOTO_ALTITUDE_DEG = 5;
@@ -85,6 +86,8 @@ export function controlRoutes({ scope, duty }: WebContext): Router {
     '/control',
     route(async (req) => {
       const b = body(req, ControlBody);
+      // refused here too, before a GoTo or reboot is announced to the agent as started
+      if (b.action !== 'find' && b.action !== 'switches' && b.action !== 'settings') estop.assertClear();
       switch (b.action) {
         case 'find':
           return findObject(b.name) ?? { error: 'not found' };

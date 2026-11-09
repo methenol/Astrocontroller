@@ -1,4 +1,5 @@
 /** Background transfers from the telescope's storage into the imagery library (layout: sessions.ts; the device side: device-library.ts). */
+import { estop } from '../safety/estop.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
@@ -73,6 +74,7 @@ function queueProcessing(s: DeviceSession, failed: FailedFile[], opts: TransferO
 
 /** Copy one session (and optionally the camera's calibration masters) into the library. */
 export async function transferSession(folderOrLatest: string, opts: TransferOptions): Promise<Job> {
+  estop.assertClear();
   const s = await resolveSession(folderOrLatest);
   const dest = sessionLocalDir(s);
   return startJob(
@@ -122,6 +124,7 @@ export interface SessionDeleteOutcome {
  * data that was never copied. One bad session does not stop the others.
  */
 export async function deleteDeviceSessions(folders: string[], opts: { force?: boolean } = {}): Promise<SessionDeleteOutcome[]> {
+  estop.assertClear();
   const out: SessionDeleteOutcome[] = [];
   for (const f of folders) {
     let s: DeviceSession;
@@ -172,6 +175,7 @@ export function albumLocalPath(devicePath: string, day = localDay()): string {
 
 /** Copy individual album files (photos/videos/stacked images) into the library; one bad file does not stop the rest. */
 export function transferFiles(devicePaths: string[], origin?: Job['origin']): Job {
+  estop.assertClear();
   if (!devicePaths.length) throw new Error('no files to transfer');
   // refuse bad paths before queueing anything
   const remotes = [...new Set(devicePaths)];

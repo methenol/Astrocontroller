@@ -11,6 +11,7 @@ import { resetLog, addLog } from './logs.js';
 import { renderStreamHealth } from './video.js';
 import { onStellariumMessage } from './stellarium.js';
 import { renderGuardState } from './weather.js';
+import { renderEStop } from './estop.js';
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 10000;
@@ -32,6 +33,7 @@ function hello(m) {
   renderProcessing();
   resetLog(m.logs);
   if (m.guard) renderGuardState(m.guard);
+  renderEStop(m.estop);
 }
 
 const HANDLERS = {
@@ -67,6 +69,7 @@ const HANDLERS = {
   streams: (m) => renderStreamHealth(m.streams, m.now),
   stellarium: onStellariumMessage,
   guard: (m) => renderGuardState(m.guard),
+  estop: (m) => renderEStop(m.estop),
 };
 
 function handle(raw) {

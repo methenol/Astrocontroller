@@ -1,5 +1,6 @@
 /** Live snapshots, the SD-card album, the library, transfers, processing and agent captures. */
 import { roiForTarget } from '../../processing/roi.js';
+import { estop } from '../../safety/estop.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -177,6 +178,7 @@ export function mediaRoutes({ scope }: WebContext, thumbs: ThumbCache): Router {
     '/album/delete',
     route(async (req) => {
       need('album', 'The SD-card album');
+      estop.assertClear();
       const b = body(req, AlbumDeleteBody);
       const outcomes = await album().delete(b.paths.map((p) => ({ filePath: p, mediaType: b.mediaType })));
       thumbs.clear(); // a deleted file must not live on in the thumbnail cache

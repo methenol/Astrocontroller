@@ -518,6 +518,23 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     return this.motors.nudge(angleDeg, speed, durationMs);
   }
 
+  /** E-Stop: stop everything at once. Returns what could not be confirmed stopped. */
+  async emergencyHalt(): Promise<string[]> {
+    if (!this.link.usable) return ['the telescope is not connected'];
+    const st = this.store.state;
+    const steps: Array<[string, () => Promise<unknown>]> = [
+      ['motors', () => this.motors.stopMotion()],
+      ['astro routines', () => this.astro.haltAll()],
+    ];
+    for (const cam of ['tele', 'wide'] as CameraName[]) {
+      if (st.stacking[cam].state === 'running') steps.push([`${cam} stacking`, () => this.stopStacking(cam, true)]);
+      if (st.capture.record === `${cam}:running`) steps.push([`${cam} recording`, () => this.record(cam, 'stop')]);
+      if (st.capture.timelapse === `${cam}:running`) steps.push([`${cam} timelapse`, () => this.timelapse(cam, 'stop')]);
+    }
+    const results = await Promise.allSettled(steps.map(([, run]) => run()));
+    return results.flatMap((r, i) => (r.status === 'rejected' ? [`${steps[i][0]}: ${errMsg(r.reason)}`] : []));
+  }
+
   stopMotion(): Promise<void> {
     return this.motors.stopMotion();
   }

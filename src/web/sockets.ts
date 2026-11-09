@@ -16,6 +16,7 @@ import { publicConfig, type WebContext } from './context.js';
 import { requestHosts, sameOrigin } from './http.js';
 import { toJson } from '../util/json.js';
 import type { RainGuard } from '../astro/weather/guard.js';
+import { estop } from '../safety/estop.js';
 
 const log = logger('web');
 
@@ -161,6 +162,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
       logs: recentLogs(150),
       config: publicConfig(scope),
       guard: guard?.status(),
+      estop: estop.status(),
     });
     const ping = setInterval(() => ws.readyState === ws.OPEN && ws.ping(), PING_MS);
     ws.on('close', () => {
@@ -198,6 +200,7 @@ export function mountSockets(server: http.Server, ctx: Omit<WebContext, 'broadca
   on(agent, 'event', (e: unknown) => broadcast({ type: 'agent', event: e }));
   on(agent, 'status', (s: unknown) => broadcast({ type: 'agentStatus', status: s }));
   on(duty, 'state', (d: unknown) => broadcast({ type: 'duty', duty: d }));
+  on(estop, 'state', (s: unknown) => broadcast({ type: 'estop', estop: s }));
   on(logBus, 'log', (l: unknown) => broadcast({ type: 'log', entry: l }));
   on(library.jobBus, 'job', (j: unknown) => broadcast({ type: 'job', job: j }));
   on(processing.processingBus, 'item', (it: unknown) => broadcast({ type: 'processing', item: it }));

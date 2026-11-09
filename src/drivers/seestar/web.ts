@@ -7,6 +7,7 @@
  * `main` reaches the hub (hub.ts), which selects it on the device. A tool or an operation that
  * needs the other camera borrows it and the selection comes back after (device.ts).
  */
+import { errMsg } from '../../log.js';
 import express, { type Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config.js';
@@ -462,6 +463,10 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
     requireLocation: () => scope.requireLocation(),
     teleFovDeg: () => scope.state.fov ?? NOMINAL_FOV,
     connectLink: () => scope.connectLink(),
+    emergencyHalt: async () => {
+      const [failed, lapse] = await Promise.all([scope.emergencyHalt(), capture.timelapse('tele', false).then((): string[] => [], (e): string[] => [`timelapse: ${errMsg(e)}`])]);
+      return [...failed, ...lapse];
+    },
     release: () => scope.release(),
     setHost: (host) => scope.setHost(host),
     control,

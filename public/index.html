@@ -64,6 +64,7 @@
       <button type="button" class="chip chip-guard" id="chip-guard" title="Rain Guard: open the Weather tab" hidden>☔ guard</button>
     </div>
     <div class="top-actions">
+      <button type="button" class="estop-btn" id="btn-estop" title="Emergency stop: halts all movement and operations and locks out control. The telescope stays connected.">E-STOP</button>
       <div class="menu" id="menu">
         <button class="ghost" id="btn-profiles-menu" hidden>Manage profiles</button>
         <button class="ghost" id="btn-link" title="Release the telescope (closes every connection to it, e.g. to use its own app) or take it back">Disconnect</button>
@@ -72,6 +73,10 @@
       <button class="ghost icon-btn menu-btn" id="btn-menu" aria-label="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="menu"><svg class="i" aria-hidden="true"><use href="#i-sliders"/></svg></button>
     </div>
   </header>
+  <div class="estop-banner" id="estop-banner" role="alert" hidden>
+    <span id="estop-text"></span>
+    <button type="button" id="btn-estop-clear">Enable control</button>
+  </div>
 
   <main class="layout">
     <nav class="tabs tabs-top" id="tabs-top" role="tablist" aria-label="Sections">

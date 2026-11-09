@@ -37,6 +37,10 @@ const seestarHost = zwo ? env.host('SEESTAR_TUNNEL_HOST', env.host('SEESTAR_HOST
 const LOOPBACK = ['127.0.0.1', 'localhost', '::1'];
 
 export const config = {
+  control: {
+    /** false: start with the E-Stop engaged, control off until the user presses Enable Control */
+    enabledOnStartup: env.bool('CONTROL_ENABLED_ON_STARTUP', true),
+  },
   /** Which telescope this process drives (src/drivers/). */
   telescope: { driver },
   seestar: {

@@ -853,6 +853,24 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   /** Stop whatever runs: hand movement, GoTo, autofocus, polar alignment, a stack, a non-star view. */
+  /** E-Stop: end hand movement, every operation, a recording and the view (its tracking). Returns what could not be confirmed stopped. */
+  async emergencyHalt(): Promise<string[]> {
+    if (!this.link.usable) return ['the Seestar is not connected'];
+    const failed: string[] = [];
+    const step = async (name: string, run: () => Promise<unknown>) => {
+      try {
+        await run();
+      } catch (e) {
+        failed.push(`${name}: ${errMsg(e)}`);
+      }
+    };
+    await step('hand movement', () => this.stopMotion());
+    await step('operations', () => this.stopWork());
+    await step('recording', () => this.call('stop_record_avi', undefined, { allowError: true }));
+    if (this.viewRunning()) await step('view', () => this.stopView());
+    return failed;
+  }
+
   async stopWork(): Promise<{ stopped: string[] }> {
     const stopped: string[] = [];
     if (this.hold) {

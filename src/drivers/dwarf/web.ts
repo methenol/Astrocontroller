@@ -181,6 +181,10 @@ export function dwarfWeb(dwarf: Dwarf, hub: StreamHub): WebTelescope {
     requireLocation: () => dwarf.requireLocation(),
     teleFovDeg: () => dwarf.state.fov.tele ?? { h: 2.95, v: 1.66 },
     connectLink: () => dwarf.connectLink(),
+    emergencyHalt: async () => {
+      const [failed] = await Promise.all([dwarf.emergencyHalt(), stopSurvey(dwarf).catch(() => false)]);
+      return failed;
+    },
     release: () => dwarf.release(),
     setHost: (host) => dwarf.setHost(host),
     control,

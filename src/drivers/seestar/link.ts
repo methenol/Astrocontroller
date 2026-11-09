@@ -13,6 +13,7 @@
 import net from 'node:net';
 import { SafeEmitter } from '../../util/events.js';
 import { errMsg, logger } from '../../log.js';
+import { estop } from '../../safety/estop.js';
 import { handshake, type RpcResponse, type Send } from './auth.js';
 
 const log = logger('seestar.link');
@@ -86,6 +87,9 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+/** What may still be sent under the E-Stop: reads and the link's own upkeep; anything unrecognised is refused. */
+export const READ_ONLY_RPC = /^((scope_|iscope_|pi_)?get_|test_connection$|verify_client$|pi_is_verified$)/;
+
 export class SeestarLink extends SafeEmitter {
   private socket: net.Socket | null = null;
   private wanted = false;
@@ -156,6 +160,7 @@ export class SeestarLink extends SafeEmitter {
   }
 
   async request(method: string, params?: unknown, options: RequestOptions = {}): Promise<RpcResponse> {
+    if (!READ_ONLY_RPC.test(method)) estop.assertClear();
     if (!this.ready) throw new Error(`${method}: the Seestar is not connected`);
     const reply = await this.send(method, params, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     const code = typeof reply.code === 'number' ? reply.code : 0;

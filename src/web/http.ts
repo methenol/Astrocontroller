@@ -2,6 +2,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
 import { errMsg } from '../log.js';
+import { EStopError } from '../safety/estop.js';
 
 /** Request bodies up to this many bytes (images sent to the agent from the web UI). */
 export const BODY_LIMIT_BYTES = 60 * 1024 * 1024;
@@ -30,7 +31,7 @@ export const route =
       const out = await fn(req, res);
       if (!res.headersSent) res.json(out ?? { ok: true });
     } catch (err) {
-      if (!res.headersSent) res.status(err instanceof HttpError ? err.status : 400).json({ error: errMsg(err) });
+      if (!res.headersSent) res.status(err instanceof HttpError ? err.status : err instanceof EStopError ? 423 : 400).json({ error: errMsg(err) });
     }
   };
 

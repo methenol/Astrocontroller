@@ -20,6 +20,7 @@
  * Wakes are ordinary prompts marked as automatic, delivered only while the agent is idle (an
  * event during a turn waits for the turn to end), so they never interrupt work.
  */
+import { estop } from '../safety/estop.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
@@ -215,6 +216,7 @@ export class DutyLoop extends SafeEmitter {
   // ---------------------------------------------------------------- control
   /** until: 'dawn' (astronomical dawn of the current/next night), 'none', 'HH:MM' local, or an ISO time. */
   start(o: { objective: string; until?: string; intervalS?: number; by: 'user'; via?: string }): DutyState {
+    estop.assertClear();
     const objective = o.objective.trim();
     if (!objective) throw new Error('objective required');
     const until = parseUntil(o.until, this.now(), () => {
@@ -269,6 +271,7 @@ export class DutyLoop extends SafeEmitter {
   }
 
   resume(): void {
+    estop.assertClear();
     if (this.state.status !== 'paused') throw new Error('duty is not paused');
     if (this.state.until && this.now() > this.state.until) {
       this.end('its end time passed while paused');
