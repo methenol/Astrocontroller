@@ -86,7 +86,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
   tool(
     'raw_command',
     "Expert escape hatch (the Seestar's raw_rpc): send any JSON-RPC method with its params and get the reply as the scope sent it. Use only when no dedicated tool exists, and record what worked in a skill.",
-    { method: z.string().min(1), params: z.unknown().optional(), timeout_s: z.number().min(1).max(600).optional() },
+    { method: z.string().min(1), params: z.unknown().optional().describe("the method's params as a JSON value (an object for most methods), not as a string"), timeout_s: z.number().min(1).max(600).optional() },
     async ({ method, params, timeout_s }) => text(await scope.raw(method, params, (timeout_s ?? 15) * 1000)),
   );
 

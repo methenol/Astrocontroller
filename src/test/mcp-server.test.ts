@@ -50,6 +50,10 @@ describe('MCP endpoint', () => {
       for (const t of tools) {
         assert.match(t.name, /^[a-z][a-z0-9_]*$/, t.name);
         assert.ok((t.description ?? '').length > 10, `${t.name} has a description`);
+        // an empty property schema ({} from z.unknown()) reaches some servers as `true`, which LM Studio rejects
+        for (const [prop, schema] of Object.entries(t.inputSchema.properties ?? {})) {
+          assert.ok(Object.keys(schema as object).length > 0, `${t.name}.${prop} has a non-empty schema`);
+        }
       }
       assert.ok(tools.some((t) => t.name === 'telescope_status'));
       // a second request gets a fresh server: listing again still works

@@ -23,7 +23,7 @@ export function researchRequest({ name, display, raHours, decDeg }) {
   const pos = Number.isFinite(raHours) && Number.isFinite(decDeg) ? `RA ${fmtRa(raHours)} Dec ${fmtDec(decDeg)} (J2000)` : '';
   const label = name ? `${display && display !== name ? `${display} (${name})` : name}${pos ? ` at ${pos}` : ''}` : `the object at ${pos}`;
   const coords = !name && pos ? ` Use ra_hours=${raHours.toFixed(5)} dec_deg=${decDeg.toFixed(4)} with the tools.` : '';
-  return `Research ${label} and put together a target package (target-research skill): what it is, when and by whom it was discovered and its history, reference imagery (a survey plate framed to this scope and the best published photo), when it is up tonight and through the year (seasonality), and the filter, gain, sub length and integration you recommend for this telescope. This is a look-up: do not move the telescope or change the program.${coords}`;
+  return `Read the target-research skill then research ${label} and put together a target package (you MUST read the target-research skill): what it is, when and by whom it was discovered and its history, reference imagery (a survey plate framed to this scope and the best published photo), when it is up tonight and through the year (seasonality), and the filter, gain, sub length and integration you recommend for this telescope. Respond with the full report and images embedded, not a summary of the report. This is a look-up: do not move the telescope or change the program.${coords}`;
 }
 
 let sending = false;
