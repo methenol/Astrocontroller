@@ -18,6 +18,7 @@ import { estopRoutes } from './routes/estop.js';
 import { estop } from '../safety/estop.js';
 import { agentRoutes } from './routes/agent.js';
 import { stellariumRoutes } from './routes/stellarium.js';
+import { researchRoutes } from './routes/research.js';
 import { weatherRoutes } from './routes/weather.js';
 import { nightRoutes } from './routes/night.js';
 import { RainGuard } from '../astro/weather/guard.js';
@@ -56,6 +57,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(controlRoutes(ctx));
   api.use(agentRoutes(ctx));
   api.use(stellariumRoutes());
+  api.use(researchRoutes());
   api.use(weatherRoutes(ctx, guard));
   api.use(nightRoutes(ctx));
   // the driver's own API (the Seestar's tunnel and raw RPC)

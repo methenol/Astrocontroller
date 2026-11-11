@@ -552,3 +552,26 @@ test('the calendar ranks targets, shows their progress, and opens a sheet with t
   click('#cal-sheet [data-cal-close]');
   assert.equal(ui.$('#cal-sheet').hidden, true);
 });
+
+test('the Research tab lists the packages, searches them and opens one with its images', async () => {
+  const pkg = { name: 'M-33', title: 'M 33 — The Triangulum Galaxy (NGC 598)', hook: '', aliases: ['M 33', 'NGC 598'], date: '2026-11-09', image: 'captures/agent/m33.jpg', updatedAt: 1 };
+  route('GET research', (p) => (p.includes('q=heart') ? [] : [pkg]));
+  route('GET research/M-33', () => ({ ...pkg, content: '# M 33\n\n![M 33: DSS2](captures/agent/m33.jpg)\n\n<script>alert(1)</script>' }));
+  openTab('research');
+  await until(() => !!ui.document.querySelector('#rs-list [data-research-doc="M-33"]'), 'the list');
+  assert.match(text('#rs-count'), /1 package/);
+  (ui.$('#rs-q') as HTMLInputElement).value = 'heart';
+  ui.$('#rs-q').dispatchEvent(new ui.window.Event('input', { bubbles: true }));
+  await until(() => /0 matches for “heart”/.test(text('#rs-count')), 'the search');
+  assert.ok(calls.some((c) => c.path === 'research?q=heart'));
+  (ui.$('#rs-q') as HTMLInputElement).value = '';
+  ui.$('#rs-q').dispatchEvent(new ui.window.Event('input', { bubbles: true }));
+  await until(() => !!ui.document.querySelector('#rs-list [data-research-doc="M-33"]'), 'the full list again');
+  click('#rs-list [data-research-doc="M-33"]');
+  await until(() => !!ui.document.querySelector('#rs-doc .rs-body img'), 'the package');
+  assert.equal(ui.$('#rs-doc .rs-body img').getAttribute('src'), 'captures/agent/m33.jpg');
+  assert.equal(ui.document.querySelector('#rs-doc script'), null, 'raw HTML in a package is shown as text');
+  assert.ok(ui.$('.research-layout').classList.contains('reading'));
+  click('#rs-close');
+  assert.ok(!ui.$('.research-layout').classList.contains('reading'));
+});

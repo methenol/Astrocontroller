@@ -14,6 +14,7 @@ import './database.js';
 import './calendar.js';
 import './stellarium.js';
 import './research.js';
+import './research-library.js';
 import './album.js';
 import './library.js';
 import './skills.js';

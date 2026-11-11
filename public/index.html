@@ -37,6 +37,7 @@
     <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/></symbol>
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.5h6l2 2h9v10h-17z"/></symbol>
     <symbol id="i-journal" viewBox="0 0 24 24"><path d="M6 3.5h12v17H6z"/><path d="M9 8h6M9 12h6"/></symbol>
+    <symbol id="i-research" viewBox="0 0 24 24"><path d="M5 3.5h9l4 4v6"/><path d="M5 3.5v17h7"/><path d="M8 9h6M8 12.5h4"/><circle cx="16.5" cy="17" r="3"/><path d="M18.7 19.2 21 21.5"/></symbol>
     <symbol id="i-skills" viewBox="0 0 24 24"><path d="M12 3l2.6 5.5 6 .8-4.4 4.1 1.1 6L12 16.5 6.7 19.4l1.1-6L3.4 9.3l6-.8z"/></symbol>
     <symbol id="i-log" viewBox="0 0 24 24"><path d="M5 7l4 4-4 4M11 17h8"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
@@ -87,6 +88,7 @@
       <button class="tab" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather"><svg class="i" aria-hidden="true"><use href="#i-rain"/></svg><span>Weather</span></button>
       <button class="tab" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium"><svg class="i" aria-hidden="true"><use href="#i-sky"/></svg><span>Stellarium</span></button>
       <button class="tab" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><svg class="i" aria-hidden="true"><use href="#i-db"/></svg><span>Database</span></button>
+      <button class="tab" data-tab="research" role="tab" aria-selected="false" aria-controls="panel-research"><svg class="i" aria-hidden="true"><use href="#i-research"/></svg><span>Research</span></button>
       <button class="tab" data-tab="album" role="tab" aria-selected="false" aria-controls="panel-album"><svg class="i" aria-hidden="true"><use href="#i-album"/></svg><span>Album</span></button>
       <button class="tab" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library"><svg class="i" aria-hidden="true"><use href="#i-folder"/></svg><span>Library</span></button>
       <button class="tab" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel-journal"><svg class="i" aria-hidden="true"><use href="#i-journal"/></svg><span>Journal</span></button>
@@ -619,6 +621,20 @@
       <div class="card"><h3>Agent captures</h3><div class="grid" id="captures"></div></div>
     </section>
 
+    <!-- ========== Research: the agent's target packages ========== -->
+    <section class="panel" id="panel-research" role="tabpanel" aria-label="Research">
+      <div class="research-layout">
+        <div class="research-side">
+          <input type="search" id="rs-q" placeholder="Search by name or designation: M 33, Heart Nebula, Sh2-119…" aria-label="Search research packages" autocomplete="off" spellcheck="false">
+          <p class="muted small" id="rs-count"></p>
+          <ul id="rs-list" class="research-list"></ul>
+        </div>
+        <article class="research-doc" id="rs-doc" aria-live="polite">
+          <p class="muted small" id="rs-hint">Pick a package to read it. The agent writes one each time you press Research on a target.</p>
+        </article>
+      </div>
+    </section>
+
     <!-- ========== Skills ========== -->
     <section class="panel" id="panel-skills" role="tabpanel" aria-label="Skills">
       <p class="muted small">Skills are the agent's playbooks. It reads them before tasks and refines them as it learns. You can edit them here too.</p>
@@ -675,6 +691,7 @@
       <button class="tab sheet-item" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather"><b>Weather</b><small>Rain Guard alarm, tonight's safety report, radar</small></button>
       <button class="tab sheet-item" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium"><b>Stellarium</b><small>the sky at the site: find, frame, GoTo</small></button>
       <button class="tab sheet-item" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><b>Database</b><small>search 45,000 objects, filter by what is up</small></button>
+      <button class="tab sheet-item" data-tab="research" role="tab" aria-selected="false" aria-controls="panel-research"><b>Research</b><small>the agent's target packages, with reference images</small></button>
       <button class="tab sheet-item" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library"><b>Library</b><small>transfers, processing, sessions, captures</small></button>
       <button class="tab sheet-item" data-tab="skills" role="tab" aria-selected="false" aria-controls="panel-skills"><b>Skills</b><small>the agent's playbooks</small></button>
       <button class="tab sheet-item" data-tab="log" role="tab" aria-selected="false" aria-controls="panel-log"><b>Log</b><small>server events and errors</small></button>
