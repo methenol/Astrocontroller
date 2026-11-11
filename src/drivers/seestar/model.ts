@@ -12,7 +12,8 @@ import type { LinkHealth } from './link.js';
 import type { TunnelStatus } from './tunnel.js';
 import type { Camera } from './frames.js';
 
-export const TERMINAL_STATES = new Set(['complete', 'fail', 'cancel']);
+/** 'ended' is ours, never the scope's: see reconcileLostOps */
+export const TERMINAL_STATES = new Set(['complete', 'fail', 'cancel', 'ended']);
 /** inner steps that set a view's stage while working and clear it when done */
 export const STAGE_EVENTS = new Set(['ContinuousExposure', 'Sleep', 'Stack', 'AutoGoto', 'AutoFocus', 'PlateSolve', 'Initialise', 'DarkLibrary']);
 const QUIET_EVENTS = new Set(['PiStatus', 'Exposure', 'FocuserMove', 'Annotate', 'BalanceSensor', 'GSensorMove']);
@@ -337,6 +338,28 @@ export function polarAligning(st: SeestarState, now = Date.now()): boolean {
   if (!step || TERMINAL_STATES.has(step.state)) return false;
   if (pa && TERMINAL_STATES.has(pa.state) && (pa.at ?? 0) >= (step.at ?? 0)) return false;
   return now - (step.at ?? now) < POLAR_STALE_MS;
+}
+
+/** operations that show as a view's stage while they run, so the scope's app state says whether one still does */
+const STAGED_OPS = ['AutoGoto', 'AutoFocus', 'PlateSolve', 'Initialise', 'DarkLibrary'];
+
+/**
+ * After a reconnect, with the scope's app state just applied: an operation still held as running
+ * from before the link dropped, that neither view shows as its stage any more, finished while its
+ * closing event was lost with the link. Marked 'ended' (outcome not seen) so it does not hold the
+ * scope busy for good - an autofocus did exactly that over a 9-minute tunnel outage (2026-11-11).
+ * Returns the operations it ended.
+ */
+export function reconcileLostOps(st: SeestarState): string[] {
+  const ended: string[] = [];
+  for (const name of STAGED_OPS) {
+    const o = st.ops[name];
+    if (!o || TERMINAL_STATES.has(o.state)) continue;
+    if (st.view.stage === name || st.secondView.stage === name) continue;
+    st.ops[name] = { ...o, state: 'ended', at: Date.now() };
+    ended.push(name);
+  }
+  return ended;
 }
 
 /** What the scope is busy with, from the operations in flight. */

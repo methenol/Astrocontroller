@@ -64,9 +64,24 @@ srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("127.0.0.1", port))
 srv.listen(8)
 srv.settimeout(0.5)
+# FAKE_STALL_AFTER_S/_FOR_S: the control channel stalls that long after the first connection -
+# connections are accepted and never answered, as the scope's 4700 behind a stalled session is
+stall_after = float(os.environ.get("FAKE_STALL_AFTER_S", "-1"))
+stall_for = float(os.environ.get("FAKE_STALL_FOR_S", "0"))
+first = None
+held = []
 while True:
     try:
         client, _ = srv.accept()
+    except OSError:
+        continue
+    now = time.time()
+    if first is None:
+        first = now
+    if stall_after >= 0 and first + stall_after <= now < first + stall_after + stall_for:
+        held.append(client)
+        continue
+    try:
         with client:
             client.sendall(b'{"result":"server connected!"}\\n')
     except OSError:
@@ -431,6 +446,38 @@ class SupervisorTest(unittest.TestCase):
         first = self.h.cloud.sessions[0]
         self.assertIn(f"stop_p2p:{first}", self.h.cloud.calls, "the session past its budget was not given back")
         self.assertLess(len(self.h.pids_written()), 6, "the budget did not stop the dialling")
+
+    def test_a_control_channel_stall_shorter_than_the_budget_is_waited_out(self) -> None:
+        # 2026-11-11: 4700 went silent for ~2 min while the P2P session held, then answered again;
+        # three misses killed it anyway and the fresh session was refused (-42) for 5+ minutes
+        s = self.boot(FAKE_STALL_AFTER_S="1", FAKE_STALL_FOR_S="9", SEESTAR_TUNNEL_LIVENESS_FAILS="1",
+                      SEESTAR_TUNNEL_PROBE_TIMEOUT_S="1", SEESTAR_TUNNEL_SILENT_PROBE_S="1",
+                      SEESTAR_TUNNEL_SILENT_S="30")
+        s.connect()
+        self.wait(lambda: s.status()["phase"] == "connected", what="the tunnel to come up")
+        self.wait(lambda: not s.status()["portOpen"], timeout=10, what="a probe to find the control port silent")
+        self.wait(lambda: s.status()["portOpen"], timeout=15, what="the control port to answer again")
+        self.assertEqual(s.status()["phase"], "connected", "a stall that recovered by itself cost the session")
+        self.assertEqual(len(self.h.pids_written()), 1, "the tunnel was restarted over a stall")
+        self.assertEqual(len(self.h.cloud.sessions), 1, "a new session was allocated over a stall")
+
+    def test_a_control_channel_that_stays_silent_is_reconnected(self) -> None:
+        s = self.boot(FAKE_STALL_AFTER_S="1", FAKE_STALL_FOR_S="1000", SEESTAR_TUNNEL_LIVENESS_FAILS="2",
+                      SEESTAR_TUNNEL_PROBE_TIMEOUT_S="1", SEESTAR_TUNNEL_SILENT_PROBE_S="1",
+                      SEESTAR_TUNNEL_SILENT_S="4")
+        s.connect()
+        self.wait(lambda: s.status()["phase"] == "connected", what="the tunnel to come up")
+        self.wait(lambda: len(self.h.pids_written()) >= 2, timeout=25, what="a reconnect after the silence budget")
+        self.assertFalse(self.h.alive(self.h.pids_written()[0]), "the silent tunnel was left running beside the new one")
+
+    def test_a_disconnect_during_a_silent_probe_is_not_held_up(self) -> None:
+        s = self.boot(FAKE_STALL_AFTER_S="0", FAKE_STALL_FOR_S="1000", SEESTAR_TUNNEL_READY_TIMEOUT_S="60")
+        s.connect()
+        self.wait(lambda: len(self.h.pids_written()) >= 1, what="the tunnel process")
+        time.sleep(1.5)  # a readiness probe is now waiting on the silent port
+        started = time.time()
+        s.disconnect(wait_s=10)
+        self.assertLess(time.time() - started, 8, "the disconnect waited out the probe")
 
 
 if __name__ == "__main__":

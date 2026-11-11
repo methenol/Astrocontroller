@@ -56,7 +56,7 @@ import time
 import traceback
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 
 # seestar_status.py sits in the repository root: /work in the image, the checkout next to src/.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -134,6 +134,22 @@ class Config:
         #: P2P session itself every second and exits when it goes away, so dialling the scope's
         #: control service any more often than this only competes with the traffic that matters
         self.liveness_s = max(self.watchdog_s, env_num("SEESTAR_TUNNEL_LIVENESS_S", 60, 5))
+        #: how long one liveness probe waits for the control service's reply once the tunnel is up.
+        #: The scope's control channel stalls now and then while the P2P session itself holds (the
+        #: SDK's own check, every second in the tunnel binary, still passes and the other session
+        #: keeps carrying pictures); coming out of such a stall a fresh connection took 14 s to be
+        #: answered (2026-11-11), so a short window reads a slow answer as a dead session
+        self.probe_timeout_s = env_num("SEESTAR_TUNNEL_PROBE_TIMEOUT_S", 20, 1)
+        #: while the control port does not answer, look again this often so a recovery is seen
+        self.silent_probe_s = max(self.watchdog_s, env_num("SEESTAR_TUNNEL_SILENT_PROBE_S", 30, 1))
+        #: reconnect only after the control port has gone this long without one answer (and at
+        #: least liveness_fails probes in a row missed). A session the SDK has really lost is ended
+        #: by the tunnel binary itself (exit 3) within its 30 s alive timeout; this is the backstop
+        #: for one that stays nominally alive but carries nothing. It is sized against what a
+        #: reconnect costs: a fresh session is refused (Connect_Ex -42) for 3 to 7 minutes and more
+        #: (2026-11-11), while the stalls seen recovered by themselves within about 2 minutes, so
+        #: cutting one short turned a 2-minute hiccup into a 5-minute-plus outage
+        self.silent_s = env_num("SEESTAR_TUNNEL_SILENT_S", 300, 0)
         #: while connected, re-read the scope's status (ONLINE/SHOOTING/OCCUPIED) from the account this
         #: often so /status does not keep the value seen at connect time; 0 = only at connect/release
         self.status_refresh_s = env_num("SEESTAR_TUNNEL_STATUS_REFRESH_S", 120, 0)
@@ -172,20 +188,34 @@ def tcp_open(port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def rpc_probe(port: int, timeout: float = 8.0) -> tuple[bool, str]:
+def rpc_probe(port: int, timeout: float = 8.0, abandon: Callable[[], bool] | None = None) -> tuple[bool, str]:
     """One JSON-RPC round trip on the forwarded control port: proof the session carries traffic.
 
     A session the SDK has lost keeps its forwarded ports open and silent, so a bare connect proves
     nothing; `test_connection` is what the tunnel binary uses for its own self-test.
+
+    `abandon` is asked about once a second while the reply is awaited: a long wait must not hold
+    up a Disconnect or hide a tunnel that has exited.
     """
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout)
+        s = socket.create_connection(("127.0.0.1", port), min(timeout, 5.0))
     except OSError as exc:
         return False, f"127.0.0.1:{port}: {exc}"
+    deadline = time.time() + timeout
+    data = b""
     try:
-        s.settimeout(timeout)
         s.sendall(b'{"id":1,"method":"test_connection"}\r\n')
-        data = s.recv(256)
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                return False, f"127.0.0.1:{port}: no reply to test_connection in {timeout:.0f} s"
+            s.settimeout(min(1.0, left))
+            try:
+                data = s.recv(256)
+                break
+            except socket.timeout:
+                if abandon is not None and abandon():
+                    return False, f"127.0.0.1:{port}: probe abandoned"
     except OSError as exc:
         return False, f"127.0.0.1:{port}: {exc}"
     finally:
@@ -695,6 +725,8 @@ class Supervisor:
         deadline = time.time() + cfg.ready_timeout_s
         came_up = False
         misses = 0
+        #: when the control port was first found not answering in the current stall; None = it answers
+        silent_since: float | None = None
         last_liveness = 0.0  # the first liveness pass after coming up waits liveness_s
         last_status = 0.0  # the account's view of the scope is re-read every status_refresh_s
         while True:
@@ -729,10 +761,14 @@ class Supervisor:
                     self.last_exit = f"{reason}{note}"
                 log(f"the tunnel exited, {reason}{note}")
                 break
-            probe_now = not came_up or (time.time() - last_liveness) >= cfg.liveness_s
+            every = cfg.silent_probe_s if silent_since is not None else cfg.liveness_s
+            probe_now = not came_up or (time.time() - last_liveness) >= every
             if probe_now:
                 last_liveness = time.time()
-                ok, detail = rpc_probe(cfg.probe_port, timeout=5.0 if not came_up else 8.0)
+                ok, detail = rpc_probe(cfg.probe_port, timeout=5.0 if not came_up else cfg.probe_timeout_s,
+                                       abandon=self._probe_moot)
+                if self._probe_moot():
+                    continue  # the top of the loop handles the disconnect or the exit
                 with self.cond:
                     self.port_open = ok
             if not came_up:
@@ -762,7 +798,11 @@ class Supervisor:
                 if not probe_now:
                     pass  # nothing to ask this pass: the tunnel reports a dead session by itself
                 elif ok:
+                    if silent_since is not None:
+                        log(f"the tunnel answers again after {time.time() - silent_since:.0f} s of silence: "
+                            "the session held, no reconnect needed")
                     misses = 0
+                    silent_since = None
                     with self.cond:
                         self.backoff = self.cfg.retry_min_s  # it answers: start the next backoff short
                     if cfg.status_refresh_s and time.time() - last_status >= cfg.status_refresh_s:
@@ -770,11 +810,17 @@ class Supervisor:
                         self._scope_free()  # refreshes self.device["status"] as a side effect
                 else:
                     misses += 1
-                    log(f"the tunnel stopped answering ({detail}), "
-                        f"{max(cfg.liveness_fails - misses, 0)} pass(es) left before a reconnect")
-                    if misses >= cfg.liveness_fails:
-                        self._fail(f"the session went silent: {detail}", retry=True)
+                    if silent_since is None:
+                        silent_since = last_liveness  # when the probe that found it silent started
+                    silent = time.time() - silent_since
+                    if misses >= cfg.liveness_fails and silent >= cfg.silent_s:
+                        log(f"the tunnel stopped answering ({detail}): silent for {silent:.0f} s, "
+                            f"{misses} probe(s) in a row; reconnecting")
+                        self._fail(f"the session went silent for {silent:.0f} s: {detail}", retry=True)
                         break
+                    log(f"the tunnel stopped answering ({detail}): silent for {silent:.0f} s; the P2P "
+                        f"session is still held, so it is waited out (reconnect after "
+                        f"{cfg.silent_s:.0f} s and {cfg.liveness_fails} misses in a row)")
             with self.cond:
                 # waiting for readiness is worth looking again soon; the watchdog's pace is for liveness
                 wait = READY_POLL_S if not came_up else cfg.watchdog_s
@@ -782,6 +828,14 @@ class Supervisor:
                     wait = max(0.05, min(wait, self.lease_expires - time.time()))  # never hold past the lease
                 self.cond.wait(wait)
         return came_up
+
+    def _probe_moot(self) -> bool:
+        """A probe's answer no longer matters: a disconnect was asked for, or the tunnel exited."""
+        with self.cond:
+            child = self.child
+            if self.stopping or self.desired != "connected" or child is None:
+                return True
+        return child.poll() is not None
 
     def _stop_child(self) -> None:
         with self.cond:

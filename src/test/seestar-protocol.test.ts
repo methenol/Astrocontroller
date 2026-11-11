@@ -7,7 +7,7 @@ import { SeestarLink, SeestarRpcError, type SeestarEvent } from '../drivers/sees
 import { handshake, signChallenge } from '../drivers/seestar/auth.js';
 import { encodeHeader, FrameReader, frameImage, IMG_TYPE, parseHeader, rawStackPixels, type Frame } from '../drivers/seestar/frames.js';
 import { SeestarImageLink } from '../drivers/seestar/image-link.js';
-import { applyAppState, applyDeviceState, applyEvent, busyWith, fovFromOptics, initialState, isOuter } from '../drivers/seestar/model.js';
+import { applyAppState, applyDeviceState, applyEvent, busyWith, fovFromOptics, initialState, isOuter, reconcileLostOps } from '../drivers/seestar/model.js';
 import { ZwoTunnel } from '../drivers/seestar/tunnel.js';
 import { listDevices, login } from '../drivers/seestar/zwo-cloud.js';
 import { toJpeg, type FloatImage } from '../media/images.js';
@@ -378,6 +378,26 @@ describe('Seestar model', () => {
     assert.equal(st.power.batteryPct, 77);
     assert.equal(st.storage.freeMB, 50_000);
     assert.deepEqual((st.deviceState as typeof r).ap, { ssid: 'S30_ABC', passwd: '12345678' });
+  });
+
+  test('an operation whose closing event was lost with the link ends on the reconnect resync', () => {
+    const st = initialState('zwo');
+    applyEvent(st, ev({ Event: 'AutoFocus', state: 'working', route: [] }));
+    assert.equal(busyWith(st), 'autofocus');
+    // the link drops; AutoFocus complete is sent meanwhile and lost. After the reconnect the scope's
+    // app state shows the tele back on its continuous exposure: the autofocus no longer runs
+    applyAppState(st, { View: { state: 'working', mode: 'star', stage: 'ContinuousExposure' } });
+    assert.deepEqual(reconcileLostOps(st), ['AutoFocus']);
+    assert.equal(st.ops['AutoFocus']!.state, 'ended');
+    assert.equal(busyWith(st), null);
+  });
+
+  test('an operation the scope still shows as its stage keeps running across the reconnect', () => {
+    const st = initialState('zwo');
+    applyEvent(st, ev({ Event: 'AutoFocus', state: 'working', route: [] }));
+    applyAppState(st, { View: { state: 'working', mode: 'star', stage: 'AutoFocus' } });
+    assert.deepEqual(reconcileLostOps(st), []);
+    assert.equal(busyWith(st), 'autofocus');
   });
 
   test('a step that ends is not the operation ending; the outer frame is', () => {

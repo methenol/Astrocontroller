@@ -8,6 +8,7 @@ function op(scope: Seestar, name: string): OpState {
   const o = scope.state.ops[name];
   if (!o) return 'idle';
   if (!TERMINAL_STATES.has(o.state)) return 'running';
+  if (o.state === 'ended') return 'idle'; // ended while the link was down: its outcome was never seen
   return o.state === 'complete' ? 'complete' : 'failed';
 }
 

@@ -93,6 +93,7 @@ function opWord(o: OperationState | undefined): string {
   if (o.state === 'complete') return 'done';
   if (o.state === 'fail') return 'failed';
   if (o.state === 'cancel') return 'cancelled';
+  if (o.state === 'ended') return 'ended';
   if (o.state === 'idle' || o.state === 'off') return 'idle';
   return 'running';
 }

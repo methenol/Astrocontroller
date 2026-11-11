@@ -31,7 +31,7 @@ import { readKey, type RpcResponse } from './auth.js';
 import { SeestarLink, VIEW_TIMEOUT_MS, type LinkOptions, type RequestOptions, type SeestarEvent } from './link.js';
 import { SeestarImageLink, type GrabKind } from './image-link.js';
 import { frameImage, IMG_TYPE, type Camera, type Frame } from './frames.js';
-import { applyAppState, applyDeviceState, applyEvent, busyWith, polarAligning, initialState, isOuter, isStacking, pair, TERMINAL_STATES, VIEW_OF, type SeestarState, type ViewState } from './model.js';
+import { applyAppState, applyDeviceState, applyEvent, busyWith, polarAligning, initialState, isOuter, isStacking, pair, reconcileLostOps, TERMINAL_STATES, VIEW_OF, type SeestarState, type ViewState } from './model.js';
 import { ZwoTunnel } from './tunnel.js';
 
 export type { Camera } from './frames.js';
@@ -162,6 +162,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   private statePending = false;
   private poll: NodeJS.Timeout | null = null;
   private lastFullPoll = 0;
+  /** the last refreshState got the scope's app state (its views' stages) */
+  private appStateFresh = false;
   private viewQueue: Promise<unknown> = Promise.resolve();
   private rawQueue: Promise<unknown> = Promise.resolve();
   /** the hand movement running (nudge) */
@@ -320,6 +322,10 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     this.images.wide.open();
     try {
       await this.refreshState();
+      // events sent while the link was down are gone: an operation's closing one among them
+      if (this.appStateFresh) {
+        for (const op of reconcileLostOps(this.st)) log.info(`${op} no longer runs on the scope: it ended while the link was down (outcome not seen)`);
+      }
       if (this.st.connection === 'zwo') await this.lowRtspQuality();
       await this.prepareLiveFrames();
       if (this.viewRunning() && this.st.view.mode === 'scenery') {
@@ -474,7 +480,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     const dev = await this.call('get_device_state');
     if (dev.result && typeof dev.result === 'object') applyDeviceState(this.st, dev.result as Record<string, unknown>);
     const app = await this.call('iscope_get_app_state', undefined, { allowError: true });
-    if (app.result && typeof app.result === 'object') applyAppState(this.st, app.result as Record<string, unknown>);
+    this.appStateFresh = !!app.result && typeof app.result === 'object';
+    if (this.appStateFresh) applyAppState(this.st, app.result as Record<string, unknown>);
     const track = await this.call('scope_get_track_state', undefined, { allowError: true });
     if (typeof track.result === 'boolean') this.st.mount.tracking = track.result;
     await this.readPointing().catch(() => undefined);

@@ -241,7 +241,11 @@ path the record dies with the container and neither the conId nor the wish survi
 | `SEESTAR_TUNNEL_READY_TIMEOUT_S` | `180` | give up on an attempt that never came up |
 | `SEESTAR_TUNNEL_RETRY_MIN_S` / `_MAX_S` | `5` / `120` | the reconnect backoff |
 | `SEESTAR_TUNNEL_WATCHDOG_S` | `10` | how often the session is proven alive |
-| `SEESTAR_TUNNEL_LIVENESS_FAILS` | `3` | failed passes before a reconnect |
+| `SEESTAR_TUNNEL_LIVENESS_S` | `60` | how often a `test_connection` on the control port re-proves the session once it is up |
+| `SEESTAR_TUNNEL_PROBE_TIMEOUT_S` | `20` | how long one such probe waits for its reply |
+| `SEESTAR_TUNNEL_SILENT_S` | `300` | reconnect only once the control port has gone this long without answering; a session the SDK really lost is ended by the tunnel binary itself within 30 s, and the control channel's stalls (seen up to ~2 min) recover by themselves, while a fresh session is refused (`-42`) for minutes |
+| `SEESTAR_TUNNEL_SILENT_PROBE_S` | `30` | while the control port is silent, probe this often so a recovery is seen |
+| `SEESTAR_TUNNEL_LIVENESS_FAILS` | `3` | and at least this many failed probes in a row before that reconnect |
 | `SEESTAR_TUNNEL_STATUS_REFRESH_S` | `120` | while connected, re-read the scope's account status (ONLINE/SHOOTING/OCCUPIED) this often for `/status`; `0` = only at connect/release |
 | `SEESTAR_TUNNEL_STOP_GRACE_S` | `10` | SIGINT to SIGKILL for the tunnel |
 | `SEESTAR_TUNNEL_LOCK` | `/var/lib/seestar-portfwd/tunnel.lock` | the one-session lock |
