@@ -57,6 +57,31 @@ const COLORS = {
   pickBorder: [0.98, 0.75, 0.14, 1],
 };
 
+/** The object database's layers on the map, each with its circle colour (off until the user turns them on). */
+const CAT_COLORS = {
+  galaxies: [0.98, 0.6, 0.6],
+  galaxy_groups: [0.95, 0.45, 0.75],
+  nebulae: [0.4, 0.95, 0.55],
+  reflection: [0.5, 0.75, 1],
+  dark: [0.7, 0.7, 0.7],
+  planetary: [0.3, 0.9, 0.9],
+  snr: [1, 0.65, 0.3],
+  open_clusters: [1, 0.9, 0.4],
+  globulars: [1, 0.8, 0.55],
+  stars: [0.9, 0.9, 1],
+  other: [0.75, 0.65, 0.95],
+};
+const CAT_LAYERS = Object.keys(CAT_COLORS);
+/** circles on the map at once; the most prominent in view are drawn first, so zooming in reveals the rest */
+const CAT_LIMIT = 500;
+/** fetch a little beyond the view, so small pans need nothing new */
+const CAT_MARGIN = 1.2;
+/** fetch again once the view has moved this share of the radius fetched, or zoomed by this factor */
+const CAT_MOVE = 0.2;
+const CAT_ZOOM = 1.25;
+/** a circle is never smaller than this share of the field of view, or small objects could not be seen or tapped */
+const CAT_MIN_SIZE = 0.012;
+
 let opts = { ...DEFAULT_OPTS, ...readOpts() };
 let enginePromise = null;
 let stel = null;
@@ -411,6 +436,7 @@ function tick() {
   if (!stel || !isPanelActive('stellarium')) return;
   trackFrame();
   renderOverlay();
+  followCatalog();
   renderClock(false);
   const now = Date.now();
   if (now - lastCard > CARD_MS) {
@@ -553,6 +579,87 @@ function nightFeatures() {
   return out;
 }
 
+// ---------------------------------------------------------------- the object database, by layer
+
+const catLayers = () => CAT_LAYERS.filter((l) => opts[`cat_${l}`]);
+/** what is on the map: the view it was fetched for; null when nothing is */
+let catView = null;
+/** the layers changed: the next tick fetches whatever the view */
+let catStale = false;
+let catSeq = 0;
+
+/** The circles go, except the selected one: the selection card and the frame are still on it. */
+function clearCatalogMarkers() {
+  const selected = stel.core.selection?.v;
+  let kept = null;
+  for (const [k, m] of [...markers]) {
+    if (m.kind !== 'catalog') continue;
+    if (k === selected) {
+      kept = m.target.id;
+      continue;
+    }
+    layer.remove(m.obj);
+    markers.delete(k);
+  }
+  return kept;
+}
+
+function drawCatalog(objects, fovDeg) {
+  const kept = clearCatalogMarkers();
+  for (const o of objects) {
+    if (o.id === kept) continue;
+    const size = Math.max((o.sizeArcmin ?? 0) / 60, fovDeg * CAT_MIN_SIZE) * stel.D2R;
+    const c = CAT_COLORS[o.layer];
+    const obj = layer.add('circle', { pos: [...raDecVec(o.raHours, o.decDeg), 0], frame: stel.FRAME_ICRF, size: [size, size], color: [...c, 0.04], border_color: [...c, 0.8], label: o.display });
+    markers.set(obj.v, { kind: 'catalog', obj, target: { id: o.id, name: o.name, display: o.display, raHours: o.raHours, decDeg: o.decDeg, type: o.typeName, vmag: o.mag ?? null, aka: o.display === o.name ? '' : o.name } });
+  }
+}
+
+/** Runs with the tick: the chosen layers follow the view, fetched again only when it has moved enough to matter. */
+function followCatalog() {
+  const layers = catLayers();
+  if (!layers.length) {
+    if (catView) {
+      catSeq++;
+      catView = null;
+      clearCatalogMarkers();
+      $('#sky-cat-count').textContent = '';
+    }
+    return;
+  }
+  const center = viewCenter();
+  const fov = stel.core.fov / stel.D2R;
+  if (catView && !catStale) {
+    const zoom = fov / catView.fov;
+    if (sepDeg(center, catView.center) < catView.radius * CAT_MOVE && zoom < CAT_ZOOM && zoom > 1 / CAT_ZOOM) return;
+  }
+  const canvas = $('#sky-canvas');
+  const long = Math.max(canvas.clientWidth, canvas.clientHeight);
+  const short = Math.max(1, Math.min(canvas.clientWidth, canvas.clientHeight));
+  const radius = Math.min(180, (fov / 2) * Math.hypot(1, long / short) * CAT_MARGIN);
+  catView = { center, fov, radius };
+  catStale = false;
+  const mine = ++catSeq;
+  const { raHours, decDeg } = vecRaDec(center);
+  api(`stellarium/objects?ra=${raHours}&dec=${decDeg}&radius=${radius}&layers=${layers.join(',')}&limit=${CAT_LIMIT}`)
+    .then((r) => {
+      if (mine !== catSeq) return;
+      drawCatalog(r.objects, fov);
+      $('#sky-cat-count').textContent = r.total > r.objects.length ? `${r.objects.length.toLocaleString()} of ${r.total.toLocaleString()} objects: zoom in for the rest` : `${r.total.toLocaleString()} objects`;
+    })
+    .catch(() => {
+      if (mine === catSeq) $('#sky-cat-count').textContent = 'the object database did not answer';
+    });
+}
+
+/** Turn the layers on or off together. */
+function setAllCatalog(on) {
+  for (const l of CAT_LAYERS) opts[`cat_${l}`] = on;
+  saveOpts();
+  catStale = true;
+  applyOpts();
+}
+
 /** A marker for a target the engine's catalogs do not hold (Sh2, LDN, a bare position…). */
 function dropPick(t) {
   if (pickMarker) {
@@ -604,6 +711,8 @@ const SOLAR_SYSTEM = /^(Sun|Moo|Pla|MPl|Com|SSO|Ast)$/;
 function onSelection() {
   const obj = stel.core.selection;
   sel = obj ? describe(obj) : framing ? sel : null;
+  // a circle kept for the selection after its layers were turned off goes with it
+  if (!catLayers().length) clearCatalogMarkers();
   lastCard = 0;
   renderCard();
   closeProgramForm();
@@ -829,8 +938,11 @@ $('#sky-opts').addEventListener('change', (e) => {
   saveOpts();
   if (el.dataset.opt === 'plan') loadPlanMarkers();
   if (el.dataset.opt === 'night') loadNightPlan();
+  if (el.dataset.opt.startsWith('cat_')) catStale = true;
   applyOpts();
 });
+$('#sky-cat-all').onclick = () => setAllCatalog(true);
+$('#sky-cat-none').onclick = () => setAllCatalog(false);
 
 // Tonight's plan and the Database open targets here: any [data-sky] button carries name, ra and dec.
 document.addEventListener('click', (e) => {

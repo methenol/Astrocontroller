@@ -6,7 +6,8 @@
  */
 import express, { type Router } from 'express';
 import { config } from '../../config.js';
-import { notFound, route } from '../http.js';
+import { objectsInView } from '../../astro/catalog.js';
+import { badRequest, notFound, queryNumber, queryString, route } from '../http.js';
 
 /** data.stellarium.org/surveys/gaia/properties (2018-08-28), plus the line the engine needs. */
 export const GAIA_PROPERTIES = ['hips_order_min = 3', 'hips_release_date = 2018-08-28T08:10Z', 'hips_tile_format = eph', 'type = stars', ''].join('\n');
@@ -16,6 +17,19 @@ const TILE_CACHE = 'public, max-age=86400';
 
 export function stellariumRoutes(): Router {
   const api = express.Router();
+
+  // the object database for the part of the sky in view
+  api.get(
+    '/stellarium/objects',
+    route(async (req) => {
+      const raHours = queryNumber(req, 'ra');
+      const decDeg = queryNumber(req, 'dec');
+      const radiusDeg = queryNumber(req, 'radius');
+      if (raHours === undefined || decDeg === undefined || radiusDeg === undefined) throw badRequest('ra, dec and radius are required');
+      const layers = (queryString(req, 'layers') ?? '').split(',').filter(Boolean);
+      return objectsInView({ raHours, decDeg, radiusDeg, layers, limit: queryNumber(req, 'limit') });
+    }),
+  );
 
   api.get('/stellarium/gaia/properties', (_req, res) => {
     if (!config.stellarium.stream) return void res.status(404).json({ error: 'streaming is off (STELLARIUM_STREAM)' });

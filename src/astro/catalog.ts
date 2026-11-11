@@ -239,6 +239,79 @@ function computeProminence(o: DsoObject): number {
   return p;
 }
 
+/** The Stellarium tab's object toggles: each layer's type codes. Together they cover every type in the database, each in one layer. */
+export const SKY_LAYERS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  galaxies: ['G', 'GPair', 'GTrpl'],
+  galaxy_groups: ['GGroup', 'GClstr'],
+  nebulae: ['HII', 'EmN', 'Neb', 'Cl+N'],
+  reflection: ['RfN'],
+  dark: ['DrkN'],
+  planetary: ['PN'],
+  snr: ['SNR'],
+  open_clusters: ['OCl', '*Ass'],
+  globulars: ['GCl'],
+  stars: ['*', '**'],
+  other: ['Other', 'Nova'],
+});
+
+const LAYER_OF = new Map(Object.entries(SKY_LAYERS).flatMap(([layer, types]) => types.map((t) => [t, layer] as const)));
+
+/** The most objects one view returns; zooming in brings the rest within it. */
+export const SKY_VIEW_MAX = 1000;
+
+export interface SkyViewQuery {
+  raHours: number;
+  decDeg: number;
+  radiusDeg: number;
+  layers: readonly string[];
+  limit?: number;
+}
+
+export interface SkyViewObject {
+  id: string;
+  name: string;
+  display: string;
+  type: string;
+  typeName: string;
+  layer: string;
+  raHours: number;
+  decDeg: number;
+  sizeArcmin?: number;
+  mag?: number;
+}
+
+/** The objects of the chosen layers within a circle of the sky, most prominent first; `total` counts them before the limit. */
+export function objectsInView(q: SkyViewQuery): { total: number; objects: SkyViewObject[] } {
+  const wanted = new Set(q.layers);
+  const rad = Math.PI / 180;
+  const ra0 = q.raHours * 15 * rad;
+  const sin0 = Math.sin(q.decDeg * rad);
+  const cos0 = Math.cos(q.decDeg * rad);
+  const minCos = Math.cos(Math.min(180, Math.max(0, q.radiusDeg)) * rad);
+  const hits = catalog().filter((o) => {
+    if (!wanted.has(LAYER_OF.get(o.type) ?? '')) return false;
+    const dec = o.decDeg * rad;
+    return sin0 * Math.sin(dec) + cos0 * Math.cos(dec) * Math.cos(o.raHours * 15 * rad - ra0) >= minCos;
+  });
+  hits.sort((a, b) => prominence(b) - prominence(a));
+  const limit = Math.min(SKY_VIEW_MAX, Math.max(1, Math.floor(q.limit ?? SKY_VIEW_MAX)));
+  return {
+    total: hits.length,
+    objects: hits.slice(0, limit).map((o) => ({
+      id: o.id,
+      name: gotoLabel(o),
+      display: displayName(o),
+      type: o.type,
+      typeName: o.typeName,
+      layer: LAYER_OF.get(o.type) as string,
+      raHours: o.raHours,
+      decDeg: o.decDeg,
+      sizeArcmin: o.majorArcmin,
+      mag: o.mag,
+    })),
+  };
+}
+
 /** The name people (and the DWARF app) use: Messier, then Caldwell, then a common name, then the id. */
 export function displayName(o: DsoObject): string {
   return o.aliases.find((a) => MESSIER.test(a)) ?? o.aliases.find((a) => CALDWELL.test(a)) ?? o.names[0] ?? o.id;

@@ -497,6 +497,7 @@
           <span class="sky-clock"><span id="sky-clock">–</span> <span class="badge done" id="sky-live" hidden>live</span></span>
           <span class="muted small" id="sky-site"></span>
           <span class="muted small" id="sky-status"></span>
+          <span class="muted small" id="sky-cat-count"></span>
         </div>
         <div class="sky-tools">
           <button type="button" class="mini" id="sky-frame" aria-pressed="false" title="Frame mode: the tele frame stays in the middle of the view; pan the sky to compose the shot, then GoTo the frame">Frame</button>
@@ -530,6 +531,24 @@
           <label><input type="checkbox" data-opt="azGrid"> alt/az grid</label>
           <label><input type="checkbox" data-opt="eqGrid"> RA/Dec grid</label>
           <label>ground <select data-opt="ground"><option value="zero">flat</option><option value="guereins">Guéreins (photo)</option><option value="none">none</option></select></label>
+        </div>
+        <div class="sky-cat-head">
+          <span class="muted small">Everything in the object database</span>
+          <button type="button" class="mini" id="sky-cat-all">All</button>
+          <button type="button" class="mini" id="sky-cat-none">None</button>
+        </div>
+        <div class="sky-opt-grid">
+          <label><input type="checkbox" data-opt="cat_galaxies"> galaxies</label>
+          <label><input type="checkbox" data-opt="cat_galaxy_groups"> galaxy groups &amp; clusters</label>
+          <label><input type="checkbox" data-opt="cat_nebulae"> emission nebulae</label>
+          <label><input type="checkbox" data-opt="cat_reflection"> reflection nebulae</label>
+          <label><input type="checkbox" data-opt="cat_dark"> dark nebulae</label>
+          <label><input type="checkbox" data-opt="cat_planetary"> planetary nebulae</label>
+          <label><input type="checkbox" data-opt="cat_snr"> supernova remnants</label>
+          <label><input type="checkbox" data-opt="cat_open_clusters"> open clusters</label>
+          <label><input type="checkbox" data-opt="cat_globulars"> globular clusters</label>
+          <label><input type="checkbox" data-opt="cat_stars"> catalog stars</label>
+          <label><input type="checkbox" data-opt="cat_other"> other</label>
         </div>
         <p class="muted small">The frame is the tele camera's field, horizon-level on an alt-az mount and north-up in EQ: an approximation, the real roll can differ by a few degrees. Stellarium Web Engine, © Stellarium Labs, AGPL-3.0 (<a href="vendor/stellarium/README.md" target="_blank" rel="noopener">source</a>).</p>
       </details>

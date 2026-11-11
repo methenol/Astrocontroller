@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { findObject, gotoLabel } from '../astro/catalog.js';
+import { catalog, findObject, gotoLabel, objectsInView, SKY_LAYERS } from '../astro/catalog.js';
 import { resolveSkyTarget, SAME_OBJECT_DEG } from '../astro/sky-target.js';
 import { GAIA_PROPERTIES, GAIA_TILE } from '../web/routes/stellarium.js';
 import { ControlBody } from '../web/routes/control.js';
@@ -40,6 +40,35 @@ describe('a target picked on the Stellarium map', () => {
   test('no name: the label is the coordinates; odd characters are dropped from names', () => {
     assert.equal(resolveSkyTarget(undefined, 5.5, -5.25).label, 'RA 05h30m00.0s Dec -05°15\'00"');
     assert.equal(resolveSkyTarget('<b>Star/x</b>', 3, 80).label, 'bStarxb');
+  });
+});
+
+describe('the object layers on the map', () => {
+  const m31 = findObject('M 31')!;
+  const all = Object.keys(SKY_LAYERS);
+
+  test('every type in the database belongs to exactly one layer', () => {
+    const owners = (t: string) => Object.values(SKY_LAYERS).filter((types) => types.includes(t)).length;
+    for (const t of new Set(catalog().map((o) => o.type))) assert.equal(owners(t), 1, t);
+  });
+
+  test('all layers over the whole sky reach every object in the database', () => {
+    assert.equal(objectsInView({ raHours: 0, decDeg: 0, radiusDeg: 180, layers: all }).total, catalog().length);
+  });
+
+  test('a view holds its layers within its radius, most prominent first', () => {
+    const near = objectsInView({ raHours: m31.raHours, decDeg: m31.decDeg, radiusDeg: 3, layers: ['galaxies'] });
+    assert.equal(near.objects[0].id, m31.id);
+    assert.ok(near.objects.every((o) => o.layer === 'galaxies'));
+    assert.ok(!objectsInView({ raHours: m31.raHours, decDeg: m31.decDeg, radiusDeg: 3, layers: ['planetary'] }).objects.some((o) => o.id === m31.id));
+    assert.ok(!objectsInView({ raHours: (m31.raHours + 12) % 24, decDeg: -m31.decDeg, radiusDeg: 90, layers: ['galaxies'] }).objects.some((o) => o.id === m31.id));
+  });
+
+  test('the limit trims the list, not the count, and no layers means nothing', () => {
+    const v = objectsInView({ raHours: 12, decDeg: 12, radiusDeg: 60, layers: ['galaxies'], limit: 5 });
+    assert.equal(v.objects.length, 5);
+    assert.ok(v.total > 5);
+    assert.equal(objectsInView({ raHours: 12, decDeg: 12, radiusDeg: 60, layers: [] }).total, 0);
   });
 });
 

@@ -910,6 +910,7 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
 .sky-opt-grid label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; }
 .sky-opt-grid input[type=checkbox] { min-height: 0; width: 18px; height: 18px; }
 .sky-opt-grid select { min-height: 32px; }
+.sky-cat-head { display: flex; gap: 8px; align-items: center; padding-top: 6px; }
 .plan-table td:last-child button + button { margin-left: 4px; }
 
 /* Single view on a wide screen: the portrait picture on the left at the screen's height, everything else beside it. */
