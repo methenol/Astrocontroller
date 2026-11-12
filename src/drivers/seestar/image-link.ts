@@ -28,6 +28,14 @@ const REDIAL_MAX_MS = 30_000;
  * then the socket is redialled. Once frames flow, a silence of STREAM_SILENCE_MS redials too.
  */
 const KICK_MS = 8_000;
+/**
+ * Over the ZWO tunnel the wide camera's first picture byte came 29 s after begin_streaming
+ * (2026-11-12), so the 8 s kicks (stop + begin) and the 24 s redial restarted it every time and no
+ * frame ever arrived: the obstruction survey could not get one. There the first kick waits this long.
+ */
+export const TUNNEL_KICK_MS = 45_000;
+/** over the tunnel a frame can be held up past 45 s; a redial throws it away and costs ~30 s to restart */
+export const TUNNEL_STREAM_SILENCE_MS = 150_000;
 const KICKS = 2;
 const STREAM_SILENCE_MS = 45_000;
 const FIRST_ID = 1;
@@ -77,6 +85,8 @@ export class SeestarImageLink extends SafeEmitter {
   expecting: () => boolean = () => true;
   /** a live frame came since the last begin_streaming */
   private flowing = false;
+  /** picture bytes arrived since the kick was last armed: a frame is on its way, do not restart it */
+  private gotBytes = false;
   private redial: NodeJS.Timeout | null = null;
   private redialMs = FIRST_REDIAL_MS;
   private _note: string | null = null;
@@ -89,6 +99,10 @@ export class SeestarImageLink extends SafeEmitter {
     private port: number,
     readonly camera: Camera,
     private readonly connectFn: (host: string, port: number) => net.Socket = (h, p) => net.connect({ host: h, port: p }),
+    /** how long after begin_streaming the first kick waits (longer over the ZWO tunnel) */
+    private readonly kickMs = KICK_MS,
+    /** how long a flowing stream may go without a frame before the socket is redialled */
+    private readonly streamSilenceMs = STREAM_SILENCE_MS,
   ) {
     super();
     this.setMaxListeners(50);
@@ -171,22 +185,23 @@ export class SeestarImageLink extends SafeEmitter {
 
   private armKick(): void {
     if (this.kick) clearTimeout(this.kick);
+    this.gotBytes = false;
     this.kick = setTimeout(() => {
       this.kick = null;
       if (!this.isStreaming || this.flowing || !this.isConnected) return;
-      if (!this.expecting()) {
+      if (!this.expecting() || this.gotBytes) {
         this.armKick();
         return;
       }
       if (this.kicks >= KICKS) {
-        this.drop(`no live frames ${Math.round((KICK_MS * (KICKS + 1)) / 1000)} s after begin_streaming`, true);
+        this.drop(`no live frames ${Math.round((this.kickMs * (KICKS + 1)) / 1000)} s after begin_streaming`, true);
         return;
       }
       this.kicks++;
-      log.info(`${this.camera}: no live frame ${KICK_MS / 1000} s after begin_streaming, asking again (${this.kicks}/${KICKS})`);
+      log.info(`${this.camera}: no live frame ${Math.round(this.kickMs / 1000)} s after begin_streaming, asking again (${this.kicks}/${KICKS})`);
       this.write('stop_streaming');
       this.begin();
-    }, KICK_MS);
+    }, this.kickMs);
   }
 
   private disarmKick(): void {
@@ -263,6 +278,12 @@ export class SeestarImageLink extends SafeEmitter {
       } catch (err) {
         log.warn(`${this.camera} picture socket: ${errMsg(err)}`);
         this.reader.reset();
+      }
+      // a picture is part-way in (heartbeat replies do not count): the stream is not silent,
+      // whatever its pace over the tunnel, and restarting it would throw the picture away
+      if (this.reader.receiving) {
+        this.gotBytes = true;
+        if (this.silence) this.armSilence();
       }
     });
     socket.on('error', (err) => {
@@ -355,8 +376,8 @@ export class SeestarImageLink extends SafeEmitter {
     this.silence = setTimeout(() => {
       this.silence = null;
       if (!this.expecting()) this.armSilence();
-      else this.drop(`no live frames for ${STREAM_SILENCE_MS / 1000} s`, true);
-    }, STREAM_SILENCE_MS);
+      else this.drop(`no live frames for ${this.streamSilenceMs / 1000} s`, true);
+    }, this.streamSilenceMs);
   }
 
   private disarmSilence(): void {

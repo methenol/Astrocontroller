@@ -29,12 +29,15 @@ import type { FloatImage } from '../../media/images.js';
 import type { TelescopeDevice } from '../types.js';
 import { readKey, type RpcResponse } from './auth.js';
 import { SeestarLink, VIEW_TIMEOUT_MS, type LinkOptions, type RequestOptions, type SeestarEvent } from './link.js';
-import { SeestarImageLink, type GrabKind } from './image-link.js';
+import { SeestarImageLink, TUNNEL_KICK_MS, TUNNEL_STREAM_SILENCE_MS, type GrabKind } from './image-link.js';
 import { frameImage, IMG_TYPE, type Camera, type Frame } from './frames.js';
 import { applyAppState, applyDeviceState, applyEvent, busyWith, polarAligning, initialState, isOuter, isStacking, pair, reconcileLostOps, TERMINAL_STATES, VIEW_OF, type SeestarState, type ViewState } from './model.js';
 import { ZwoTunnel } from './tunnel.js';
 
 export type { Camera } from './frames.js';
+
+/** over the ZWO tunnel: how long the control channel may be silent (and a request unanswered) before the link is given up */
+export const TUNNEL_SILENT_AFTER_MS = 150_000;
 
 const log = logger('seestar');
 
@@ -182,10 +185,19 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     this.rpcPort = o.ports?.rpc ?? cfg.rpcPort;
     this.st = initialState(connection);
     this.releasedFile = path.join(o.dataDir ?? config.paths.data, 'released.json');
-    this.link = new SeestarLink({ host, port: this.rpcPort, loadKey: () => readKey(cfg.keyPath), connect: o.connect, ...o.link });
+    // Over the ZWO tunnel the control channel stalls for a minute or two now and then (when a
+    // camera's picture stream starts, e.g. the obstruction survey's switch to the wide) and then
+    // recovers by itself with the session intact (seestar-portfwd: "answers again after 78 s",
+    // 2026-11-12). The local-Wi-Fi 15 s silence cut dropped the link mid-stall, every call then
+    // failed "not connected" and the survey aborted, while the redial could not get through until
+    // the stall ended anyway. A session that is really lost is ended by the tunnel itself.
+    const tunnelLink = connection === 'zwo' ? { silentAfterMs: TUNNEL_SILENT_AFTER_MS, minRequestTimeoutMs: TUNNEL_SILENT_AFTER_MS } : {};
+    this.link = new SeestarLink({ host, port: this.rpcPort, loadKey: () => readKey(cfg.keyPath), connect: o.connect, ...tunnelLink, ...o.link });
+    const kickMs = connection === 'zwo' ? TUNNEL_KICK_MS : undefined;
+    const streamSilenceMs = connection === 'zwo' ? TUNNEL_STREAM_SILENCE_MS : undefined;
     this.images = {
-      tele: new SeestarImageLink(host, o.ports?.image ?? cfg.imagePort, 'tele', o.connect),
-      wide: new SeestarImageLink(host, o.ports?.wideImage ?? cfg.wideImagePort, 'wide', o.connect),
+      tele: new SeestarImageLink(host, o.ports?.image ?? cfg.imagePort, 'tele', o.connect, kickMs, streamSilenceMs),
+      wide: new SeestarImageLink(host, o.ports?.wideImage ?? cfg.wideImagePort, 'wide', o.connect, kickMs, streamSilenceMs),
     };
     this.tunnel = o.tunnel !== undefined ? o.tunnel : connection === 'zwo' ? this.makeTunnel(host) : null;
     this.st.tunnel = this.tunnel?.status() ?? null;
@@ -476,7 +488,19 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.isBusy() !== null;
   }
 
-  async refreshState(): Promise<SeestarState> {
+  /** the refresh in flight: concurrent callers share it instead of each sending its own five requests */
+  private refreshing: Promise<SeestarState> | null = null;
+  private pointing: Promise<SeestarState['mount']> | null = null;
+  private ticking = false;
+
+  refreshState(): Promise<SeestarState> {
+    this.refreshing ??= this.doRefreshState().finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  private async doRefreshState(): Promise<SeestarState> {
     const dev = await this.call('get_device_state');
     if (dev.result && typeof dev.result === 'object') applyDeviceState(this.st, dev.result as Record<string, unknown>);
     const app = await this.call('iscope_get_app_state', undefined, { allowError: true });
@@ -490,7 +514,14 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     return this.st;
   }
 
-  async readPointing(): Promise<SeestarState['mount']> {
+  readPointing(): Promise<SeestarState['mount']> {
+    this.pointing ??= this.doReadPointing().finally(() => {
+      this.pointing = null;
+    });
+    return this.pointing;
+  }
+
+  private async doReadPointing(): Promise<SeestarState['mount']> {
     const equ = await this.call('scope_get_equ_coord', undefined, { allowError: true });
     const rd = pairOf(equ.result, 'ra', 'dec');
     if (rd) [this.st.mount.raHours, this.st.mount.decDeg] = rd;
@@ -503,7 +534,9 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   private async tick(): Promise<void> {
-    if (!this.link.usable) return;
+    // over the tunnel a full poll takes longer than POLL_MS: a tick must not start another on top
+    if (!this.link.usable || this.ticking) return;
+    this.ticking = true;
     try {
       // a hand move skips the full poll: the scope answers one command at a time and its ~1 s
       // get_device_state would hold the move's renewals back
@@ -512,6 +545,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       else if (this.st.mount.moving) await this.readPointing();
     } catch (e) {
       log.debug(`poll: ${errMsg(e)}`);
+    } finally {
+      this.ticking = false;
     }
   }
 

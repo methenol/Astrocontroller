@@ -107,6 +107,8 @@ const SKY_NORM = 40 / 255;
 const MARGIN_DEG = 1;
 const SUN_DOWN_DEG = -12;
 const DEADLINE_MS = 27 * 60_000;
+/** over the ZWO tunnel every call takes 10-15 s and a wide frame tens of seconds (2026-11-12) */
+const TUNNEL_DEADLINE_MS = 75 * 60_000;
 const BUILD_RESERVE_MS = 60_000;
 /**
  * Frames from the wide after a move: the first may have been exposing while it moved and is
@@ -225,7 +227,7 @@ export class SeestarSurvey {
     this.running = true;
     this.stopping = false;
     const startedAt = Date.now();
-    const deadline = startedAt + DEADLINE_MS;
+    const deadline = startedAt + (this.scope.state.connection === 'zwo' ? TUNNEL_DEADLINE_MS : DEADLINE_MS);
     const notes: string[] = [];
     const site = this.scope.requireLocation();
     const margin = o.marginDeg ?? MARGIN_DEG;

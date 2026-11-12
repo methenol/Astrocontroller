@@ -20,7 +20,7 @@ import { unsupported, type Capabilities, type DeviceSwitches, type GotoTarget, t
 import type { ControlAction } from '../../web/routes/control.js';
 import type { StarfrontNights } from '../../agent/starfront.js';
 import { bayerFits, SeestarCapture } from './capture.js';
-import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
+import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, TUNNEL_SILENT_AFTER_MS, type Seestar } from './device.js';
 import { NOMINAL_FOV, seestarFocusSweep } from './focus.js';
 import { frameImage, framePixels, JPEG_SOI } from './frames.js';
 import { SeestarVideoHub } from './hub.js';
@@ -233,11 +233,13 @@ export function seestarMedia(scope: Seestar): SeestarMedia {
   };
   // the survey works from the wide's live frames as they come (bin 2, 1080×1920): no resolution
   // switch per frame, which would restart the exposures every time
+  // over the ZWO tunnel a frame may be held up by one of its control-channel stalls (1-2 min)
+  const surveyGrabMs = (base: number) => (scope.state.connection === 'zwo' ? Math.max(base, TUNNEL_SILENT_AFTER_MS) : undefined);
   const survey = new SeestarSurvey(scope, async () => {
-    const { image, frame } = await scope.grabImage('wide', 'preview');
+    const { image, frame } = await scope.grabImage('wide', 'preview', surveyGrabMs(45_000));
     image.capturedAt = Date.now();
     return { image, jpeg: frame.payload.subarray(0, 2).equals(JPEG_SOI) ? frame.payload : undefined };
-  }, async () => frameImage(await scope.grabRaw('wide'), 'wide'));
+  }, async () => frameImage(await scope.grabRaw('wide', surveyGrabMs(90_000)), 'wide'));
   return { hub, capture, storage: seestarStorage(new SeestarFiles(scope)), survey, liveFrame };
 }
 

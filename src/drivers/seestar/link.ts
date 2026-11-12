@@ -63,6 +63,8 @@ export interface LinkOptions {
   connect?: (host: string, port: number) => net.Socket;
   heartbeatMs?: number;
   silentAfterMs?: number;
+  /** every request waits at least this long for its reply (over the ZWO tunnel: its stalls) */
+  minRequestTimeoutMs?: number;
   backoffMinMs?: number;
 }
 
@@ -106,6 +108,7 @@ export class SeestarLink extends SafeEmitter {
   private readonly connectFn: (host: string, port: number) => net.Socket;
   private readonly heartbeatMs: number;
   private readonly silentAfterMs: number;
+  private readonly minRequestTimeoutMs: number;
   private readonly backoffMinMs: number;
   private generation = 0;
 
@@ -115,6 +118,7 @@ export class SeestarLink extends SafeEmitter {
     this.connectFn = opts.connect ?? ((host, port) => net.connect({ host, port }));
     this.heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
     this.silentAfterMs = opts.silentAfterMs ?? SILENT_AFTER_MS;
+    this.minRequestTimeoutMs = opts.minRequestTimeoutMs ?? 0;
     this.backoffMinMs = opts.backoffMinMs ?? BACKOFF_MIN_MS;
     this.backoffMs = this.backoffMinMs;
     this.h = { host: opts.host, port: opts.port, connected: false, authenticated: false, authRequired: false, lastRxAt: null, connectedAt: null, reconnects: 0, lastError: null };
@@ -162,7 +166,7 @@ export class SeestarLink extends SafeEmitter {
   async request(method: string, params?: unknown, options: RequestOptions = {}): Promise<RpcResponse> {
     if (!READ_ONLY_RPC.test(method)) estop.assertClear();
     if (!this.ready) throw new Error(`${method}: the Seestar is not connected`);
-    const reply = await this.send(method, params, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const reply = await this.send(method, params, Math.max(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, this.minRequestTimeoutMs));
     const code = typeof reply.code === 'number' ? reply.code : 0;
     if (code !== 0 && !options.allowError) throw new SeestarRpcError(method, code, describeError(reply), reply);
     return reply;

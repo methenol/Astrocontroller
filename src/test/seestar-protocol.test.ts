@@ -114,6 +114,25 @@ describe('Seestar control link', () => {
     await assert.rejects(r.request('never', undefined, { timeoutMs: 100 }), /never: no reply from the Seestar/);
   });
 
+  test('over the tunnel a stall shorter than the silence allowance keeps the link, and a request waits at least the floor', async () => {
+    fake = new FakeSeestar();
+    await fake.listen();
+    fake.on('never', () => null);
+    const r = link(noKey, { heartbeatMs: 50, silentAfterMs: 600, minRequestTimeoutMs: 400 });
+    let downs = 0;
+    r.on('disconnected', () => downs++);
+    await until(() => r.usable);
+    fake.silent = true;
+    await wait(300);
+    fake.silent = false;
+    await wait(200);
+    assert.equal(downs, 0);
+    assert.equal(r.usable, true);
+    const t0 = Date.now();
+    await assert.rejects(r.request('never', undefined, { timeoutMs: 50 }), /never: no reply from the Seestar/);
+    assert.ok(Date.now() - t0 >= 380, 'the request was given the floor, not its own 50 ms');
+  });
+
   test('the link reconnects after the scope drops it, and after silence; a request in flight fails with the reason', async () => {
     fake = new FakeSeestar();
     await fake.listen();

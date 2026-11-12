@@ -96,6 +96,11 @@ export const isLive = (h: FrameHeader): boolean => h.imageId === LIVE_IMAGE_ID |
 /** Splits the socket's bytes into pictures and JSON lines, resynchronising on the magic after garbage. */
 export class FrameReader {
   private buf: Buffer = Buffer.alloc(0);
+  /** chunks of a frame still arriving, joined only once the whole frame is here (not on every chunk) */
+  private parts: Buffer[] = [];
+  private partsLen = 0;
+  /** bytes the frame at the head of buf needs in all; 0 = not known yet */
+  private need = 0;
 
   constructor(
     private readonly onFrame: (f: Frame) => void,
@@ -103,7 +108,17 @@ export class FrameReader {
   ) {}
 
   push(chunk: Buffer): void {
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    if (this.need) {
+      this.parts.push(chunk);
+      this.partsLen += chunk.length;
+      if (this.buf.length + this.partsLen < this.need) return;
+      this.buf = Buffer.concat([this.buf, ...this.parts]);
+      this.parts = [];
+      this.partsLen = 0;
+      this.need = 0;
+    } else {
+      this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    }
     for (;;) {
       if (this.buf.length < 2) return;
       if (this.buf[0] === 0x7b) {
@@ -130,15 +145,26 @@ export class FrameReader {
         continue;
       }
       const total = h.headerSize + h.length;
-      if (this.buf.length < total) return;
+      if (this.buf.length < total) {
+        this.need = total;
+        return;
+      }
       const payload = Buffer.from(this.buf.subarray(h.headerSize, total));
       this.buf = this.buf.subarray(total);
       this.onFrame({ header: h, payload, at: Date.now() });
     }
   }
 
+  /** a picture's header has come and its payload is still arriving */
+  get receiving(): boolean {
+    return this.need > 0;
+  }
+
   reset(): void {
     this.buf = Buffer.alloc(0);
+    this.parts = [];
+    this.partsLen = 0;
+    this.need = 0;
   }
 
   private findMagic(from: number): number {
