@@ -30,7 +30,7 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
     config.dwarf.httpPort = api.port;
     fake = await new FakeDwarf().start();
     dwarf = new Dwarf({ host: '127.0.0.1', port: fake.port, linkTiming: { requestTimeoutMs: 1000 } });
-    Object.assign(dwarf.astroTiming, { calibrationMs: 3000, gotoMs: 3000, silentMs: 400, gotoEndGraceMs: 200, calibrationEndGraceMs: 100, now: () => NIGHT });
+    Object.assign(dwarf.astroTiming, { calibrationMs: 3000, gotoMs: 3000, silentMs: 400, gotoEndGraceMs: 200, calibrationEndGraceMs: 100, recoveryReleaseMs: 0, now: () => NIGHT });
     dwarf.locationOverride = { lat: 45.5, lon: -122.6, elev: 50 };
     // already in DSO mode: no mode switch in these tests
     dwarf.state.shootingMode = { id: 2, name: 'DSO' };
@@ -43,6 +43,24 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
     await fake.stop();
     await api.stop();
   });
+
+  /** Motors that home at once: a reset gives the axis its reference, a run-to arrives. */
+  function homeableMount() {
+    const pos: Record<number, number> = { 1: 120, 2: 140 };
+    const homed: Record<number, boolean> = { 1: true, 2: true };
+    fake.on(Cmd.STEP_MOTOR_GET_POSITION, (req) => {
+      const id = Number(req.data.id);
+      return homed[id] ? { id, code: 0, position: pos[id] } : { id, code: -14520 };
+    });
+    fake.on(Cmd.STEP_MOTOR_RESET, (req) => {
+      homed[Number(req.data.id)] = true;
+      return { id: Number(req.data.id), code: 0 };
+    });
+    fake.on(Cmd.STEP_MOTOR_RUN_TO, (req) => {
+      pos[Number(req.data.id)] = Number(req.data.endPosition);
+      return { id: Number(req.data.id), code: 0 };
+    });
+  }
 
   /** fw 1.5.3, 2026-10-04 M 31: stages as oneClickGotoState notifications, tracking, and never an allEnd reply. */
   function oneClickLikeM31() {
@@ -249,6 +267,7 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
   });
 
   test('polar alignment that fails still gives the wide camera its live video back', async () => {
+    homeableMount();
     api.route('POST /shootingMode/getParamAndSetting', () => ({ data: dsoSchema() }));
     fake.on(Cmd.ASTRO_START_EQ_SOLVING, async (_req, f) => {
       await f.notify('eqSolvingState', { state: 1 });
@@ -288,6 +307,7 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
   });
 
   test('polar alignment report: a failure is published with its reason', async () => {
+    homeableMount();
     fake.on(Cmd.ASTRO_START_EQ_SOLVING, (_req, f) => {
       setTimeout(async () => {
         await f.notify('eqSolvingState', { state: 1 });
@@ -301,6 +321,7 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
   });
 
   test('polar alignment: a bare acknowledgement of the start is not a perfect result', async () => {
+    homeableMount();
     fake.on(Cmd.ASTRO_START_EQ_SOLVING, (_req, f) => {
       setTimeout(async () => {
         await f.notify('eqSolvingState', { state: 1 });
@@ -318,6 +339,7 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
   });
 
   test('polar alignment whose solve ends without a result fails with the reason', async () => {
+    homeableMount();
     fake.on(Cmd.ASTRO_START_EQ_SOLVING, (_req, f) => {
       setTimeout(async () => {
         await f.notify('eqSolvingState', { state: 1 });
@@ -326,6 +348,38 @@ describe('Dwarf GoTo and calibration against the fake telescope', () => {
       return undefined;
     });
     await assert.rejects(dwarf.measurePolarAlignment(), /ended \(state stopped\) without a result/);
+  });
+
+  test('polar alignment that fails re-homes the motors so the next one starts from a known reference', async () => {
+    homeableMount();
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async () => ({ code: -11516 }));
+    await assert.rejects(dwarf.measurePolarAlignment(), /I re-homed the motors/);
+    assert.deepEqual(fake.requestsFor(Cmd.STEP_MOTOR_RESET).map((x) => Number(x.data.id)), [2, 1]);
+    assert.equal(fake.requestsFor(Cmd.ASTRO_STOP_EQ_SOLVING).length, 1);
+    // the next one needs no homing first
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async () => ({ code: 0, aziErr: 1, altErr: 1 }));
+    await dwarf.measurePolarAlignment();
+    assert.equal(fake.requestsFor(Cmd.STEP_MOTOR_RESET).length, 2);
+  });
+
+  test('polar alignment stopped by request leaves the scope, and the next one homes first', async () => {
+    homeableMount();
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, (_req, f) => {
+      setTimeout(() => void f.notify('eqSolvingState', { state: 1 }), 10);
+      return undefined;
+    });
+    dwarf.astroTiming.silentMs = 5000;
+    const p = dwarf.measurePolarAlignment();
+    await sleep(100);
+    await dwarf.stopGoto();
+    await assert.rejects(p, /next polar alignment will home the motors first/);
+    assert.equal(fake.requestsFor(Cmd.STEP_MOTOR_RESET).length, 0);
+    fake.on(Cmd.ASTRO_START_EQ_SOLVING, async () => ({ code: 0, aziErr: 1, altErr: 1 }));
+    await dwarf.measurePolarAlignment();
+    const resets = fake.requestsFor(Cmd.STEP_MOTOR_RESET);
+    assert.deepEqual(resets.map((x) => Number(x.data.id)), [2, 1]);
+    const starts = fake.requestsFor(Cmd.ASTRO_START_EQ_SOLVING);
+    assert.ok(resets[1].t <= starts[1].t, 'homed before the solve started');
   });
 
   test('astro recovery is refused at once when the telescope is not executing commands', async () => {

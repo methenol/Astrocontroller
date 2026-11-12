@@ -63,6 +63,8 @@ export interface AstroTiming {
   gotoEndGraceMs: number;
   /** after the calibration state ends, how long its result may take */
   calibrationEndGraceMs: number;
+  /** after a failed routine is stopped, how long the motor controller takes to release the axes */
+  recoveryReleaseMs: number;
   /** the clock of the daylight refusal (tests set it to a night) */
   now: () => Date;
 }
@@ -80,6 +82,7 @@ export class Routines {
     silentMs: 180_000,
     gotoEndGraceMs: 10_000,
     calibrationEndGraceMs: 3_000,
+    recoveryReleaseMs: 5_000,
     now: () => new Date(),
   };
 

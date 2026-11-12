@@ -33,8 +33,6 @@ export function daylightRefusal(what: string, site: sky.Site, when: Date, tz: st
 
 const STOP_MS = 5000;
 const RECOVERY_STOP_MS = 3000;
-/** after a failed routine is stopped, the motor controller takes a while to release the axes */
-const RECOVERY_RELEASE_MS = 5000;
 /** the speed of the move back to the pointing before a failed routine */
 const RECOVERY_SPEED_DEG_S = 15;
 /** Sun/Moon tracking starts with a slew: its reply (or tracking) can take minutes */
@@ -58,6 +56,14 @@ export interface PolarError {
 }
 
 export class AstroControl {
+  /**
+   * A failed polar alignment leaves the motors with a reference the next one cannot use: its first
+   * move then aims at the ground or the low horizon. Set when a failure could not be followed by
+   * homing (stopped by request, link down, hung service, homing failed); the next polar alignment
+   * homes first.
+   */
+  private polarNeedsHome = false;
+
   constructor(
     private readonly core: Core,
     private readonly routines: Routines,
@@ -315,7 +321,7 @@ export class AstroControl {
     // the failed routine must let go of the motors before they are touched
     await sendStop(this.core, Cmd.ASTRO_STOP_ONE_CLICK_GOTO, RECOVERY_STOP_MS);
     await sendStop(this.core, Cmd.ASTRO_STOP_CALIBRATION, RECOVERY_STOP_MS);
-    await sleep(RECOVERY_RELEASE_MS);
+    await sleep(this.timing.recoveryReleaseMs);
     const after = await this.motors.readPositions().catch(() => null);
     const back = before?.homed && before.pitchDeg !== undefined && before.rotationDeg !== undefined ? { rotationDeg: before.rotationDeg, pitchDeg: before.pitchDeg } : null;
     let recovery = '';
@@ -370,6 +376,19 @@ export class AstroControl {
     // the solve rotates the mount between its plate solves
     this.core.guards.assertNoStackForMotion();
     const loc = this.core.requireLocation();
+    if (this.polarNeedsHome) {
+      log.info('polar alignment: the previous one failed without re-homing; homing first');
+      await this.motors.homeNow();
+      this.polarNeedsHome = false;
+    }
+    try {
+      return await this.runPolarAlignment(loc);
+    } catch (err) {
+      throw await this.rehomeAfterPolarFailure(err);
+    }
+  }
+
+  private async runPolarAlignment(loc: sky.Site): Promise<PolarError> {
     const t = this.timing;
     let res: PolarError | undefined;
     let ran = false;
@@ -409,6 +428,33 @@ export class AstroControl {
     if (!res) throw new Error('polar alignment ended without a result');
     this.core.store.publish({ eqSolving: { state: 'idle', result: { ...res, at: Date.now() } } });
     return res;
+  }
+
+  /**
+   * After a failed polar alignment, home the motors so the next one starts from a known reference
+   * (otherwise it aims at the ground or the low horizon). Where homing cannot or should not happen
+   * now, the next polar alignment homes first. Returns the error to throw, with what was done.
+   */
+  private async rehomeAfterPolarFailure(err: unknown): Promise<unknown> {
+    const msg = errMsg(err);
+    // refused before anything was sent: nothing moved
+    if (err instanceof RefusedError) return err;
+    this.polarNeedsHome = true;
+    // the operator stopped it: leave the scope where it stopped
+    if (msg.includes(STOPPED_BY_REQUEST)) return new Error(`${msg}. The next polar alignment will home the motors first.`);
+    // a hung astro service or an unreachable telescope executes no moves (and they could land later)
+    if (err instanceof AstroServiceHungError) return err;
+    if (isLinkFailure(err) || !this.core.link.usable) return new Error(`${msg}. The motors were not re-homed (the telescope is not executing commands); the next polar alignment will home them first.`);
+    // the failed solve must let go of the motors before they are touched
+    await sendStop(this.core, Cmd.ASTRO_STOP_EQ_SOLVING, RECOVERY_STOP_MS);
+    await sleep(this.timing.recoveryReleaseMs);
+    try {
+      await this.motors.homeNow();
+      this.polarNeedsHome = false;
+      return new Error(`${msg}. I re-homed the motors so the next polar alignment starts from a known reference.`);
+    } catch (e) {
+      return new Error(`${msg}. Re-homing the motors afterwards failed (${errMsg(e)}); the next polar alignment will home them first.`);
+    }
   }
 
   async stopPolarAlignment(): Promise<void> {
