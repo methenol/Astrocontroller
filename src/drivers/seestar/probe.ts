@@ -72,11 +72,14 @@ export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefin
         }
         const files: string[] = [];
         await scope.withFullRes('tele', 'a quality probe', async () => {
-          // the first frame after the change was exposing under the old settings
-          for (let n = 0; n < o.count + 1; n++) {
+          // a frame that began exposing before the change (its arrival less than one sub after it) is
+          // the old settings' — skipped by its time, so no whole sub is thrown away
+          const changedAt = Date.now();
+          const until = Date.now() + (o.count + 1) * (o.subS * 1000 + 60_000);
+          while (files.length < o.count && Date.now() < until) {
             if (o.signal.aborted) throw new Error('cancelled');
             const f = await scope.grabRaw('tele', o.subS * 1000 + 60_000);
-            if (n === 0 || f.header.imgType !== IMG_TYPE.preview) continue;
+            if (f.header.imgType !== IMG_TYPE.preview || f.at < changedAt + o.subS * 1000 - 1500) continue;
             const { width, height } = f.header;
             const px = framePixels(f.payload, width * height * 2, `raw frame of ${f.payload.length} B`);
             const st = scope.state;

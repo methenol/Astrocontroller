@@ -42,8 +42,8 @@ export function dwarfProbeDriver(dwarf: Dwarf): ProbeDriver {
     async shoot(o: ProbeShot) {
       const notes: string[] = [];
       const startedAt = Date.now();
-      // one more frame than needed: the stacker's first is its reference, and a dithered one is discarded
-      const frames = o.count + 1;
+      // every sub is saved raw, the stacker's reference frame too: no extra sub is shot
+      const frames = o.count;
       // forced: the probe needs the raw subs, never the Dwarf's own dark-calibrated stack, so a dark
       // master of another sensor temperature (-11530) or none of this pair must not refuse it
       await dwarf.startStackingWith('tele', { exposure: o.subS, gain: o.gain, filter: o.filter, frames, force: true, startedBy: 'agent' });

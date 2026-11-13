@@ -41,8 +41,12 @@ export const INITIAL_POINTS_MAX = 5;
 export const EXTRA_POINTS_MAX = 3;
 /** points a refresh shoots */
 export const REFRESH_POINTS_MAX = 3;
-/** subs per point: two give a median and show a passing cloud */
+/** subs per short point: two give a median and show a passing cloud */
 export const FRAMES_PER_POINT = 2;
+/** from this sub length one sub is the point: the analysis needs one frame, and cloud shows across the points */
+export const SINGLE_FRAME_FROM_S = 60;
+/** the subs a point takes */
+export const framesFor = (subS: number): number => (subS >= SINGLE_FRAME_FROM_S ? 1 : FRAMES_PER_POINT);
 /** cohorts within this many hours of the newest are one set (one sitting) */
 export const SET_HOURS = 3;
 /**
@@ -340,7 +344,7 @@ export function solveQuality(i: QualityInput): QualityAnswer {
       status: points.length ? 'needed' : 'unsolvable',
       settings: null,
       points,
-      why: [points.length ? `not measured on this target${rig.mount === 'eq' ? ' in EQ' : ' in alt-az'} within ${VALID_DAYS} days: ${points.length} test cohorts of ${FRAMES_PER_POINT} subs settle the filter, gain and sub` : 'no sub length on offer to test (no dark masters?)'],
+      why: [points.length ? `not measured on this target${rig.mount === 'eq' ? ' in EQ' : ' in alt-az'} within ${VALID_DAYS} days: ${points.length} test cohorts (one sub each from ${SINGLE_FRAME_FROM_S}s, ${FRAMES_PER_POINT} below) settle the filter, gain and sub` : 'no sub length on offer to test (no dark masters?)'],
       table: [],
       moon: null,
       set: null,
@@ -560,6 +564,6 @@ export function solveQuality(i: QualityInput): QualityAnswer {
 }
 
 /** Seconds a list of points takes to shoot, roughly: their subs, the per-sub overhead, and a settings change each. */
-export function pointsDurationS(rig: Rig, points: ProbePoint[], frames = FRAMES_PER_POINT, switchS = rig.spec.driver === 'dwarf' ? 45 : 15): number {
-  return points.reduce((a, p) => a + frames * (p.subS + rig.spec.exposure.perSubOverheadS) + switchS + p.subS, 0);
+export function pointsDurationS(rig: Rig, points: ProbePoint[], switchS = rig.spec.driver === 'dwarf' ? 60 : 15): number {
+  return points.reduce((a, p) => a + framesFor(p.subS) * (p.subS + rig.spec.exposure.perSubOverheadS) + switchS, 0);
 }

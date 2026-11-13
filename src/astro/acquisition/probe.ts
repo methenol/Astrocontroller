@@ -28,7 +28,7 @@ import { analyzeCohort, type CohortSource } from './cohort.js';
 import { deviceKey, recordQuality, recordSeeing, recordSky, recordSubLength, type QualitySample } from './store.js';
 import { readRaw, type RawFrame } from './measure.js';
 import { skyBrightness, zenithFromMeasured } from './skyglow.js';
-import { FRAMES_PER_POINT, moonIllum, type ProbePoint, type QualityAnswer } from './quality.js';
+import { framesFor, moonIllum, type ProbePoint, type QualityAnswer } from './quality.js';
 import { zenithSky, type QualityResult } from './index.js';
 
 const log = logger('quality');
@@ -216,7 +216,7 @@ async function shootPoint(r: QualityRun, p: ProbePoint, dir: string, signal: Abo
   fs.mkdirSync(dir, { recursive: true });
   let shot: Awaited<ReturnType<ProbeDriver['shoot']>>;
   try {
-    shot = await r.driver.shoot({ filter: p.filter, gain: p.gain, subS: p.subS, count: r.frames ?? FRAMES_PER_POINT, target: r.target.gotoName, dir, signal, progress: say });
+    shot = await r.driver.shoot({ filter: p.filter, gain: p.gain, subS: p.subS, count: r.frames ?? framesFor(p.subS), target: r.target.gotoName, dir, signal, progress: say });
   } catch (e) {
     // the scope refused or failed to shoot: that says nothing about the sky, so it is no sample (a
     // gap is for cloud) — the job stops with the device's reason rather than retrying the same refusal
