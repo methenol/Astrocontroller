@@ -39,7 +39,9 @@ import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
 import { buildCalendar, type CalendarOptions } from './calendar.js';
 import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
-import { adviseFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
+import { adviseFor, qualityFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
+import { pointsDurationS } from '../astro/acquisition/quality.js';
+import { qualityJob } from '../astro/acquisition/probe.js';
 import type { Journal, JournalSession } from './journal.js';
 
 const log = logger('plan');
@@ -550,12 +552,31 @@ export class PlanService extends SafeEmitter {
     };
   }
 
-  /** The acquisition planner's settings for a block (null when it cannot say: no catalog row, a window below 10°). */
+  /**
+   * The acquisition planner's settings for a block (null when it cannot say: no catalog row, a
+   * window below 10°). The target's own measurements (the collection quality engine) win over the
+   * model: once the target is measured, the block is collected with the measured settings,
+   * rescaled to its Moon and weather; until then the model's stand in and the block says to measure.
+   */
   private acquisition(t: BlockTarget, b: Block, usableMin: number, conditions: ((t: Date) => HourConditions | undefined) | null, facts: Awaited<ReturnType<FactsSource>>, got: number): NonNullable<TargetAdvice['acquisition']> | null {
     try {
       const program = t.programId ? loadProgram().find((p) => p.id === t.programId) : undefined;
       const owned = program?.filter && program.filter !== 'auto' ? program.filter : undefined;
-      const { rec } = adviseFor({ facts, site: this.site(), target: targetInfo(t.name), from: new Date(b.start), to: new Date(b.end), usableMin, conditions, fixed: { filter: owned }, collectedMin: Math.round(got), journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore });
+      const q = qualityFor({ facts, site: this.site(), target: targetInfo(t.name), from: new Date(b.start), to: new Date(b.end), usableMin, conditions, filterMode: owned ?? 'auto', collectedMin: Math.round(got), journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore, now: this.now() });
+      const rec = q.measured ?? q.model;
+      const a = q.answer;
+      const pts = a.points.length;
+      const aboutMin = pts ? Math.ceil(pointsDurationS(q.rig, a.points) / 60) : 0;
+      const qLine =
+        a.status === 'established'
+          ? `measured on this target (${a.set ? new Date(a.set.at).toISOString().slice(0, 10) : '?'})`
+          : a.status === 'refresh'
+            ? `measured, but ${a.why[a.why.length - 1]?.replace(/^measure again when convenient: /, '') ?? 'the sky moved'}: re-measure after focusing (${pts} cohorts, ~${aboutMin} min)`
+            : a.status === 'more'
+              ? `measured but not settled: ${pts} more cohort(s) after focusing (~${aboutMin} min)`
+              : a.status === 'needed'
+                ? `not measured on this target: ${pts} test cohorts after focusing (~${aboutMin} min) settle the filter, gain and sub — the model's settings meanwhile`
+                : 'cannot be measured (no sub on offer): the model\'s settings';
       return {
         device: rec.device.name,
         filter: rec.settings.filter,
@@ -572,8 +593,9 @@ export class PlanService extends SafeEmitter {
         swamp: rec.subLength.swamp,
         swampWanted: rec.subLength.wanted,
         efficiencyPct: rec.subLength.efficiencyPct,
-        line: rec.why.slice(0, 2).join('; '),
+        line: q.measured ? a.why.slice(1, 3).join('; ') : rec.why.slice(0, 2).join('; '),
         apply: rec.apply,
+        quality: { status: a.status, source: q.measured ? 'measured' : 'model', line: qLine, points: pts, aboutMin, measuredAt: a.set?.at },
       };
     } catch (e) {
       log.debug(`acquisition for ${t.displayName}: ${errMsg(e)}`);
@@ -959,7 +981,12 @@ export class PlanService extends SafeEmitter {
     const phase: NowView['phase'] = at < plan.window.start ? 'before' : at >= plan.window.end ? 'after' : 'night';
     const onPlan = block?.target && scopeOn ? targetKey(scopeOn) === block.target.key : null;
     const minutesLeft = block ? Math.round((block.end - at) / 60e3) : null;
-    const go = (b: Block) => driverSteps().target(b.target!.gotoName, b.target!.filter);
+    const go = (b: Block) => {
+      const acq = b.target!.advice?.acquisition;
+      const q = acq?.quality;
+      const measure = q && (q.status === 'needed' || q.status === 'more' || q.status === 'refresh') ? q.status : undefined;
+      return driverSteps().target(b.target!.gotoName, { filter: b.target!.filter, subS: acq?.subS, gain: acq?.gain, gainFixed: config.telescope.driver === 'seestar', measure, name: b.target!.name });
+    };
     let instruction: string;
     if (phase === 'before') {
       const first = blocks.find((b) => b.kind === 'target' && !b.past && b.end > at);
@@ -993,6 +1020,13 @@ export class PlanService extends SafeEmitter {
     const v = this.viewOf(plan, at);
     const lines = [`- night plan: ${v.instruction}`];
     if (v.block?.target?.mosaic?.execution === 'panels') lines.push(`- mosaic: this block's target is ${v.block.target.mosaic.panels} panels (project ${v.block.target.mosaic.projectId}). Do not goto the target itself: get_next_mosaic_panel gives the panel, its coordinates and how long to stack; goto_target with that name, ra_hours and dec_deg, stack, then ask it again.`);
+    if (v.phase === 'night' && v.block?.target) {
+      const job = qualityJob();
+      const q = v.block.target.advice?.acquisition?.quality;
+      if (job?.status === 'running') lines.push(`- collection quality: measuring ${job.targetName} (${job.done}/${job.planned} cohorts${job.current ? `, now ${job.current}` : ''}): do not stack until acquisition_quality action=status says done`);
+      else if (job && job.target === v.block.target.key && job.endedAt && at - job.endedAt < 30 * 60e3 && job.status === 'done' && job.answer?.settings) lines.push(`- collection quality: ${job.targetName} measured — collect with ${job.apply ?? JSON.stringify(job.answer.settings)}`);
+      else if (q) lines.push(`- collection quality (${v.block.target.displayName}): ${q.line}`);
+    }
     const alts = v.block?.alternates ?? [];
     if (v.phase === 'night' && alts.length) lines.push(`- plan alternates now: ${alts.slice(0, 3).map((a) => `${a.gotoName} (${a.quadrant}, alt ${a.alt}°)`).join(', ')}`);
     if (v.phase === 'night') lines.push(...this.sessionChecks(at));

@@ -207,6 +207,19 @@ export interface TargetAdvice {
     line: string;
     /** the tool calls that apply the settings on this driver */
     apply: string;
+    /**
+     * The collection quality engine (astro/acquisition/quality.ts): whether these settings were
+     * measured on this target or are the model's stand-in until it is, and what to measure.
+     */
+    quality?: {
+      status: 'established' | 'needed' | 'more' | 'refresh' | 'unsolvable';
+      source: 'measured' | 'model';
+      line: string;
+      /** points to shoot after focusing (acquisition_quality action=measure), and roughly how long */
+      points: number;
+      aboutMin: number;
+      measuredAt?: number;
+    };
   };
 }
 

@@ -4,6 +4,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerAcquisitionTools } from './tools/acquisition.js';
+import { dwarfProbeDriver } from '../drivers/dwarf/probe.js';
 import { registerAstroTools } from './tools/astro.js';
 import { registerCameraTools } from './tools/camera.js';
 import { makeTool, type ToolContext } from './tools/common.js';
@@ -53,5 +54,5 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   }
   registerStellariumTools(tool);
   registerResearchTools(tool, { fov: () => ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV, site: () => ctx.dwarf.requireLocation() });
-  registerAcquisitionTools(tool, { site: () => ctx.dwarf.requireLocation(), facts: dwarfFacts(ctx.dwarf), night: ctx.night, sessionSubs: dwarfSessionSubs, darkFrames: dwarfDarkFrames });
+  registerAcquisitionTools(tool, { site: () => ctx.dwarf.requireLocation(), facts: dwarfFacts(ctx.dwarf), night: ctx.night, sessionSubs: dwarfSessionSubs, darkFrames: dwarfDarkFrames, probe: dwarfProbeDriver(ctx.dwarf) });
 }

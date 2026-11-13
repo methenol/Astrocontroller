@@ -7,7 +7,9 @@
  *   brightness it implies (the number that replaces PLAN_BORTLE once a few agree);
  * - the stars' FWHM, against the forecast's seeing at the time;
  * - sub-length analyses (sublength.ts): per filter, gain and sub, the sky noise a sub really gets
- *   against the read noise — the swamp factor — and the sky-noise rate the plan scales its model by.
+ *   against the read noise — the swamp factor — and the sky-noise rate the plan scales its model by;
+ * - the collection quality engine's samples (quality.ts): per target, the test cohorts shot at
+ *   chosen filter / gain / sub settings and what each measured, from which it solves the settings.
  *
  * The planner reads it through `sensorProfile`, `siteSky`, `siteSeeing` and `latestSubLength`;
  * acquisition_measure and sub_length write it.
@@ -96,16 +98,71 @@ export interface SubLengthSample {
   skyNoiseScale: number | null;
 }
 
+/** The conditions one quality sample was shot under (what its numbers are rescaled from). */
+export interface QualityConditions {
+  altDeg: number;
+  azDeg: number;
+  /** the Moon toward the target: its altitude, its separation, its illuminated share (0–1) */
+  moonAltDeg: number | null;
+  moonSepDeg: number | null;
+  moonIllum: number | null;
+  sunAltDeg: number | null;
+  mount: 'eq' | 'alt-az';
+  transparencyIdx?: number;
+  observability?: number;
+  windKmh?: number;
+}
+
+/** One test cohort of the collection quality engine: N subs at one filter, gain and sub length. */
+export interface QualitySample {
+  id: string;
+  at: number;
+  device: string;
+  /** targetKey of the target */
+  target: string;
+  targetName: string;
+  filter: string;
+  gain: number;
+  subS: number;
+  frames: string[];
+  /** a probe the engine shot, or measurements the agent submitted from subs it already had */
+  source: 'probe' | 'submitted';
+  /** false: cloud, an obstruction, a failed capture — the point is a gap to fill */
+  valid: boolean;
+  invalidWhy?: string;
+  /** sky above the offset, ADU/s, and its noise variance rate, ADU²/s (sub_length's E1) */
+  skyAduPerS: number;
+  skyVarAduPerS: number;
+  readNoiseAdu: number;
+  ePerAdu: number;
+  swamp: number;
+  efficiency: number;
+  /** the background in the sub, % of the range above black; pixels clipped beyond stars, % */
+  backgroundPct: number;
+  clippedPct: number;
+  stars: number;
+  fwhmArcsec?: number;
+  roundness?: number;
+  /** the sky through the filter where the scope pointed: measured, and what the model predicts there (with and without the Moon) */
+  skyMag: number | null;
+  modelSkyMag: number | null;
+  modelMoonlessMag: number | null;
+  cond: QualityConditions;
+  notes?: string[];
+}
+
 interface StoreFile {
   sensors: Record<string, SensorProfile>;
   sky: SkySample[];
   seeing: SeeingSample[];
   subLength: SubLengthSample[];
+  quality: QualitySample[];
 }
 
 const KEEP_SKY = 300;
 const KEEP_SEEING = 300;
 const KEEP_SUBLENGTH = 200;
+const KEEP_QUALITY = 600;
 /** a sub-length sample older than this no longer calibrates the plan (lights, seasons, firmware) */
 const SUBLENGTH_DAYS = 180;
 /** samples the site's sky needs before it replaces PLAN_BORTLE */
@@ -120,10 +177,10 @@ function load(): StoreFile {
   if (memo) return memo;
   try {
     const raw = JSON.parse(fs.readFileSync(file(), 'utf8')) as Partial<StoreFile>;
-    memo = { sensors: raw.sensors ?? {}, sky: Array.isArray(raw.sky) ? raw.sky : [], seeing: Array.isArray(raw.seeing) ? raw.seeing : [], subLength: Array.isArray(raw.subLength) ? raw.subLength : [] };
+    memo = { sensors: raw.sensors ?? {}, sky: Array.isArray(raw.sky) ? raw.sky : [], seeing: Array.isArray(raw.seeing) ? raw.seeing : [], subLength: Array.isArray(raw.subLength) ? raw.subLength : [], quality: Array.isArray(raw.quality) ? raw.quality : [] };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`acquisition.json unreadable, starting empty: ${errMsg(err)}`);
-    memo = { sensors: {}, sky: [], seeing: [], subLength: [] };
+    memo = { sensors: {}, sky: [], seeing: [], subLength: [], quality: [] };
   }
   return memo;
 }
@@ -180,6 +237,29 @@ export function recordSubLength(sample: SubLengthSample): void {
   s.subLength.push(sample);
   if (s.subLength.length > KEEP_SUBLENGTH) s.subLength.splice(0, s.subLength.length - KEEP_SUBLENGTH);
   save();
+}
+
+export function recordQuality(sample: QualitySample): void {
+  const s = load();
+  s.quality.push(sample);
+  if (s.quality.length > KEEP_QUALITY) s.quality.splice(0, s.quality.length - KEEP_QUALITY);
+  save();
+}
+
+/** Every quality sample of a target on a device, oldest first. */
+export function qualitySamples(device: string, target: string): QualitySample[] {
+  return load()
+    .quality.filter((x) => sameDevice(x.device, device) && x.target === target)
+    .sort((a, b) => a.at - b.at);
+}
+
+/** Forget a target's quality samples on a device (all targets without one); returns how many. */
+export function forgetQuality(device: string, target?: string): number {
+  const s = load();
+  const before = s.quality.length;
+  s.quality = s.quality.filter((x) => !(sameDevice(x.device, device) && (target === undefined || x.target === target)));
+  save();
+  return before - s.quality.length;
 }
 
 const sameDevice = (a: string, b: string) => a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`);

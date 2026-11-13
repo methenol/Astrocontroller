@@ -61,8 +61,10 @@ const subLine = (subS, range, subs) => (subS == null && !Array.isArray(range) ? 
 function captureLine(a) {
   const head = `${a.filter} · gain ${a.gain} · ${a.subS}s × ${a.frames}`;
   const room = `sky ${a.backgroundPct}% of range${a.coreClips ? ' · core clips' : ''} · stars clip from mag ${a.starSaturationMag}${a.swamp != null ? ` · swamp ${a.swamp}× of ${a.swampWanted}, efficiency ${a.efficiencyPct}%` : ''}`;
-  return `<div class="small"><b>Capture:</b> ${esc(head)} <span class="muted">(${esc(room)}; ${esc(a.hoursToGood)} h to a clean picture)</span></div>
-      <div class="small muted">${esc(a.line)}</div>`;
+  const q = a.quality;
+  const qBadge = q ? (q.source === 'measured' ? `<span class="badge ${q.status === 'established' ? 'done' : 'waiting'}" title="${esc(q.line)}">${q.status === 'established' ? 'measured' : q.status === 'refresh' ? 'measured · re-measure' : 'measured · not settled'}</span>` : `<span class="badge waiting" title="${esc(q.line)}">model · measure after focus</span>`) : '';
+  return `<div class="small"><b>Capture:</b> ${esc(head)} ${qBadge} <span class="muted">(${esc(room)}; ${esc(a.hoursToGood)} h to a clean picture)</span></div>
+      <div class="small muted">${esc(a.line)}</div>${q && q.status !== 'established' ? `<div class="small muted">${esc(q.line)}</div>` : ''}`;
 }
 const skyColour = (s) => (s == null ? '#1a2436' : s >= 60 ? '#14532d' : s >= 35 ? '#713f12' : '#7f1d1d');
 

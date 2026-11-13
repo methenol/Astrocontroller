@@ -18,6 +18,7 @@ import { PlanService } from './service.js';
 import { nightKey } from './clock.js';
 import { setFrameField } from '../processing/roi.js';
 import type { FactsSource } from '../astro/acquisition/index.js';
+import { cleanQualityTmp } from '../astro/acquisition/probe.js';
 
 const log = logger('night');
 
@@ -89,6 +90,8 @@ export function createNight(d: NightDeps): NightServices {
     plan,
     nightOf,
     start() {
+      // a quality job's temp subs left by a process that died mid-run
+      cleanQualityTmp();
       d.duty.on('state', onDutyState);
       d.duty.on('event', onDutyEvent);
       recorder.start();

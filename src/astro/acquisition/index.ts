@@ -10,7 +10,8 @@
  * - the window sampled every SLICE_MIN: altitude and azimuth, the Moon, the forecast hour;
  * - the target from the catalog: surface brightness and what carries its light;
  * - what the journal learned: the share of subs the stacker keeps at each sub length;
- * - the rig's own sub-length analyses (sub_length): the sky noise its subs really get.
+ * - the rig's own sub-length analyses (sub_length): the sky noise its subs really get;
+ * - the target's own test cohorts (quality.ts): the measured settings, which win over the model's.
  */
 import { config } from '../../config.js';
 import { findObject, displayName } from '../catalog.js';
@@ -21,7 +22,9 @@ import type { Journal } from '../../night/journal.js';
 import { advise, type Recommendation, type SkySlice, type TargetInfo } from './advise.js';
 import { resolveRig, type LiveFacts, type Rig } from './devices.js';
 import { moonToward } from './skyglow.js';
-import { deviceKey, latestSubLength, siteSeeing, siteSky } from './store.js';
+import { deviceKey, latestSubLength, qualitySamples, siteSeeing, siteSky } from './store.js';
+import { solveQuality, type QualityAnswer } from './quality.js';
+import { targetKey } from '../rest.js';
 
 export { type Recommendation } from './advise.js';
 export { type LiveFacts, type Rig } from './devices.js';
@@ -153,4 +156,56 @@ export function adviseFor(r: AdviseRequest): { rig: Rig; rec: Recommendation } {
     subLength: (filter, gain) => latestSubLength(deviceKey(rig.spec.id, rig.serial), filter, gain),
   });
   return { rig, rec };
+}
+
+export interface QualityRequest extends AdviseRequest {
+  /** the program's filter: 'auto' (or absent) lets the engine choose between the scope's filters */
+  filterMode?: string;
+  now?: number;
+}
+
+export interface QualityResult {
+  rig: Rig;
+  /** the model's answer (no measurements of this target): where the probes are centred */
+  model: Recommendation;
+  /** the planner's answer with the measured settings held (null until measured) */
+  measured: Recommendation | null;
+  answer: QualityAnswer;
+  slices: SkySlice[];
+  targetKey: string;
+}
+
+/**
+ * The collection quality engine for one target over one window (quality.ts): what this target's
+ * own test cohorts say the settings are, rescaled to the window's sky, and what to measure next.
+ * The measured settings, when there are any, are the ones to collect with; the model's stand in
+ * only until the target is measured.
+ */
+export function qualityFor(r: QualityRequest): QualityResult {
+  const fixedFilter = r.filterMode && r.filterMode !== 'auto' ? r.filterMode : undefined;
+  const { rig, rec: model } = adviseFor({ ...r, fixed: { ...r.fixed, filter: r.fixed?.filter ?? fixedFilter } });
+  const slices = slicesFor(r.site, r.target, r.from, r.to, r.conditions);
+  const key = targetKey(r.target.name);
+  const answer = solveQuality({
+    rig,
+    target: r.target,
+    site: r.site,
+    zenithSqm: zenithSky().sqm,
+    filterMode: fixedFilter ?? 'auto',
+    slices,
+    model,
+    samples: qualitySamples(deviceKey(rig.spec.id, rig.serial), key),
+    cloudFloor: r.cloudFloor,
+    keepBySubS: keepBySub(r.journal),
+    now: r.now,
+  });
+  let measured: Recommendation | null = null;
+  if (answer.settings) {
+    try {
+      measured = adviseFor({ ...r, fixed: { filter: answer.settings.filter, gain: answer.settings.gain, subS: answer.settings.subS } }).rec;
+    } catch {
+      measured = null;
+    }
+  }
+  return { rig, model, measured, answer, slices, targetKey: key };
 }

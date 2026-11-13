@@ -15,6 +15,7 @@ import * as sky from '../astro/sky.js';
 import type { HourConditions } from '../astro/weather.js';
 import type { Journal, JournalSession, StackQuality } from './journal.js';
 import { nightKey } from './clock.js';
+import { probing } from '../astro/acquisition/probe.js';
 
 const log = logger('journal');
 
@@ -142,6 +143,8 @@ export class JournalRecorder {
       log.debug(`journal probe: ${errMsg(e)}`);
       return;
     }
+    // the quality engine's test cohorts (astro/acquisition/probe.ts) are not collection: no session, no integration, no cadence
+    if (probing()) cur = { ...cur, stack: { running: false } };
     const prev = this.prev;
     this.prev = structuredClone(cur);
     const night = this.nightNow();

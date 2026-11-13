@@ -11,6 +11,8 @@
  *   master of its settings fetched from the telescope, a bias the owner took, or the stored read
  *   noise): the swamp factor the sub reaches, the sub efficiency, the minimum sub for the factor
  *   wanted — stored, and from then on part of acquisition_plan's own calculation.
+ * - acquisition_quality: the collection quality engine — per target, test cohorts shot after focus
+ *   without a dataset, from which the filter, gain and sub to collect with are solved.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,11 +23,17 @@ import * as sky from '../../astro/sky.js';
 import * as weather from '../../astro/weather.js';
 import { targetKey } from '../../astro/rest.js';
 import { adviseFor, targetInfo, zenithSky, type DarkFrameRef, type FactsSource } from '../../astro/acquisition/index.js';
-import { BG_MAX_FRAC, electronRate, magForRate } from '../../astro/acquisition/advise.js';
-import { analyzeSubLength, efficiencyOf, efficiencyVerdict, referenceNoise, DEFAULT_SWAMP, type Channel, type SubLengthResult } from '../../astro/acquisition/sublength.js';
+import { analyzeCohort, MAX_REFERENCE } from '../../astro/acquisition/cohort.js';
+import { qualityFor, type QualityResult } from '../../astro/acquisition/index.js';
+import { cancelQualityJob, qualityJob, startQualityJob, type ProbeDriver } from '../../astro/acquisition/probe.js';
+import { FRAMES_PER_POINT, INITIAL_POINTS_MAX, VALID_DAYS, pointsDurationS, moonIllum } from '../../astro/acquisition/quality.js';
+import { forgetQuality, qualitySamples, recordQuality, type QualitySample } from '../../astro/acquisition/store.js';
+import { findProgramTarget, loadSettings } from '../../night/program.js';
+import { BG_MAX_FRAC, magForRate } from '../../astro/acquisition/advise.js';
+import { efficiencyOf, efficiencyVerdict, DEFAULT_SWAMP, type Channel } from '../../astro/acquisition/sublength.js';
 import { loadDevices, resolveRig, rigFilter, userDevicesDir, type Rig } from '../../astro/acquisition/devices.js';
 import { cadence, clipLevel, frameStats, measureLights, measureSensor, readRaw, stampOfName, type RawFrame } from '../../astro/acquisition/measure.js';
-import { moonToward, skyBrightness, zenithFromMeasured } from '../../astro/acquisition/skyglow.js';
+import { moonToward, zenithFromMeasured } from '../../astro/acquisition/skyglow.js';
 import { deviceKey, forget, latestSubLength, recordSeeing, recordSensor, recordSky, recordSubLength, sensorProfile, siteSeeing, siteSky, storeView, subLengthSamples } from '../../astro/acquisition/store.js';
 import { deviceLibrary } from '../../library/device-library.js';
 import { isTransferred, parseSessionFolder, sessionLocalDir } from '../../library/sessions.js';
@@ -54,7 +62,6 @@ const CLIPPED_PCT = 0.5;
 const SKY_LIMITED_K = 5;
 /** sub_length: lights analysed at most, and reference frames fetched from the scope at most */
 const MAX_SUBLENGTH_LIGHTS = 3;
-const MAX_REFERENCE = 2;
 
 export interface AcquisitionContext {
   site(): sky.Site;
@@ -64,6 +71,8 @@ export interface AcquisitionContext {
   sessionSubs?(folder: string): Promise<string[]>;
   /** the dark and bias frames on the scope's storage (the Dwarf's CALI_FRAME, the Seestar's darklibrary) */
   darkFrames?(): Promise<DarkFrameRef[]>;
+  /** how this driver shoots the quality engine's test cohorts without a dataset (acquisition_quality) */
+  probe?: ProbeDriver;
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -71,24 +80,6 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 const isLightName = (n: string) => /\.fits?$/i.test(n) && !/^failed_|stack|master|dark|flat|bias/i.test(n);
 
 const bytesOf = (p: string): Promise<Buffer> => (p.startsWith('device:') ? deviceLibrary().album.fetch(p.slice('device:'.length), DEVICE_FILE_MAX_BYTES) : fs.promises.readFile(resolveLocalPath(p)));
-
-/**
- * The reference frames on the scope for a sub: darks of its exposure and gain — two single frames
- * when it has them (their pair difference is the read noise), else the master nearest in sensor
- * temperature — or, failing a dark of that length, a bias of its gain.
- */
-function pickReference(all: DarkFrameRef[], want: { exposureS: number; gain?: number; tempC?: number }): DarkFrameRef[] {
-  const gainOk = (d: DarkFrameRef) => want.gain === undefined || d.gain === undefined || d.gain === want.gain;
-  const byTemp = (a: DarkFrameRef, b: DarkFrameRef) => Math.abs((a.tempC ?? 0) - (want.tempC ?? a.tempC ?? 0)) - Math.abs((b.tempC ?? 0) - (want.tempC ?? b.tempC ?? 0));
-  const sameExp = all.filter((d) => d.kind === 'dark' && gainOk(d) && d.exposureS !== undefined && Math.abs(d.exposureS - want.exposureS) <= 0.01 * want.exposureS);
-  const singles = sameExp.filter((d) => d.stackCount === 1).sort(byTemp);
-  if (singles.length >= 2) return singles.slice(0, MAX_REFERENCE);
-  const masters = sameExp.filter((d) => d.stackCount !== 1).sort(byTemp);
-  if (masters.length) return [masters[0]];
-  if (singles.length) return singles;
-  const bias = all.filter((d) => d.kind === 'bias' && gainOk(d) && (d.gain !== undefined || want.gain === undefined)).sort(byTemp);
-  return bias.slice(0, MAX_REFERENCE);
-}
 
 /** Raw frames from library paths, device paths (device:…), a library folder, or a session (local when transferred, else on the scope). */
 async function loadFrames(ctx: AcquisitionContext, o: { files?: string[]; session?: string; count: number; newest: boolean }): Promise<{ frames: RawFrame[]; bytes: Buffer[]; names: string[] }> {
@@ -451,110 +442,15 @@ export function registerAcquisitionTools(tool: ToolFn, ctx: AcquisitionContext):
       const wanted = a.swamp ?? config.plan.swampFactor ?? DEFAULT_SWAMP;
       const channel: Channel = a.channel ?? 'auto';
       const { frames } = await loadFrames(ctx, { files: a.files, session: a.session, count: a.count ?? 1, newest: true });
-      const light = frames[frames.length - 1];
-      const gains = new Set(frames.map((f) => f.gain));
-      if (gains.size > 1) throw new Error(`the subs are of several gains (${[...gains].join(', ')}): analyse one cohort at a time`);
-      const gain = light.gain ?? rig.gains[0];
-      const sensor = rig.sensorAt(gain);
-      const filter = rigFilter(rig, light.filter);
-      const subS = a.duration_s ?? light.exposureS;
-      if (!subS) throw new Error(`${light.name} has no EXPTIME: give duration_s`);
-      const narrowband = a.narrowband ?? filter.band !== 'broadband';
-
-      // the reference: the owner's frames, else the scope's matching dark, else the sub's own offset card
-      const notes: string[] = [];
-      let refFrames: RawFrame[] = [];
-      let refFrom = '';
-      if (a.reference?.length) {
-        refFrames = await Promise.all(a.reference.slice(0, MAX_REFERENCE + 2).map(async (p) => readRaw(await bytesOf(p), path.basename(p.replace(/^device:/, '')))));
-        refFrom = 'the reference files given';
-      } else if (ctx.darkFrames) {
-        const listed = await ctx.darkFrames().catch((err) => {
-          notes.push(`the scope's dark frames could not be listed: ${errMsg(err)}`);
-          return [] as DarkFrameRef[];
-        });
-        const picked = pickReference(listed, { exposureS: subS, gain: light.gain, tempC: light.tempC });
-        if (picked.length) {
-          refFrames = await Promise.all(picked.map(async (d) => readRaw(await bytesOf(`device:${d.path}`), path.basename(d.path))));
-          refFrom = `fetched from the scope: ${picked.map((d) => path.basename(d.path)).join(', ')}`;
-        } else if (listed.length) notes.push(`the scope holds ${listed.length} dark/bias frames but none of ${subS}s${light.gain !== undefined ? ` at gain ${light.gain}` : ''}`);
-      }
-      for (const r of refFrames) if (r.width !== light.width || r.height !== light.height) throw new Error(`${r.name} is ${r.width}×${r.height}, the sub ${light.width}×${light.height}: not a reference for it`);
-      const ref = refFrames.length ? referenceNoise(refFrames, channel) : null;
-      if (ref) notes.push(...ref.warnings);
-      if (ref?.gain !== undefined && light.gain !== undefined && ref.gain !== light.gain) notes.push(`the reference is gain ${ref.gain}, the sub gain ${light.gain}: its level is not this sub's offset`);
-
-      // the offset: the reference's level (a dark of the sub's length holds its dark current too), else the sub's card, else what is measured, else the spec
-      const darkAduPerS = sensor.darkCurrentEPerS / sensor.ePerAdu;
-      const profile = sensorProfile(rig.spec.id, rig.serial);
-      const measuredBias = profile?.gains[String(gain)]?.blackAdu ?? profile?.blackAdu;
-      const measuredAtS = profile?.gains[String(gain)]?.blackAtS ?? 0;
-      let levelAdu: number;
-      let levelSource: string;
-      if (ref) {
-        levelAdu = ref.levelAdu;
-        levelSource = `${ref.frames.length > 1 ? 'the reference frames' : 'the reference frame'} (${refFrom})${ref.exposureS !== undefined && ref.exposureS > 0 && Math.abs(ref.exposureS - subS) > 0.01 * subS ? `, a ${ref.exposureS}s dark: its dark current differs from the sub's` : ''}`;
-      } else if (light.biasAdu !== undefined) {
-        levelAdu = light.biasAdu + darkAduPerS * subS;
-        levelSource = `the sub's BIAS card (${light.biasAdu}) plus ${r2(darkAduPerS * subS)} ADU of dark current from the spec`;
-      } else if (measuredBias !== undefined) {
-        levelAdu = measuredBias + darkAduPerS * Math.max(0, subS - measuredAtS);
-        levelSource = 'the measured black level (acquisition_measure sensor) plus the dark current over the sub';
-      } else {
-        levelAdu = sensor.blackAdu;
-        levelSource = `the spec's black level (${sensor.source.black}): take a dark of this length first`;
-      }
-      // the read noise: the reference's when it can vouch for one, else the rig's measured, else the spec's
-      let readNoiseAdu: number;
-      let readNoiseSource: string;
-      if (ref?.readNoiseAdu !== null && ref?.readNoiseAdu !== undefined) {
-        readNoiseAdu = ref.readNoiseAdu;
-        readNoiseSource = ref.readNoiseHow!;
-      } else {
-        readNoiseAdu = sensor.readNoiseE / sensor.ePerAdu;
-        readNoiseSource = sensor.source.readNoise === 'measured' ? 'measured on this rig (acquisition_measure sensor)' : `${sensor.source.readNoise} (${r2(sensor.readNoiseE)} e⁻ through ${Math.round(sensor.ePerAdu * 10000) / 10000} e⁻/ADU)`;
-      }
-
-      const results: SubLengthResult[] = frames.map((f) => analyzeSubLength({ light: f, readNoiseAdu, levelAdu, ePerAdu: sensor.ePerAdu, swamp: wanted, durationS: subS, channel, narrowband }));
-      // the frame of the median swamp stands for the cohort
-      const bySwamp = [...results].sort((x, y) => x.swamp - y.swamp);
-      const res = bySwamp[bySwamp.length >> 1];
-      const pick = frames[results.indexOf(res)];
-      notes.push(...res.notes);
-
-      // the planner's calibration: the measured sky variance rate against its model sky at this pointing and time
-      const site = ctx.site();
-      const at = pick.at !== undefined ? new Date(pick.at) : new Date();
-      const pos = pick.raHours !== undefined && pick.decDeg !== undefined ? sky.altAz(site, pick.raHours, pick.decDeg, at) : null;
-      let skyNoiseScale: number | null = null;
-      let model: { sqm: number; ePerS: number } | null = null;
-      if (pos && pos.altitude > 0) {
-        const zen = zenithSky();
-        const moon = moonToward(site, pick.raHours!, pick.decDeg!, at);
-        const sb = skyBrightness({ zenithSqm: zen.sqm, altDeg: pos.altitude, moon });
-        const eSkyModel = electronRate(rig, sb.sqm, filter.skyFraction) + sensor.darkCurrentEPerS;
-        const measuredVarE = (res.skyNoiseAdu * sensor.ePerAdu) ** 2 / subS;
-        skyNoiseScale = eSkyModel > 0 ? measuredVarE / eSkyModel : null;
-        model = { sqm: r2(sb.sqm), ePerS: r2(eSkyModel) };
-      } else notes.push('no pointing in the header (RA/DEC): the plan gets the swamp numbers but not the sky-noise scale');
-
-      recordSubLength({
-        at: at.getTime(),
-        device: devKey,
-        filter: filter.name,
-        gain,
-        subS,
-        frame: pick.name,
-        narrowband,
-        readNoiseAdu: r2(readNoiseAdu),
-        readNoiseSource,
-        skyNoiseAdu: r2(res.skyNoiseAdu),
-        skyVarAduPerS: Math.round((res.skyNoiseAdu ** 2 / subS) * 10000) / 10000,
-        skyAduPerS: Math.round(res.background.aduPerS * 10000) / 10000,
-        swamp: r2(res.swamp),
-        efficiency: Math.round(res.efficiency * 10000) / 10000,
-        skyNoiseScale: skyNoiseScale !== null && Number.isFinite(skyNoiseScale) ? r2(skyNoiseScale) : null,
-      });
+      const reference = a.reference?.length ? await Promise.all(a.reference.slice(0, MAX_REFERENCE + 2).map(async (p) => readRaw(await bytesOf(p), path.basename(p.replace(/^device:/, ''))))) : undefined;
+      const c = await analyzeCohort(
+        { site: ctx.site(), rig, devKey, darkFrames: ctx.darkFrames, fetchDevice: (p) => bytesOf(`device:${p}`) },
+        frames,
+        [],
+        { reference, swamp: wanted, channel, narrowband: a.narrowband, durationS: a.duration_s },
+      );
+      const { res, ref, refFrom, levelAdu, levelSource, readNoiseAdu, readNoiseSource, skyNoiseScale, model, pos, filter, gain, subS, narrowband, sensor, results, notes } = c;
+      recordSubLength(c.sample);
       // a bias frame's scatter is the read noise itself: the sensor profile learns it
       if (ref?.readNoiseHow === 'bias frame (DSD rule)' && Number.isFinite(ref.readNoiseAdu!)) recordSensor(rig.spec.id, rig.serial, { gain, readNoiseAdu: r2(ref.readNoiseAdu!), at: Date.now(), frames: ref.frames.length, how: `sub_length: ${ref.frames.length} bias frame(s), DSD rule (${ref.how})` });
 
@@ -606,6 +502,139 @@ export function registerAcquisitionTools(tool: ToolFn, ctx: AcquisitionContext):
         },
         notes,
       });
+    },
+  );
+
+  tool(
+    'acquisition_quality',
+    `The collection quality engine: settings measured on THIS target with THIS rig instead of guessed. After the target is centred and focused, and before the stack, it shoots a few short test cohorts (${FRAMES_PER_POINT} subs each at chosen filter / gain / sub length; ${INITIAL_POINTS_MAX} at most at first) WITHOUT making a dataset — a Seestar takes single raw subs off its live view, a Dwarf a tiny stack that is copied off and deleted from the card; the temp files are removed after and the journal ignores them — and analyses each like sub_length (the sky's level and noise through the filter, the read noise, the background against the range, clipping, the stars' FWHM and roundness). The planner and the engine say when a target needs measuring (the plan's instruction carries the step) and pick the cohorts; the agent may also re-measure any time (refresh=true) and submit more data. From them it solves the filter (both when the program says auto), the gain (where settable) and the sub that collect the most SNR per hour, rescaled to the block's Moon and weather, and asks for a few more cohorts only when the best is at the edge of what was tested or a cloud spoiled a point. Per target; measurements go stale after ${VALID_DAYS} days. plan: what the target's status is (established / needed / more / refresh), the settings to collect with, and the points it would shoot. measure: shoot the engine's points (a background job of minutes: poll status; it needs the scope on the target, focused, not stacking). status: the job's progress and, when done, the settings and how to apply them. cancel. submit: add a cohort of subs you already have (a session or files) as a measurement of the target, e.g. later in the night when the sky or the altitude changed. show: the target's stored cohorts. forget: drop them.`,
+    {
+      action: z.enum(['plan', 'measure', 'status', 'cancel', 'submit', 'show', 'forget']),
+      target: z.string().optional().describe("catalog name; default: the night plan's current block"),
+      refresh: z.boolean().optional().describe('measure: re-measure even when the settings are established (the engine shoots its points around the current answer) — whenever the sky, the altitude or anything else gives reason'),
+      force: z.boolean().optional().describe('measure: shoot without a focus recorded on this target since its GoTo'),
+      session: z.string().optional().describe("submit: a session folder or 'latest'"),
+      files: z.array(z.string()).optional().describe('submit: library paths, a library folder, or device:/… paths of raw subs of ONE filter, gain and sub'),
+      count: z.number().int().min(1).max(MAX_SUBLENGTH_LIGHTS).optional().describe('submit: newest subs to analyse (default 2)'),
+    },
+    async (a) => {
+      if (a.action === 'cancel') return text({ cancelled: cancelQualityJob(), job: qualityJob() });
+      const facts = await ctx.facts();
+      const rig = resolveRig(facts);
+      const devKey = deviceKey(rig.spec.id, rig.serial);
+      // the target: the one asked for, else the plan's block now
+      let name = a.target;
+      if (!name && ctx.night) {
+        const v = await ctx.night.plan.nowView().catch(() => null);
+        name = v?.block?.target?.name;
+      }
+      if (a.action === 'status') {
+        const j = qualityJob(name ? targetKey(name) : undefined) ?? qualityJob();
+        return text(j ? { job: j, next: j.status === 'running' ? 'poll again in a minute or two' : j.status === 'done' ? `collect with these settings: ${j.apply ?? JSON.stringify(j.answer?.settings)}` : 'see error; the model\'s settings stand meanwhile' } : { job: null, note: 'no quality measurement has run since the server started' });
+      }
+      if (!name) throw new Error('give target (no night-plan block now)');
+      const key = targetKey(name);
+      if (a.action === 'show') return text({ device: devKey, target: key, staleAfterDays: VALID_DAYS, samples: qualitySamples(devKey, key).slice(-40) });
+      if (a.action === 'forget') return text({ forgot: forgetQuality(devKey, key) });
+
+      const info = targetInfo(name);
+      const program = findProgramTarget(name);
+      const win = await windowFor(ctx, name);
+      const site = ctx.site();
+      const conditions = await weather.conditionsAt(site, tz);
+      const solve = (): QualityResult =>
+        qualityFor({ facts, site, target: info, from: win.from, to: win.to, usableMin: win.usableMin, conditions, filterMode: program?.filter, journal: ctx.night?.journal, cloudFloor: loadSettings().weatherMinScore });
+      const summary = (q: QualityResult) => ({
+        target: info.displayName ?? info.name,
+        window: `${hm(win.from)}–${hm(win.to)} (${win.why})`,
+        filterMode: program?.filter ?? 'auto (not in the program)',
+        status: q.answer.status,
+        settings: q.answer.settings ? { ...q.answer.settings, source: 'measured on this target', apply: q.measured?.apply } : { ...q.model.settings, source: 'model (not measured yet)', apply: q.model.apply },
+        why: q.answer.why,
+        points: q.answer.points.length ? { points: q.answer.points, frames: FRAMES_PER_POINT, aboutMin: Math.ceil(pointsDurationS(rig, q.answer.points) / 60) } : undefined,
+        moon: q.answer.moon ?? undefined,
+        set: q.answer.set ?? undefined,
+        table: q.answer.table.length ? q.answer.table : undefined,
+        integration: (q.measured ?? q.model).integration,
+        staleAfterDays: VALID_DAYS,
+      });
+      if (a.action === 'plan') return text(summary(solve()));
+
+      const cohortSrc = { site, rig, devKey, darkFrames: ctx.darkFrames, fetchDevice: (p: string) => bytesOf(`device:${p}`) };
+      if (a.action === 'submit') {
+        const { frames, bytes } = await loadFrames(ctx, { files: a.files, session: a.session, count: a.count ?? 2, newest: true });
+        const c = await analyzeCohort(cohortSrc, frames, bytes, { swamp: config.plan.swampFactor, stars: true });
+        recordSubLength(c.sample);
+        const eSky = Math.max(1e-9, c.res.background.ePerS - c.sensor.darkCurrentEPerS);
+        const h = conditions?.(c.at);
+        const s: QualitySample = {
+          id: `qs-${Date.now().toString(36)}`,
+          at: c.at.getTime(),
+          device: devKey,
+          target: key,
+          targetName: info.displayName ?? info.name,
+          filter: c.filter.name,
+          gain: c.gain,
+          subS: c.subS,
+          frames: c.frames,
+          source: 'submitted',
+          valid: c.res.background.aboveReferenceAdu > 0,
+          invalidWhy: c.res.background.aboveReferenceAdu > 0 ? undefined : 'the background is not above the offset',
+          skyAduPerS: c.sample.skyAduPerS,
+          skyVarAduPerS: c.sample.skyVarAduPerS,
+          readNoiseAdu: c.sample.readNoiseAdu,
+          ePerAdu: c.sensor.ePerAdu,
+          swamp: c.sample.swamp,
+          efficiency: c.sample.efficiency,
+          backgroundPct: c.backgroundPct,
+          clippedPct: c.clippedPct,
+          stars: c.stars?.count ?? 0,
+          fwhmArcsec: c.stars?.fwhmArcsec,
+          roundness: c.stars?.roundness,
+          skyMag: r2(magForRate(rig, eSky, c.filter.skyFraction)),
+          modelSkyMag: c.model?.sqm ?? null,
+          modelMoonlessMag: null,
+          cond: { altDeg: c.pos ? r2(c.pos.altitude) : 45, azDeg: c.pos ? r2(c.pos.azimuth) : 180, moonAltDeg: c.moon ? r2(c.moon.altDeg) : null, moonSepDeg: c.moon ? r2(c.moon.sepDeg) : null, moonIllum: c.moon ? moonIllum(c.moon) : null, sunAltDeg: c.sunAltDeg, mount: rig.mount, transparencyIdx: h?.transparencyIdx, observability: h?.observability, windKmh: h?.windKmh },
+          notes: c.notes.slice(0, 6),
+        };
+        if (!c.pos) throw new Error('the subs carry no pointing (RA/DEC): the engine cannot rescale them to the block');
+        recordQuality(s);
+        return text({ submitted: { filter: s.filter, gain: s.gain, subS: s.subS, skyMag: s.skyMag, swamp: s.swamp, stars: s.stars, fwhmArcsec: s.fwhmArcsec, valid: s.valid }, ...summary(solve()) });
+      }
+
+      // measure
+      if (!ctx.probe) throw new Error('this driver cannot shoot test cohorts');
+      const q = solve();
+      if (q.answer.status === 'established' && !a.refresh) return text({ note: 'established: nothing the engine needs — refresh=true re-measures around the answer (the sky or the altitude changed, a doubt)', ...summary(q) });
+      if (q.answer.status === 'unsolvable' && !q.answer.points.length) throw new Error(q.answer.why.join('; '));
+      if (!a.force) {
+        const act = ctx.night?.recorder.active();
+        const marks = act?.session.marks ?? [];
+        const gotoAt = [...marks].reverse().find((m) => m.kind === 'goto-done')?.at ?? 0;
+        const focused = marks.some((m) => (m.kind === 'focus-done' || m.kind === 'finefocus-done') && m.at >= gotoAt);
+        if (!act || targetKey(act.session.target) !== key || !focused) throw new Error(`focus on ${info.displayName ?? info.name} first: the test cohorts are only ground truth at the best focus (the journal shows ${act ? `no focus on ${act.session.target} since its GoTo` : 'no session on this target'}; force=true if you know it is focused)`);
+      }
+      // the engine's points; a re-measurement asked for (refresh=true) shoots its points around the current answer
+      const points = q.answer.points.length ? q.answer.points : a.refresh ? (q.answer.refreshPoints ?? []) : [];
+      if (!points.length) throw new Error(`no test cohorts to shoot on ${info.displayName ?? info.name} (${q.answer.status}): ${q.answer.why.join('; ')}`);
+      const night = ctx.night?.nightOf() ?? null;
+      const job = startQualityJob({
+        driver: ctx.probe,
+        cohort: cohortSrc,
+        solve,
+        target: { key, name: info.name, displayName: info.displayName ?? info.name, gotoName: program?.gotoName ?? info.displayName ?? info.name },
+        conditions,
+        note: ctx.night
+          ? (t) => {
+              if (night) ctx.night!.journal.event(night, 'quality', t, Date.now(), info.name);
+              // the block's settings are the measured ones from now on
+              ctx.night!.plan.changed(`${info.displayName ?? info.name} was measured`);
+            }
+          : undefined,
+        swamp: config.plan.swampFactor,
+        points,
+      });
+      return text({ started: job, points, aboutMin: Math.ceil(pointsDurationS(rig, points) / 60), next: 'acquisition_quality action=status until done, then stack with the settings it gives (not the model\'s)' });
     },
   );
 }
