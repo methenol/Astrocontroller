@@ -46,6 +46,11 @@ if mode == "refuse_then_second_dial":
     if sum(1 for _ in open(os.environ["FAKE_PIDS"])) < 2:
         print("[!] Connect_Ex failed: -60", flush=True)
         raise SystemExit(1)
+if mode == "lost_dials_then_ready":
+    # the tunnel's dial watchdog cuts the first three dials short (exit 4), the fourth comes up
+    if sum(1 for _ in open(os.environ["FAKE_PIDS"])) < 4:
+        print("[!] Connect_Ex abandoned after 3.1 s: the P2P server the master listed first did not answer", flush=True)
+        raise SystemExit(4)
 if mode == "hang":
     # a connect that never answers: Connect_Ex blocked inside the SDK
     while True:
@@ -444,6 +449,19 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(len(self.h.cloud.sessions), 1, "a refusal cost a session")
         self.assertEqual(self.h.cloud.released, [], "the session was handed back on the way")
         self.assertEqual(len(self.h.pids_written()), 2, "the second dial did not happen on the same session")
+
+    def test_dials_cut_short_are_redialled_at_once_and_do_not_use_up_the_retries(self) -> None:
+        # three lost dials (exit 4) with no full-timeout retries allowed at all: still dialled again
+        # on the same session, without the 3 s pause, and the fourth comes up
+        s = self.boot("lost_dials_then_ready", SEESTAR_TUNNEL_CONNECT_RETRIES="0",
+                      SEESTAR_TUNNEL_CONNECT_RETRY_S="30")
+        t0 = time.time()
+        s.connect()
+        self.wait(lambda: s.status()["phase"] == "connected", timeout=15, what="the fourth dial to come up")
+        self.assertLess(time.time() - t0, 10, "a lost dial waited the full-timeout pause")
+        self.assertEqual(len(self.h.pids_written()), 4, "the lost dials were not dialled again")
+        self.assertEqual(len(self.h.cloud.sessions), 1, "a lost dial cost a session")
+        self.assertEqual(self.h.cloud.released, [], "the session was handed back on the way")
 
     def test_a_session_past_its_budget_is_given_back(self) -> None:
         s = self.boot("refuse_final", SEESTAR_TUNNEL_CONNECT_RETRIES="5", SEESTAR_TUNNEL_SESSION_BUDGET_S="0.5")

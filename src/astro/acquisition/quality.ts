@@ -330,6 +330,8 @@ function interpAt(pts: Array<{ t: number; v: number }>, t: number): { v: number;
 export function solveQuality(i: QualityInput): QualityAnswer {
   const { rig, target, site, zenithSqm } = i;
   const now = i.now ?? Date.now();
+  // a capture the scope refused (stored by an earlier version as a gap) is no measurement of the sky
+  i = { ...i, samples: i.samples.filter((s) => s.valid || !/^the capture failed/.test(s.invalidWhy ?? '')) };
   const set = currentSet(i.samples, rig.mount, now);
   const maxPoints = INITIAL_POINTS_MAX + EXTRA_POINTS_MAX;
   if (!set.length) {

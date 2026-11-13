@@ -191,16 +191,37 @@ held five minutes), so the container stays up and heals the link rather than
 waiting for Docker to restart it.
 
 A tunnel that dies before it ever came up is restarted on the **same** session
-(`SEESTAR_TUNNEL_CONNECT_RETRIES`, `..._RETRY_S`), and the binary asks
-`Connect_Ex` again on the spot (`TUTK_CONNECT_TRIES`, `TUTK_CONNECT_PAUSE_S`):
-the first call routinely comes back `-42` (`IOTC_ER_FAIL_SETUP_RELAY`) or `-60`
-(`IOTC_ER_MASTER_NOT_RESPONSE`) while the rendezvous server and the scope sort
-out who held the last session, and handing the session back to allocate a new
-one is what makes the next call fail too. Before every retry the binary does
-what the app's `sanitizeBeforeConnect` does — `P2PTunnelAgent_Connect_Stop`
-and `IOTC_ReInitSocket(0)`, a fresh UDP socket for the next hole punch. A call that
-is going to work answers in 6–30 s, one that is not blocks for 60–80 s (the T
-SDK does not honour `IOTC_Setup_P2PConnection_Timeout`, so there is no knob).
+(`SEESTAR_TUNNEL_CONNECT_RETRIES`, `..._RETRY_S`). Before every `Connect_Ex` the
+binary does what the app's `sanitizeBeforeConnect` does: `P2PTunnelAgent_Connect_Stop`
+and `IOTC_ReInitSocket(0)`, a fresh UDP socket for the next hole punch.
+
+**Why a dial fails, and the dial watchdog.** Whether a `Connect_Ex` will succeed
+is settled about 2 s into it, but one that won't still blocks for 62–64 s before
+it answers `-42` (the T SDK does not honour `IOTC_Setup_P2PConnection_Timeout`).
+The SDK's own log shows two causes (2026-11-13; 6 of 36 dials had connected, in
+6–18 s; every other one took 62–64 s):
+
+* The master hands out its three P2P servers in an order that changes with every
+  query. After PRECHECK the SDK sends its `P2P_REQUEST` to the **first** one only,
+  even when that one never answered the precheck. From some networks two of them
+  (223.108.144.62, 119.45.181.137) cannot be reached at all, so most dials asked a
+  dead server and waited out the timeout. A dial that asks the server that answers
+  gets its `PUNCH_TO` within 0.2 s.
+* Now and then the SDK sends its UDP master query to a garbage address (a negative
+  index into its server table). It then has only one observation of our public
+  address, reports `MyNAT[0]` instead of the symmetric NAT it is behind, and does a
+  plain hole punch that gets nothing back. With two observations it reports
+  `MyNAT[3]` and uses its multi-port punch, which does get through such a NAT.
+
+None of this is the scope being busy. The binary therefore follows its SDK log
+during the first session's `Connect_Ex`. It ends the dial (exit code 4) when no
+`PUNCH_TO` follows the request within `TUTK_PUNCH_WAIT_S`, when the punch gets no
+knock back within `TUTK_KNOCK_WAIT_S` (or `..._UNKNOWN_NAT_S` with `MyNAT[0]`), or
+when no request goes out within `TUTK_REQUEST_WAIT_S`. The supervisor dials again
+after `SEESTAR_TUNNEL_LOST_DIAL_RETRY_S`. Each new process draws a new server list,
+and these short dials do not count against `SEESTAR_TUNNEL_CONNECT_RETRIES`; the
+session's `SEESTAR_TUNNEL_SESSION_BUDGET_S` still bounds them. The log of each
+abandoned dial is kept as `tutk_iotc.log.lost.<pid>`.
 
 **The backend hears about every session** the way the official app tells it
 (`POST /v1/device-log/report`): `p2pConnectStart` once `online-link` has handed
@@ -250,12 +271,16 @@ path the record dies with the container and neither the conId nor the wish survi
 | `SEESTAR_TUNNEL_STOP_GRACE_S` | `10` | SIGINT to SIGKILL for the tunnel |
 | `SEESTAR_TUNNEL_LOCK` | `/var/lib/seestar-portfwd/tunnel.lock` | the one-session lock |
 | `SEESTAR_TUNNEL_STATE` | `/var/lib/seestar-portfwd/session.json` | the conId until it is released |
-| `SEESTAR_TUNNEL_CONNECT_RETRIES` / `_RETRY_S` | `2` / `3` | restarts on the same session when the tunnel dies before it came up |
+| `SEESTAR_TUNNEL_CONNECT_RETRIES` / `_RETRY_S` | `20` / `3` | restarts on the same session when a dial ran into the SDK timeout |
+| `TUTK_DIAL_WATCH` | `1` | the dial watchdog (see *Why a dial fails*); `0` waits out every SDK timeout |
+| `TUTK_PUNCH_WAIT_S` / `TUTK_KNOCK_WAIT_S` / `TUTK_KNOCK_WAIT_UNKNOWN_NAT_S` / `TUTK_REQUEST_WAIT_S` | `4` / `25` / `8` / `15` | when the watchdog gives a dial up |
+| `SEESTAR_TUNNEL_LOST_DIAL_RETRY_S` | `0.5` | the pause before redialling a dial the watchdog ended |
+| `TUTK_EARLY_READY` | `0` | `1` maps the control ports and reports ready as soon as session 0 is up, before the bulk sessions (~35 s sooner); off because qemu crashed in a later `Connect_Ex` while the controller was already using session 0 |
 | `TUTK_CONNECT_TRIES` / `TUTK_CONNECT_PAUSE_S` | `1` / `3` | the tunnel binary's own `Connect_Ex` retries inside one process; every connect that worked (12/12, 2026-10-30) was a process's first try, a retry in the same process kept asking the P2P server that had not answered, so the supervisor's fresh-process redials do the retrying |
 | `TUTK_TCP_RELAY_ONLY` | `0` | asks the SDK for its TCP relay mode before init (`IOTC_TCPRelayOnly_TurnOn`); `0` leaves the default |
 | `DNSHOOK_ALL_ADDRS` | `0` | `1` hands the SDK every A record of the TUTK master instead of the first (it fared worse) |
 | `DNSHOOK_PROBE` | `1` | the TUTK master name resolves round-robin to five servers and one of them never answers from some networks (every dial that drew it was a -60 after 77 s): the shim probes them in parallel with a TCP connect to `DNSHOOK_PROBE_PORT` (80) and hands the SDK the fastest one that answered; `0` hands it whatever the resolver listed first |
-| `DNSHOOK_PROBE_MS` | `1500` | how long the probe waits for the servers to answer |
+| `DNSHOOK_PROBE_MS` | `1500` | how long the probe waits for the servers to answer; it returns as soon as the first one answers unless `DNSHOOK_PREFER` or `DNSHOOK_ALL_ADDRS` needs them all |
 | `DNSHOOK_PREFER` | empty | comma-separated addresses to put first among the servers that answered the probe |
 | `TUTK_LOG_DIR` | `/tmp/tutk` | where the SDK writes its own verbose log; after a refused `Connect_Ex` the tunnel prints the newest 300 lines of it (handshake chatter filtered, prefixed `[sdk]`) and keeps the full file of that try as `<name>.<try>` |
 | `TUTK_LOG_LEVEL` | `0` | passed to the SDK's `*_Set_Log_Attr` (which this SDK build refuses); the `*_Set_Log_Path` fallback logs at full verbosity regardless |

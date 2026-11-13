@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { resolveRig } from '../astro/acquisition/devices.js';
 import { INITIAL_POINTS_MAX, VALID_DAYS, initialPoints, solveQuality, validate, type QualityInput } from '../astro/acquisition/quality.js';
 import { forgetQuality, qualitySamples, recordQuality, resetStoreCache, type QualitySample } from '../astro/acquisition/store.js';
-import { probing, whileProbing } from '../astro/acquisition/probe.js';
+import { probing, qualityJob, startQualityJob, whileProbing } from '../astro/acquisition/probe.js';
 import type { SkySlice, TargetInfo } from '../astro/acquisition/advise.js';
 import { Journal } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
@@ -160,6 +160,33 @@ describe('collection quality: per target, out of the journal', () => {
     assert.equal(qualitySamples('dwarf-3', 'ngc 224').length, 1);
     assert.equal(qualitySamples('dwarf-3', 'ngc 598').length, 0);
     forgetQuality('dwarf-3');
+  });
+
+  test('a capture the scope refuses stops the job at once and is stored as no sample', async () => {
+    resetStoreCache();
+    forgetQuality('dwarf-3');
+    let shots = 0;
+    const rig = dwarfEq();
+    const job = startQualityJob({
+      driver: { busy: () => null, shoot: async () => { shots++; throw new Error('command 11005 failed: CODE_ASTRO_DARK_TEMP_MISMATCH (-11530)'); } },
+      cohort: { site: SITE, rig, devKey: 'dwarf-3', fetchDevice: async () => Buffer.alloc(0) },
+      solve: () => ({ rig, model: model as never, measured: null, answer: solveQuality(input([])), slices: slices(), targetKey: 'ngc 40' }),
+      target: { key: 'ngc 40', name: 'NGC 40', displayName: 'C 20', gotoName: 'C 20' },
+      swamp: 10,
+    });
+    assert.equal(job.status, 'running');
+    for (let i = 0; i < 50 && qualityJob('ngc 40')?.status === 'running'; i++) await new Promise((r) => setTimeout(r, 20));
+    const j = qualityJob('ngc 40')!;
+    assert.equal(j.status, 'failed');
+    assert.match(j.error ?? '', /-11530/);
+    assert.equal(shots, 1, 'not retried point after point');
+    assert.equal(qualitySamples('dwarf-3', 'ngc 40').length, 0, 'no gap stored');
+  });
+
+  test('old refusals stored as gaps are not measurements', () => {
+    const refused = { ...sample({ subS: 90 }), valid: false, invalidWhy: 'the capture failed: command 11005 failed' };
+    const a = solveQuality(input([refused, { ...refused, id: 'x2', subS: 60 }]));
+    assert.equal(a.status, 'needed');
   });
 
   test('a probe stack opens no journal session', async () => {

@@ -82,6 +82,10 @@ TUTK_FIELDS = {
 }
 #: the tunnel binary's own exit code for "the P2P session went away"
 EXIT_SESSION_LOST = 3
+#: the tunnel binary's exit code for "this dial was lost, cut short" (its dial watchdog: the P2P
+#: server the master listed first never answered, or the hole punch got nothing back). The next
+#: process draws a new server list, so it is dialled again at once.
+EXIT_DIAL_LOST = 4
 #: a session that held this long earns a fresh backoff when it drops
 STABLE_S = 300.0
 #: how often the monitor re-checks while the tunnel has not proven itself yet; the watchdog's own
@@ -165,6 +169,10 @@ class Config:
         #: starts over with every new session.
         self.connect_retries = min(60, int(env_num("SEESTAR_TUNNEL_CONNECT_RETRIES", 20, 0)))
         self.connect_retry_s = min(60.0, env_num("SEESTAR_TUNNEL_CONNECT_RETRY_S", 3, 0))
+        #: the pause before redialling a dial the tunnel's watchdog cut short (EXIT_DIAL_LOST). Those
+        #: do not count against connect_retries (each costs seconds, not a minute); the session's
+        #: budget still bounds them.
+        self.lost_dial_retry_s = min(60.0, env_num("SEESTAR_TUNNEL_LOST_DIAL_RETRY_S", 0.5, 0))
         self.session_budget_s = env_num("SEESTAR_TUNNEL_SESSION_BUDGET_S", 900, 0)
         #: after the SDK disconnect, how long to watch the account for the scope reporting itself free
         #: (ONLINE) before stop_p2p is sent for the session; 0 = always send it
@@ -466,9 +474,11 @@ class Supervisor:
         try:
             session = self._allocate()
             if session:
-                for go in range(self.cfg.connect_retries + 1):
+                go = 0  # dials that ran into the SDK's own timeout (count against connect_retries)
+                dials = 0
+                while True:
                     with self.cond:
-                        self.session_attempt = go + 1
+                        self.session_attempt = dials + 1
                     self._spawn(session)
                     came_up = self._monitor(session)
                     with self.cond:
@@ -483,22 +493,28 @@ class Supervisor:
                     # a tunnel that DIED before coming up is worth dialling again on this same session,
                     # within the session's budget; a hung one goes back through the release and the backoff
                     died = child is not None and child.poll() is not None
+                    lost = died and child is not None and child.returncode == EXIT_DIAL_LOST
+                    dials += 1
+                    if not lost:
+                        go += 1
                     age = time.time() - float(session.get("at") or time.time())
                     with self.cond:
                         again = (not came_up and not self.stopping and self.desired == "connected"
-                                and go < self.cfg.connect_retries and died
+                                and go <= self.cfg.connect_retries and died
                                 and age < self.cfg.session_budget_s)
                     if not again:
                         if not came_up and died and not self.stopping and self.desired == "connected":
                             log(f"giving session {str(session['con_id'])[:8]}... back after "
-                                f"{go + 1} dial(s) over {age:.0f} s: asking for another one")
+                                f"{dials} dial(s) over {age:.0f} s: asking for another one")
                         break
                     self._stop_child()
+                    pause = self.cfg.lost_dial_retry_s if lost else self.cfg.connect_retry_s
                     log(f"the tunnel did not come up on session {str(session['con_id'])[:8]}... "
-                        f"(dial {go + 1}, {age:.0f} s since it was allocated): dialling it again in "
-                        f"{self.cfg.connect_retry_s:.0f} s, {self.cfg.connect_retries - go} left")
+                        f"(dial {dials}, {age:.0f} s since it was allocated"
+                        f"{', cut short' if lost else ''}): dialling it again in {pause:g} s, "
+                        f"{self.cfg.connect_retries - go + 1} full timeout(s) left")
                     with self.cond:
-                        self.cond.wait(self.cfg.connect_retry_s)
+                        self.cond.wait(pause)
                 return came_up, True
             return False, False  # stopped on the way in: asked for, not a failure
         except ConfigError as exc:
@@ -752,15 +768,16 @@ class Supervisor:
                 refused = self.refused
             if refused and not came_up:
                 self._fail(
-                    "the scope's P2P agent did not answer the rendezvous (Connect_Ex -42/-60): it takes "
-                    "minutes to come back after a session ended; dialling the same session again",
+                    "the rendezvous ran into the SDK's timeout (Connect_Ex -42/-60); dialling the same "
+                    "session again",
                     retry=True,
                 )
                 break
             code = child.poll()
             if code is not None:
                 reason = "was killed" if code < 0 else f"exit code {code}"
-                note = " (the P2P session went away)" if code == EXIT_SESSION_LOST else ""
+                note = {EXIT_SESSION_LOST: " (the P2P session went away)",
+                        EXIT_DIAL_LOST: " (a lost dial, cut short)"}.get(code, "")
                 with self.cond:
                     self.last_exit = f"{reason}{note}"
                 log(f"the tunnel exited, {reason}{note}")

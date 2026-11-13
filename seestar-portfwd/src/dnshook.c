@@ -176,6 +176,14 @@ static void order_by_probe(struct in_addr *addrs, int n) {
                 rtt[i] = elapsed > 0 ? elapsed : 1;
             close(fd[i]); fd[i] = -1;
         }
+        // The SDK is handed only the first address (unless DNSHOOK_ALL_ADDRS), so the first server
+        // to answer settles it; waiting out the cap for one that never answers (47.107.189.8 here)
+        // cost every dial the full 1.5 s. With DNSHOOK_PREFER the ranking needs every answer.
+        if (!all_addrs_on() && !(getenv("DNSHOOK_PREFER") && *getenv("DNSHOOK_PREFER"))) {
+            int answered = 0;
+            for (int i = 0; i < n; i++) if (rtt[i] >= 0) answered = 1;
+            if (answered) break;
+        }
     }
     for (int i = 0; i < n; i++) if (fd[i] >= 0) close(fd[i]);
 

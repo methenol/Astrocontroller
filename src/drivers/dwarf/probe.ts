@@ -6,8 +6,9 @@
  * entry) is then deleted from the scope, so no DWARF_RAW dataset is left and nothing reaches the
  * journal (it ignores stacks while a probe runs) or the transfers.
  *
- * The firmware refuses a sub without a dark master of its exposure and gain: the engine only asks
- * for covered pairs when the dark list is known.
+ * The stack is started forced: the firmware otherwise refuses it when its dark master was taken at
+ * another sensor temperature (-11530, seen 2026-11-13 on C 20) or is missing, and the probe only
+ * wants the raw subs (they are saved uncalibrated either way; the analysis reads the dark itself).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,7 +44,9 @@ export function dwarfProbeDriver(dwarf: Dwarf): ProbeDriver {
       const startedAt = Date.now();
       // one more frame than needed: the stacker's first is its reference, and a dithered one is discarded
       const frames = o.count + 1;
-      await dwarf.startStackingWith('tele', { exposure: o.subS, gain: o.gain, filter: o.filter, frames, startedBy: 'agent' });
+      // forced: the probe needs the raw subs, never the Dwarf's own dark-calibrated stack, so a dark
+      // master of another sensor temperature (-11530) or none of this pair must not refuse it
+      await dwarf.startStackingWith('tele', { exposure: o.subS, gain: o.gain, filter: o.filter, frames, force: true, startedBy: 'agent' });
       try {
         const until = Date.now() + frames * (o.subS * 1000 + 3_000) + START_SLACK_MS;
         let last = -1;

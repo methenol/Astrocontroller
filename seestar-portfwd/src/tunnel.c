@@ -15,6 +15,7 @@
 #endif
 #include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 static void *h_global, *h_iotc, *h_tunnel;
@@ -210,6 +212,109 @@ static void dump_sdk_logs(void) {
     }
 }
 
+// The dial watchdog. Whether a Connect_Ex will succeed is settled within ~2 s of the call, but
+// one that will not blocks for 62-64 s before it answers -42 (6 of 36 dials connected, in 6-18 s;
+// every other one took 62-64 s, 2026-11-13). The SDK's own log shows why:
+//  * After PRECHECK it sends P2P_REQUEST only to the first P2P server in the list the master
+//    handed out, and the master lists its three servers in random order. Two of them
+//    (223.108.144.62, 119.45.181.137) do not answer from some networks at all, so two dials in
+//    three asked a dead server and waited out the timeout. The one that answers sends PUNCH_TO
+//    within 0.2 s.
+//  * Sometimes the SDK sends its UDP master query to a garbage address (a negative index into its
+//    server table). It then knows only one mapping of ours, reports MyNAT[0] instead of the
+//    symmetric NAT it is behind, and does a plain hole punch, which gets nothing back.
+// Each new process gets a fresh list order, so a lost dial is cut short here and the supervisor
+// dials again at once, instead of after a minute. The watchdog only reads the log; it stops
+// watching once the scope's knock is seen (the punch got through) or Connect_Ex returns.
+// TUTK_DIAL_WATCH=0 turns it off.
+#define EXIT_DIAL_LOST 4
+static volatile int g_dial_done;
+
+static double mono_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+// The integer after `key` in `l` ("MyNAT[" -> 3), or -1.
+static int field_int(const char *l, const char *key) {
+    const char *p = strstr(l, key);
+    return p ? atoi(p + strlen(key)) : -1;
+}
+
+static void dial_lost(double t0, const char *why) {
+    fprintf(stderr, "[!] Connect_Ex abandoned after %.1f s: %s\n", mono_s() - t0, why);
+    // keep the log of the lost dial for a read (docker cp), then start the next one afresh
+    char path[512], kept[512];
+    snprintf(path, sizeof(path), "%s/tutk_iotc.log", g_log_dir);
+    snprintf(kept, sizeof(kept), "%s/tutk_iotc.log.lost.%d", g_log_dir, (int)getpid());
+    rename(path, kept);
+    fflush(NULL);
+    _exit(EXIT_DIAL_LOST);   // no session exists yet: nothing to tear down
+}
+
+static void *dial_watch(void *arg) {
+    double t0 = *(double *)arg;
+    double request_wait = env_int("TUTK_REQUEST_WAIT_S", 15, 2, 120);
+    double punch_wait = env_int("TUTK_PUNCH_WAIT_S", 4, 1, 60);
+    // the Type-3 (symmetric NAT) punch got its first knock back 9 s after PUNCH_TO; a plain punch
+    // (MyNAT[0]) that has nothing back after 8 s never got anything
+    double knock_wait = env_int("TUTK_KNOCK_WAIT_S", 25, 2, 120);
+    double knock_wait_unknown = env_int("TUTK_KNOCK_WAIT_UNKNOWN_NAT_S", 8, 2, 120);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tutk_iotc.log", g_log_dir);
+    double t_req = 0, t_punch = 0;
+    int my_nat = -1;
+    char server[80] = "?";
+    long off = -1;
+    char line[2048];
+    while (!g_dial_done) {
+        FILE *f = fopen(path, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long size = ftell(f);
+            if (off < 0 || size < off) off = off < 0 ? size : 0;   // start at EOF; restart if truncated
+            fseek(f, off, SEEK_SET);
+            while (fgets(line, sizeof(line), f)) {
+                size_t n = strlen(line);
+                if (n && line[n - 1] != '\n' && n < sizeof(line) - 1) break;   // half-written line
+                off = ftell(f);
+                if (strstr(line, "MSG = MSG_P2P_KNOCK") || strstr(line, "Send MSG_P2P_KNOCK_R") ||
+                    strstr(line, "mode is established") || strstr(line, "MSG_CONNECT_RESULT_RECORD")) {
+                    fclose(f);
+                    return NULL;   // the punch got through (or the SDK is answering anyway)
+                }
+                if (!t_req && strstr(line, "MSG_P2P_REQUEST_RECORD to P2P[")) {
+                    t_req = mono_s();
+                    const char *p = strstr(line, "P2P[") + 4, *e = strchr(p, ']');
+                    if (e && e - p < (long)sizeof(server)) {
+                        memcpy(server, p, (size_t)(e - p));
+                        server[e - p] = 0;
+                    }
+                }
+                if (!t_punch && strstr(line, "MSG_P2P_PUNCH_TO_RECORD from")) t_punch = mono_s();
+                if (t_punch && my_nat < 0 && strstr(line, "myNAT[")) my_nat = field_int(line, "myNAT[");
+            }
+            fclose(f);
+        }
+        double now = mono_s();
+        char why[256];
+        if (!t_req && now - t0 > request_wait) {
+            dial_lost(t0, "no P2P server was asked for the scope (master or precheck never answered)");
+        } else if (t_req && !t_punch && now - t_req > punch_wait) {
+            snprintf(why, sizeof(why), "the P2P server the master listed first (%s) did not answer "
+                     "the request in %.0f s", server, punch_wait);
+            dial_lost(t0, why);
+        } else if (t_punch && now - t_punch > (my_nat == 0 ? knock_wait_unknown : knock_wait)) {
+            snprintf(why, sizeof(why), "the hole punch got nothing back from the scope in %.0f s "
+                     "(our NAT as the SDK saw it: %d)", now - t_punch, my_nat);
+            dial_lost(t0, why);
+        }
+        usleep(100 * 1000);
+    }
+    return NULL;
+}
+
 // A signal ends the hold loop so teardown runs before the process exits.
 static volatile sig_atomic_t g_stop;
 static void on_signal(int signo) { (void)signo; g_stop = 1; }
@@ -342,6 +447,7 @@ int main(void) {
     // leaves the files on the bulk session, as with 2.
     int nchan = env_int("TUTK_SESSIONS", 2, 1, 4);
     int chan_sid[4] = { -1, -1, -1, -1 };
+    int early_ready = 0, early_offset = 0;
 
     // Open the session every port rides on. The first Connect_Ex after a session ended routinely
     // fails (-42, -60) while the rendezvous server and the scope sort out who holds it, and the
@@ -370,7 +476,21 @@ int main(void) {
                 int r = reinit_socket(0);
                 if (r != 0) printf("    IOTC_ReInitSocket: %d\n", r);
             }
+            // the first session is where the server-list lottery is drawn; the later ones reuse
+            // the list that worked for it
+            pthread_t watcher;
+            int watching = 0;
+            static double dial_t0;
+            if (i == 0 && g_log_dir[0] && env_int("TUTK_DIAL_WATCH", 1, 0, 1)) {
+                g_dial_done = 0;
+                dial_t0 = mono_s();
+                watching = pthread_create(&watcher, NULL, dial_watch, &dial_t0) == 0;
+            }
             chan_sid[i] = tun_connect_ex(uid, tunnel_auth_cb, NULL);
+            if (watching) {
+                g_dial_done = 1;
+                pthread_join(watcher, NULL);
+            }
             if (chan_sid[i] >= 0) break;
             if (chan_sid[i] == -30002 && !busy_retry && !g_stop) {
                 busy_retry = 1;
@@ -397,6 +517,30 @@ int main(void) {
             int r = set_bufsize(chan_sid[i], bufsz);
             printf("    P2PTunnel_SetBufSize(%d): %d\n", bufsz, r);
         }
+        // TUTK_EARLY_READY=1: map the control ports (they ride on session 0) and say "ready" right
+        // here, so the controller talks to the scope while the bulk sessions are still being
+        // opened (each is a rendezvous of its own, 6-11 s, and every mapping takes ~1 s under
+        // qemu: ~35 s in all). Off by default: with the controller already talking on session 0,
+        // qemu died (SIGSEGV) inside the next session's Connect_Ex in one of two tries
+        // (2026-11-13), and a crash costs the whole session.
+        if (i == 0 && env_int("TUTK_EARLY_READY", 0, 0, 1)) {
+            early_offset = env_int("TUTK_PORT_OFFSET", 0, 0, 33000);
+            printf("[*] forwarding the control ports first%s:\n", early_offset ? " (offset)" : "");
+            for (int p = 0; p < NPORTS; p++) {
+                if (PORTS[p].channel != 0) continue;
+                unsigned local = (PORTS[p].local ? PORTS[p].local : PORTS[p].port) + (unsigned)early_offset;
+                PORTS[p].mapped = port_mapping(chan_sid[0], local, PORTS[p].port);
+                if (PORTS[p].mapped >= 0) printf("    127.0.0.1:%-5u -> device:%-5u  ok (session 0)\n", local, PORTS[p].port);
+                else printf("    127.0.0.1:%-5u -> device:%-5u  FAILED (%d, session 0)\n", local, PORTS[p].port, PORTS[p].mapped);
+                if (PORTS[p].port == 4700 && PORTS[p].mapped >= 0) {
+                    usleep(300 * 1000);   // the mapping's accept loop runs on an SDK thread
+                    if (control_selftest((unsigned short)(PORTS[p].port + early_offset)) == 0) {
+                        printf("[*] tunnel ready - press Ctrl-C to disconnect (bulk sessions still opening)\n");
+                        early_ready = 1;
+                    }
+                }
+            }
+        }
     }
 
     // Map each port onto its channel; a single failure is reported, not fatal. TUTK_PORT_OFFSET
@@ -408,6 +552,7 @@ int main(void) {
     int mapped = 0;
     for (int i = 0; i < NPORTS; i++) {
         if (PORTS[i].only && PORTS[i].channel >= nchan) continue;
+        if (PORTS[i].channel == 0 && PORTS[i].mapped >= 0) { mapped++; continue; }   // mapped early
         int ci = PORTS[i].channel >= nchan ? nchan - 1 : PORTS[i].channel;
         unsigned local = (PORTS[i].local ? PORTS[i].local : PORTS[i].port) + (unsigned)offset;
         PORTS[i].mapped = port_mapping(chan_sid[ci], local, PORTS[i].port);
@@ -420,15 +565,18 @@ int main(void) {
     }
     if (mapped == 0) { fprintf(stderr, "[!] no port mappings succeeded\n"); return 1; }
 
-    sleep(1);   // the mapping accept loops run on SDK threads
-    for (int i = 0; i < NPORTS; i++) {
-        if (PORTS[i].port == 4700 && PORTS[i].mapped >= 0) {
-            control_selftest((unsigned short)(PORTS[i].port + offset));
-            break;
+    if (early_ready) {
+        printf("[*] all ports forwarded (%d sessions)\n", nchan);
+    } else {
+        sleep(1);   // the mapping accept loops run on SDK threads
+        for (int i = 0; i < NPORTS; i++) {
+            if (PORTS[i].port == 4700 && PORTS[i].mapped >= 0) {
+                control_selftest((unsigned short)(PORTS[i].port + offset));
+                break;
+            }
         }
+        printf("[*] tunnel ready - press Ctrl-C to disconnect\n");
     }
-
-    printf("[*] tunnel ready - press Ctrl-C to disconnect\n");
 
     // Hold the session open, polling state each second so a drop is noticed.
     int hold = hold_seconds();

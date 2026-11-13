@@ -218,11 +218,13 @@ async function shootPoint(r: QualityRun, p: ProbePoint, dir: string, signal: Abo
   try {
     shot = await r.driver.shoot({ filter: p.filter, gain: p.gain, subS: p.subS, count: r.frames ?? FRAMES_PER_POINT, target: r.target.gotoName, dir, signal, progress: say });
   } catch (e) {
+    // the scope refused or failed to shoot: that says nothing about the sky, so it is no sample (a
+    // gap is for cloud) — the job stops with the device's reason rather than retrying the same refusal
     if (signal.aborted) throw e;
-    return gap(`the capture failed: ${errMsg(e)}`);
+    throw new Error(`the scope could not shoot ${p.filter} ${p.subS}s: ${errMsg(e)}`);
   }
   for (const n of shot.notes) say(n);
-  if (!shot.files.length) return gap(`no raw sub came back (${shot.how})`);
+  if (!shot.files.length) throw new Error(`the scope returned no raw sub for ${p.filter} ${p.subS}s (${shot.how})`);
   const bytes = shot.files.map((f) => fs.readFileSync(f));
   const frames = bytes.map((b, i) => {
     const fr = readRaw(b, path.basename(shot.files[i]));
