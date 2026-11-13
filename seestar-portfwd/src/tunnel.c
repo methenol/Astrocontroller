@@ -14,6 +14,7 @@
 #define TUTK_SUFFIX ""
 #endif
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,14 +107,16 @@ static int control_selftest(unsigned short port) {
 // sessions mirror the app's control/bulk split. Add a line to forward more.
 struct portmap {
     unsigned short port;
-    int channel;       // 0 = control, 1 = bulk
+    int channel;       // 0 = control, 1 = bulk (pictures, video), 2 = files (falls back to bulk), 3 = a second file route
     int mapped;        // what PortMapping returned (>= 0 is success); StopPortMapping takes the session
+    unsigned short local;  // local port (before TUTK_PORT_OFFSET) when not the device port; 0 = the same
+    int only;          // 1 = map only when its own session is open (no fallback onto another)
 };
 static struct portmap PORTS[] = {
     { 4700,  0, -1 },   // JSON-RPC control
     { 4350,  0, -1 },   // firmware control
-    { 80,    1, -1 },   // nginx file/image server
-    { 4801,  1, -1 },   // file-management API
+    { 80,    2, -1 },   // nginx file/image server
+    { 4801,  2, -1 },   // file-management API
     { 4800,  1, -1 },   // image stream
     { 4804,  1, -1 },   // wide-lens image stream
     { 4554,  1, -1 },   // telephoto RTSP video
@@ -122,6 +125,10 @@ static struct portmap PORTS[] = {
     { 445,   1, -1 },   // Samba (images share)
     { 22,    1, -1 },   // OpenSSH
     { 32323, 1, -1 },   // ASCOM Alpaca
+    // The file server once more, on a fourth session, as local port 81: one session carried HTTP
+    // at ~250-290 KB/s however many downloads shared it, while the link had room for three times
+    // that (2026-11-12), so the library spreads its downloads over both routes.
+    { 80,    3, -1, 81, 1 },
 };
 // Other ports seen listening on the device, investigated and not forwarded:
 //   4701/4702  duplicate zwoair_imager JSON-RPC listeners (same as 4700)
@@ -206,6 +213,19 @@ static void dump_sdk_logs(void) {
 // A signal ends the hold loop so teardown runs before the process exits.
 static volatile sig_atomic_t g_stop;
 static void on_signal(int signo) { (void)signo; g_stop = 1; }
+
+// A stop asked for on stdin ("q", or the supervisor's end of the pipe closing). A signal delivered
+// into this qemu-arm process while the SDK's threads run crashed qemu itself ("QEMU internal
+// SIGSEGV", 2026-11-12) before the sessions were closed, so the scope kept a dead session and
+// refused the next connect (-42) for ten minutes; read from a pipe, the stop is ordinary code.
+static int stop_requested_on_stdin(void) {
+    struct pollfd p = { .fd = 0, .events = POLLIN };
+    if (poll(&p, 1, 0) <= 0) return 0;
+    if (p.revents & (POLLHUP | POLLERR | POLLNVAL)) return 1;
+    char c[16];
+    ssize_t n = read(0, c, sizeof(c));
+    return n <= 0 || memchr(c, 'q', (size_t)n) != NULL;
+}
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -316,8 +336,12 @@ int main(void) {
     // The app opens two sessions per connection (P2PTunnelAgent_Connect_Ex, then _Second): the
     // control ports on the first, every bulk port on the second, so image traffic never starves
     // the control link. TUTK_SESSIONS=1 puts every port on one session.
-    int nchan = env_int("TUTK_SESSIONS", 2, 1, 2);
-    int chan_sid[2] = { -1, -1 };
+    // TUTK_SESSIONS=3 opens a third for the file server: on the bulk session a downloaded file
+    // queued behind the live picture stream, which fills that session's window by itself (HTTP's
+    // first byte 7-25 s, transfers at a trickle, 2026-11-12). A third session the scope refuses
+    // leaves the files on the bulk session, as with 2.
+    int nchan = env_int("TUTK_SESSIONS", 2, 1, 4);
+    int chan_sid[4] = { -1, -1, -1, -1 };
 
     // Open the session every port rides on. The first Connect_Ex after a session ended routinely
     // fails (-42, -60) while the rendezvous server and the scope sort out who holds it, and the
@@ -362,7 +386,8 @@ int main(void) {
         }
         if (chan_sid[i] < 0) {
             if (i == 0) return 1;
-            nchan = 1;
+            printf("    session %d refused: its ports ride on session %d\n", i, i - 1);
+            nchan = i;
             break;
         }
         if (check_ex) print_mode(check_ex, chan_sid[i]);
@@ -382,8 +407,9 @@ int main(void) {
     printf("[*] forwarding %d ports%s:\n", NPORTS, offset ? " (offset)" : "");
     int mapped = 0;
     for (int i = 0; i < NPORTS; i++) {
+        if (PORTS[i].only && PORTS[i].channel >= nchan) continue;
         int ci = PORTS[i].channel >= nchan ? nchan - 1 : PORTS[i].channel;
-        unsigned local = PORTS[i].port + (unsigned)offset;
+        unsigned local = (PORTS[i].local ? PORTS[i].local : PORTS[i].port) + (unsigned)offset;
         PORTS[i].mapped = port_mapping(chan_sid[ci], local, PORTS[i].port);
         int ok = PORTS[i].mapped >= 0;
         if (ok) mapped++;
@@ -420,21 +446,35 @@ int main(void) {
             }
         }
         if (!lost) sleep(1);
+        if (stop_requested_on_stdin()) g_stop = 1;
     }
 
-    // Teardown in the app's order: stop mappings, then abort/disconnect sessions.
+    // Teardown: the disconnect is what tells the scope we left, so it goes first. The app's order
+    // (StopPortMapping, Abort, then Disconnect) died with a SIGSEGV inside StopPortMapping under
+    // qemu on every release, whichever handle it was given (session or mapping index), before any
+    // Disconnect was sent (2026-11-12): the scope then kept the dead session and refused the next
+    // Connect_Ex (-42) for minutes. Disconnecting a session ends its mappings with it.
+    // P2PTunnelAgent_Disconnect crashed the same way (19 s in, nothing printed after it), so the
+    // sessions are closed one layer down: IOTC_Session_Close sends the scope the session-close
+    // record (the tunnel's SIDs are IOTC SIDs: IOTC_Session_Check_Ex above takes them too), and the
+    // process then leaves without the tunnel agent's teardown; the OS closes the sockets.
+    (void)stop_mapping;
+    (void)tun_abort;
+    (void)tun_disconnect;
+    (void)tun_deinit;
+    int (*session_close)(int) = sym(h_iotc, "IOTC_Session_Close");
     printf("[*] releasing tunnel\n");
-    // StopPortMapping takes the SESSION, not a per-port handle: the SDK walks off the end of its
-    // own table with anything else, which is the SIGSEGV this used to take on teardown.
+    fflush(stdout);
     for (int i = 0; i < nchan; i++) {
-        if (chan_sid[i] >= 0 && stop_mapping) stop_mapping(chan_sid[i]);
+        if (chan_sid[i] < 0 || !session_close) continue;
+        int r = session_close(chan_sid[i]);
+        printf("    session %d closed: %d\n", i, r);
+        fflush(stdout);
     }
-    for (int i = 0; i < nchan; i++) {
-        if (chan_sid[i] < 0) continue;
-        if (tun_abort) tun_abort(chan_sid[i], 0);
-        if (tun_disconnect) tun_disconnect(chan_sid[i]);
-    }
-    if (tun_deinit) tun_deinit();
+    usleep(500 * 1000);   // the close records go out on the SDK's socket
+    printf("[*] released\n");
+    fflush(stdout);
+    _exit(lost ? 3 : 0);
     // 3 = the P2P session went away (see EXIT_SESSION_LOST in src/supervisor.py); 0 = asked to stop.
     return lost ? 3 : 0;
 }

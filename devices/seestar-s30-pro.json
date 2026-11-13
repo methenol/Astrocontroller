@@ -34,13 +34,14 @@
   "mount": { "eqCapable": true },
   "filters": [
     { "name": "IRCUT", "aliases": ["IR-cut", "UV/IR cut", "ir cut", "none"], "band": "broadband", "passband": "400–700 nm" },
-    { "name": "LP", "aliases": ["LP Dual-Band", "dual-band", "duo-band", "light pollution", "lp_filter"], "band": "duo_wide", "skyFraction": 0.17, "passband": "OIII 30 nm + Hα 20 nm (as the S50 Pro's; unconfirmed)" }
+    { "name": "LP", "aliases": ["LP Dual-Band", "dual-band", "duo-band", "light pollution", "lp_filter"], "band": "duo_wide", "skyFraction": 0.17, "passband": "OIII 30 nm + Hα 20 nm" }
   ],
   "sources": [
     "optics and sensor: retailer listings and astrobackyard.com review (30 mm, 160 mm, f/5.3, IMX585 3840×2160, 4.6° diagonal)",
     "IMX585: ZWO ASI585 manual (full well 47 ke⁻, HCG at gain 252, revised to 200 in 2025), read noise ~0.7–0.8 e⁻ in HCG",
     "stack gain 200 and the conversion gain: assumed from the S50 Pro (same firmware family)",
-    "exposure choices: Seestar app 3.4.1 (as for every Seestar)"
+    "exposure choices: Seestar app 3.4.1 (as for every Seestar)",
+    "official ZWO product page (zwoastro.com, 2026-11-13): IMX585 tele 160 mm f/5.3, 4.6° diagonal; IMX586 wide 6 mm f/1.75, 63°; filters UV/IR cut, LP OIII 30 nm / Hα 20 nm, dark; 6000 mAh; EQ mode needs the TH10 mount (S30 Pro FAQ)"
   ],
   "notes": [
     "Conversion gain, black level and read noise are estimates: measure them before trusting the background guard."

@@ -107,12 +107,18 @@ services:
       # not work from behind a symmetric NAT (Connect_Ex -42/-60 for an hour, 2026-10-30).
       TUTK_TCP_RELAY_ONLY: ${SEESTAR_TUTK_TCP_RELAY_ONLY:-0}
       TUTK_TUNNEL_BUFSIZE: ${SEESTAR_TUTK_TUNNEL_BUFSIZE:-512000}
-      TUTK_SESSIONS: ${SEESTAR_TUTK_SESSIONS:-2}
+      # 3 = control, pictures/video, and the file server each on their own P2P session: on a shared
+      # one, downloads queued behind the live stream (2026-11-12). 4 = a second route to the file
+      # server (local port 81 + offset), which the library downloads over in parallel: one session
+      # carries HTTP at ~250-290 KB/s. 2 = the app's control/bulk split.
+      TUTK_SESSIONS: ${SEESTAR_TUTK_SESSIONS:-4}
       # IOTC_Setup_P2PConnection_Timeout seconds; 0 = not called (the T SDK did not honour 20)
       TUTK_CONNECT_TIMEOUT_S: ${SEESTAR_TUTK_CONNECT_TIMEOUT_S:-0}
-      # the SDK's own log, dumped to the tunnel log after a refused Connect_Ex (level 0 = verbose)
+      # the SDK's own log, dumped to the tunnel log after a refused Connect_Ex. 0 = verbose writes
+      # several lines per 8 KB packet, under qemu, on the data path (a 4 MB log every ~80 s while a
+      # stream ran, 2026-11-12); 2 = info keeps the connect steps. Set 0 to debug a connect.
       TUTK_LOG_DIR: ${SEESTAR_TUTK_LOG_DIR:-/tmp/tutk}
-      TUTK_LOG_LEVEL: ${SEESTAR_TUTK_LOG_LEVEL:-0}
+      TUTK_LOG_LEVEL: ${SEESTAR_TUTK_LOG_LEVEL:-2}
     # qemu/bionic's linker calls personality(), which the default seccomp profile blocks.
     security_opt:
       - seccomp:unconfined

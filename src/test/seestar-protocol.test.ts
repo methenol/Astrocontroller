@@ -7,7 +7,7 @@ import { SeestarLink, SeestarRpcError, type SeestarEvent } from '../drivers/sees
 import { handshake, signChallenge } from '../drivers/seestar/auth.js';
 import { encodeHeader, FrameReader, frameImage, IMG_TYPE, parseHeader, rawStackPixels, type Frame } from '../drivers/seestar/frames.js';
 import { SeestarImageLink } from '../drivers/seestar/image-link.js';
-import { applyAppState, applyDeviceState, applyEvent, busyWith, fovFromOptics, initialState, isOuter, reconcileLostOps } from '../drivers/seestar/model.js';
+import { applyAppState, applyDeviceState, applyEvent, busyWith, fovFromOptics, initialState, isOuter, j2000Pair, reconcileLostOps } from '../drivers/seestar/model.js';
 import { ZwoTunnel } from '../drivers/seestar/tunnel.js';
 import { listDevices, login } from '../drivers/seestar/zwo-cloud.js';
 import { toJpeg, type FloatImage } from '../media/images.js';
@@ -443,7 +443,7 @@ describe('Seestar model', () => {
     applyEvent(st, ev({ Event: 'ScopeGoto', state: 'working', cur_ra_dec: [10.5, 41.2] }));
     applyEvent(st, ev({ Event: 'Alert', error: 'low battery', code: 1 }));
     assert.equal(st.power.batteryPct, 50);
-    assert.deepEqual([st.mount.raHours, st.mount.decDeg], [10.5, 41.2]);
+    assert.deepEqual([st.mount.raHours, st.mount.decDeg], j2000Pair([10.5, 41.2], st.mount.at), 'the firmware reports JNow; the state is J2000');
     assert.equal(st.alert?.error, 'low battery');
     assert.ok(!st.recent.some((r) => r.event === 'PiStatus'));
     applyAppState(st, { View: { state: 'working', stage: 'Stack', target_name: 'M 81', Stack: { state: 'working', stacked_frame: 20, dropped_frame: 2 } } });

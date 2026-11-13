@@ -59,6 +59,12 @@ if mode == "refuse_then_ready":
     print("[!] Connect_Ex failed: -42 (retrying)", flush=True)
     time.sleep(0.5)
 print("[*] tunnel ready - press Ctrl-C to disconnect", flush=True)
+# like the real binary once it is up: "q" (or the pipe closing) on stdin ends it
+import sys, threading
+def _stop_on_stdin():
+    sys.stdin.read(1)
+    os._exit(0)
+threading.Thread(target=_stop_on_stdin, daemon=True).start()
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("127.0.0.1", port))

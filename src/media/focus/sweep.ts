@@ -31,8 +31,9 @@ const MAX_REPEATS = 3;
 /** A long still pauses the live view for its exposure plus this (readout, save, the view restarting). */
 const STILL_OVERHEAD_MS = 25_000;
 /** Sweep defaults: centre ± DEFAULT_RANGE focus units in DEFAULT_STEP steps, at most DEFAULT_MAX_POINTS samples. */
-const DEFAULT_RANGE = 30;
-const DEFAULT_STEP = 5;
+/** The owner's fine tune: ±10 focus units at every unit (21 samples). */
+const DEFAULT_RANGE = 10;
+const DEFAULT_STEP = 1;
 const DEFAULT_MAX_POINTS = 25;
 const DEFAULT_SETTLE_MS = 700;
 /** After an exposure or gain change, the camera takes this long to shoot with the new setting. */
@@ -535,7 +536,7 @@ async function sweep(deps: FocusDeps, o: FocusSweepOptions): Promise<FocusSweepR
     }
 
     const improvementPct = start.hfrPx > 0 && best.hfrPx > 0 ? (100 * (start.hfrPx - best.hfrPx)) / start.hfrPx : 0;
-    if (bestAtEdge) notes.push(`the sharpest sample (${best.position}) was at the edge of the swept range: the true optimum may lie beyond it — sweep again centred there with a wider range`);
+    if (bestAtEdge) notes.push(`the sharpest sample (${best.position}) was at the edge of the swept range: the true optimum may lie beyond it — run star_focus again with center=${best.position} and the same range and step, until the peak is inside the sweep`);
     if (final && best.hfrPx > 0 && final.hfrPx > best.hfrPx * VERIFY_SOFTER) {
       notes.push(`the verification frame at ${final.position} measured softer (HFR ${final.hfrPx}px) than the sweep sample at ${best.position} (${best.hfrPx}px): the difference is within the frame-to-frame noise of this sky`);
     }

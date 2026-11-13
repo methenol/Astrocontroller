@@ -4,9 +4,9 @@
  * blip never leaves a view frozen. Only the sources on screen are subscribed: a phone looking at
  * another screen, or a hidden tab, gets no frames at all.
  */
-import { $, $$, lightbox, lightboxOpen, closeLightbox } from './dom.js';
+import { $, $$, lightbox, lightboxOpen, closeLightbox, toast } from './dom.js';
 import { on } from './bus.js';
-import { wsUrl } from './api.js';
+import { api, wsUrl } from './api.js';
 import { state } from './state.js';
 import { viewOnScreen } from './shell.js';
 
@@ -260,6 +260,32 @@ on('config', applyLayout);
 on('screen', subscribe);
 on('view', subscribe);
 document.addEventListener('visibilitychange', subscribe);
+
+// ---- pausing the live stream (the Seestar: over ZWO the stream would otherwise fill the link)
+function renderStreamPause() {
+  const b = $('#btn-stream-pause');
+  if (!b) return;
+  const paused = !!state.telescope?.camera?.streamPaused;
+  b.setAttribute('aria-pressed', String(paused));
+  b.setAttribute('aria-label', paused ? 'Resume the live stream' : 'Pause the live stream');
+  b.title = paused ? 'Resume the live stream' : 'Pause the live stream (saves bandwidth; the agent and tools still get frames)';
+  $('use', b).setAttribute('href', paused ? '#i-play' : '#i-pause');
+}
+on('telescope', renderStreamPause);
+$('#btn-stream-pause')?.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  const b = e.currentTarget;
+  b.disabled = true;
+  try {
+    const r = await api('seestar/stream', { paused: !state.telescope?.camera?.streamPaused });
+    if (state.telescope?.camera) state.telescope.camera.streamPaused = r.paused;
+    renderStreamPause();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    b.disabled = false;
+  }
+});
 
 // ---- swapping views
 for (const b of $$('[data-swap]')) {

@@ -40,6 +40,9 @@ const ROOT = 'MyWorks';
 const DARKS = 'darklibrary';
 const ALBUM_PREFIX = '/SEESTAR/';
 const CACHE_MS = 30_000;
+/** paths per delete_image call; the scope takes a list */
+const DELETE_BATCH = 50;
+const DELETE_TIMEOUT_MS = 60_000;
 const NIGHT_SHIFT_MS = 12 * 3600_000;
 const LIGHT = /^Light_(.+)_([\d.]+)s_([A-Za-z0-9-]+)_(\d{8})-(\d{6})\.fits?$/i;
 const STACK = /^Stacked_(\d+)_(.+)_([\d.]+)s_([A-Za-z0-9-]+)_(\d{8})-(\d{6})\.(fits?|jpg)$/i;
@@ -102,17 +105,34 @@ export function parseFitsHeader(buf: Buffer): Record<string, string | number | b
 /** The scope's file listing and HTTP server. Paths are relative to the storage root. */
 export class SeestarFiles {
   private queue: Promise<unknown> = Promise.resolve();
+  /** the second route stopped answering (a tunnel without its fourth session): downloads use the first */
+  private altDown = false;
 
   constructor(
     private readonly scope: Pick<Seestar, 'call'>,
     private readonly host: () => string = () => config.seestar.host,
     private readonly httpPort: number = config.seestar.httpPort,
+    private readonly httpAltPort: number = config.seestar.httpAltPort,
   ) {}
 
-  url(rel: string): string {
+  /** The file server's routes in use: over ZWO a second tunnel session doubles what downloads get. */
+  routes(): number[] {
+    return this.httpAltPort && !this.altDown ? [this.httpPort, this.httpAltPort] : [this.httpPort];
+  }
+
+  url(rel: string, port = this.httpPort): string {
     const parts = rel.replace(/^\/+/, '').split('/');
     if (!parts.length || parts.some((p) => p === '' || p === '.' || p === '..')) throw new Error(`bad Seestar path ${rel}`);
-    return `http://${this.host()}:${this.httpPort}/${parts.map(encodeURIComponent).join('/')}`;
+    return `http://${this.host()}:${port}/${parts.map(encodeURIComponent).join('/')}`;
+  }
+
+  /** A route that refuses connections is dropped (the tunnel did not open its session). */
+  private routeFailed(port: number, err: unknown): void {
+    if (port !== this.httpAltPort || this.altDown) return;
+    const code = (err as { cause?: { code?: string } })?.cause?.code;
+    if (code !== 'ECONNREFUSED' && code !== 'ECONNRESET' && code !== 'EHOSTUNREACH') return;
+    this.altDown = true;
+    log.warn(`the second file route (:${port}) is not answering (${code}): downloads use :${this.httpPort} only`);
   }
 
   list(dir: string): Promise<SeestarEntry[]> {
@@ -139,8 +159,8 @@ export class SeestarFiles {
     return run;
   }
 
-  async size(rel: string, signal?: AbortSignal): Promise<number> {
-    const res = await fetch(this.url(rel), { method: 'HEAD', signal: anySignal(signal, HTTP_TIMEOUT_MS) });
+  async size(rel: string, signal?: AbortSignal, port = this.httpPort): Promise<number> {
+    const res = await fetch(this.url(rel, port), { method: 'HEAD', signal: anySignal(signal, HTTP_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${rel}`);
     const n = Number(res.headers.get('content-length'));
     if (!Number.isFinite(n)) throw new Error(`no size for ${rel}`);
@@ -173,32 +193,66 @@ export class SeestarFiles {
     return res?.status === 404;
   }
 
+  /**
+   * Delete many files: delete_image in batches, then one listing per directory to see what is
+   * gone (over the ZWO tunnel an HTTP check per file took 8+ s, so a 1263-sub session never
+   * finished). What is still there gets one try on its own. Returns the paths still present.
+   */
+  async deleteMany(rels: string[]): Promise<string[]> {
+    for (const rel of rels) this.url(rel);
+    const remaining = async (paths: string[]): Promise<string[]> => {
+      const byDir = new Map<string, string[]>();
+      for (const p of paths) {
+        const dir = path.posix.dirname(p);
+        byDir.set(dir, [...(byDir.get(dir) ?? []), p]);
+      }
+      const left: string[] = [];
+      for (const [dir, ps] of byDir) {
+        const names = new Set((await this.list(dir)).map((e) => e.name));
+        left.push(...ps.filter((p) => names.has(path.posix.basename(p))));
+      }
+      return left;
+    };
+    for (let i = 0; i < rels.length; i += DELETE_BATCH) {
+      await this.scope.call('delete_image', rels.slice(i, i + DELETE_BATCH), { allowError: true, timeoutMs: DELETE_TIMEOUT_MS }).catch((e) => log.warn(`delete_image: ${errMsg(e)}`));
+    }
+    let left = await remaining(rels);
+    if (!left.length) return left;
+    log.info(`${left.length} of ${rels.length} file(s) still on the Seestar after the batch delete: deleting them one by one`);
+    for (const p of left) await this.scope.call('delete_image', [p], { allowError: true, timeoutMs: DELETE_TIMEOUT_MS }).catch((e) => log.warn(`delete_image ${p}: ${errMsg(e)}`));
+    left = await remaining(left);
+    return left;
+  }
+
   async fitsHeader(rel: string, signal?: AbortSignal): Promise<Record<string, string | number | boolean>> {
     return parseFitsHeader(await this.read(rel, HEADER_BYTES, signal));
   }
 
   /** Copy a file into the library, resuming <local>.part; 'skipped' when the same size is already there. */
-  async download(rel: string, local: string, onBytes: (n: number) => void, signal?: AbortSignal): Promise<{ outcome: 'copied' | 'skipped'; size: number }> {
+  async download(rel: string, local: string, onBytes: (n: number) => void, signal?: AbortSignal, route = 0): Promise<{ outcome: 'copied' | 'skipped'; size: number }> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= FILE_ATTEMPTS; attempt++) {
       if (signal?.aborted) throw new TransferCancelled();
       const tmp = `${local}.part`;
+      const routes = this.routes();
+      const port = routes[route % routes.length]!;
       try {
         fs.mkdirSync(path.dirname(local), { recursive: true });
-        const size = await this.size(rel, signal);
+        const size = await this.size(rel, signal, port);
         if (localSize(local) === size) return { outcome: 'skipped', size };
         let have = localSize(tmp) ?? 0;
         if (have > size) {
           fs.rmSync(tmp, { force: true });
           have = 0;
         }
-        if (have < size) await this.fetchInto(rel, tmp, have, size, onBytes, signal);
+        if (have < size) await this.fetchInto(rel, tmp, have, size, onBytes, signal, port);
         const got = localSize(tmp);
         if (got !== size) throw new Error(`incomplete download: ${got ?? 0} of ${size} bytes`);
         fs.renameSync(tmp, local);
         return { outcome: 'copied', size };
       } catch (err) {
         if (err instanceof TransferCancelled || signal?.aborted) throw new TransferCancelled();
+        this.routeFailed(port, err);
         lastErr = err;
         if (attempt < FILE_ATTEMPTS) await sleep(RETRY_MS * attempt);
       }
@@ -206,13 +260,13 @@ export class SeestarFiles {
     throw new Error(errMsg(lastErr));
   }
 
-  private async fetchInto(rel: string, tmp: string, from: number, size: number, onBytes: (n: number) => void, signal?: AbortSignal): Promise<void> {
+  private async fetchInto(rel: string, tmp: string, from: number, size: number, onBytes: (n: number) => void, signal?: AbortSignal, port = this.httpPort): Promise<void> {
     const ctl = new AbortController();
     const onAbort = () => ctl.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
     let stall = setTimeout(() => ctl.abort(), HTTP_TIMEOUT_MS);
     try {
-      const res = await fetch(this.url(rel), { headers: from > 0 ? { Range: `bytes=${from}-${size - 1}` } : {}, signal: ctl.signal });
+      const res = await fetch(this.url(rel, port), { headers: from > 0 ? { Range: `bytes=${from}-${size - 1}` } : {}, signal: ctl.signal });
       const resumed = from > 0 && res.status === 206;
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${rel}`);
       const out = fs.createWriteStream(tmp, { flags: resumed ? 'a' : 'w' });
@@ -298,17 +352,38 @@ export type SeestarStorage = DeviceLibrary & {
 export function seestarStorage(files: SeestarFiles): SeestarStorage {
   let cache: { at: number; infos: SessionInfo[]; other: string[] } | null = null;
   let albumCache: { at: number; items: MediaItem[] } | null = null;
+  // What each session's first sub says (camera, gain), kept on disk: over the ZWO tunnel one header
+  // read costs seconds, and a listing after every restart re-read them all
+  const headersFile = path.join(config.paths.data, 'seestar-fits-headers.json');
   const headers = new Map<string, { wide: boolean; gain: number }>();
+  try {
+    for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(headersFile, 'utf8')) as Record<string, { wide: boolean; gain: number }>)) headers.set(k, v);
+  } catch {
+    /* none kept yet */
+  }
+  const saveHeaders = () => {
+    try {
+      fs.writeFileSync(headersFile, JSON.stringify(Object.fromEntries(headers)));
+    } catch (e) {
+      log.debug(`could not keep the FITS headers: ${errMsg(e)}`);
+    }
+  };
 
   async function headerOf(rel: string): Promise<{ wide: boolean; gain: number }> {
     const known = headers.get(rel);
     if (known) return known;
-    const h = await files.fitsHeader(rel).catch((e) => {
-      log.debug(`no FITS header for ${rel}: ${errMsg(e)}`);
-      return {} as Record<string, unknown>;
-    });
+    let h: Record<string, unknown>;
+    try {
+      h = await files.fitsHeader(rel);
+    } catch (e) {
+      // not remembered: a read that timed out says nothing about the camera or the gain, and
+      // caching its blank answer named the session …GAIN_0… for good
+      log.warn(`no FITS header for ${rel}: ${errMsg(e)}`);
+      return { wide: false, gain: 0 };
+    }
     const v = { wide: h.WIDECAM === 1 || h.WIDECAM === true, gain: typeof h.GAIN === 'number' ? h.GAIN : 0 };
     headers.set(rel, v);
+    saveHeaders();
     return v;
   }
 
@@ -389,34 +464,57 @@ export function seestarStorage(files: SeestarFiles): SeestarStorage {
     return (await files.list(`${DARKS}/${dir.name}`)).filter((f) => !f.isDir && /\.fits?$/i.test(f.name)).map((f) => ({ ...f, rel: `${DARKS}/${dir.name}/${f.name}` }));
   }
 
+  /** Copy the plan, one download per file-server route at a time (two over ZWO's tunnel). */
   async function copyAll(plan: Array<{ remote: string; local: string; size: number }>, onProgress: (p: DownloadProgress) => void, signal: AbortSignal): Promise<DownloadResult> {
     const out: DownloadResult = { files: 0, bytes: 0, skipped: 0, failed: [] };
     const bytesTotal = plan.reduce((a, p) => a + p.size, 0);
-    let bytesDone = 0;
+    let finishedBytes = 0;
+    let filesDone = 0;
+    const inFlight = new Map<number, number>();
     let lastReport = 0;
-    for (const [i, item] of plan.entries()) {
-      const base = bytesDone;
-      try {
-        const r = await files.download(
-          item.remote,
-          item.local,
-          (n) => {
-            if (Date.now() - lastReport < 500) return;
-            lastReport = Date.now();
-            onProgress({ file: item.remote, filesDone: i, filesTotal: plan.length, bytesDone: base + n, bytesTotal });
-          },
-          signal,
-        );
-        if (r.outcome === 'skipped') out.skipped++;
-        else out.files++;
-        out.bytes += r.size;
-      } catch (err) {
-        if (err instanceof TransferCancelled) throw err;
-        out.failed.push({ remote: item.remote, error: errMsg(err) });
+    let next = 0;
+    let cancelled: unknown = null;
+    const report = (file: string, force = false) => {
+      if (!force && Date.now() - lastReport < 500) return;
+      lastReport = Date.now();
+      const partial = [...inFlight.values()].reduce((a, n) => a + n, 0);
+      onProgress({ file, filesDone, filesTotal: plan.length, bytesDone: finishedBytes + partial, bytesTotal });
+    };
+    const worker = async (route: number) => {
+      while (!cancelled && next < plan.length) {
+        const i = next++;
+        const item = plan[i]!;
+        inFlight.set(i, 0);
+        try {
+          const r = await files.download(
+            item.remote,
+            item.local,
+            (n) => {
+              inFlight.set(i, n);
+              report(item.remote);
+            },
+            signal,
+            route,
+          );
+          if (r.outcome === 'skipped') out.skipped++;
+          else out.files++;
+          out.bytes += r.size;
+        } catch (err) {
+          if (err instanceof TransferCancelled) {
+            cancelled = err;
+            return;
+          }
+          out.failed.push({ remote: item.remote, error: errMsg(err) });
+        } finally {
+          inFlight.delete(i);
+        }
+        finishedBytes += item.size;
+        filesDone++;
+        report(item.remote, true);
       }
-      bytesDone = base + item.size;
-      onProgress({ file: item.remote, filesDone: i + 1, filesTotal: plan.length, bytesDone, bytesTotal });
-    }
+    };
+    await Promise.all(files.routes().map((_, route) => worker(route)));
+    if (cancelled) throw cancelled;
     return out;
   }
 
@@ -529,15 +627,19 @@ export function seestarStorage(files: SeestarFiles): SeestarStorage {
     isSessionLight: (_s, remote) => remote.includes('_sub/') && !!parseLight(path.posix.basename(remote)),
     async deleteSession(s) {
       const info = await find(s.folder);
-      const doomed = [...info.subs.map((f) => `${info.subDir}/${f.name}`), ...(await stacksOf(info)).map((f) => `${info.stackDir}/${f.name}`)];
-      const withThumbs = doomed.flatMap((p) => [p, p.replace(/\.[^.]+$/, '_thn.jpg')]);
-      let failed = 0;
-      for (const p of withThumbs) {
-        const r = await files.delete(p).catch(() => false);
-        if (!r && !p.endsWith('_thn.jpg')) failed++;
+      const stacks = await stacksOf(info);
+      const doomed = [...info.subs.map((f) => `${info.subDir}/${f.name}`), ...stacks.map((f) => `${info.stackDir}/${f.name}`)];
+      // only the stacks have thumbnails: ask for the ones that are there, not one per sub
+      const listed = new Set((await files.list(info.stackDir).catch(() => [] as SeestarEntry[])).map((f) => f.name));
+      const thumbs = [...new Set(stacks.map((f) => f.name.replace(/\.[^.]+$/, '_thn.jpg')))].filter((n) => listed.has(n)).map((n) => `${info.stackDir}/${n}`);
+      log.info(`deleting ${s.folder} from the Seestar: ${doomed.length} file(s)`);
+      try {
+        const left = new Set(await files.deleteMany([...doomed, ...thumbs]));
+        const failed = doomed.filter((p) => left.has(p)).length;
+        return failed ? { deleted: false, note: `${failed} of ${doomed.length} files could not be deleted` } : { deleted: true };
+      } finally {
+        forget();
       }
-      forget();
-      return failed ? { deleted: false, note: `${failed} of ${doomed.length} files could not be deleted` } : { deleted: true };
     },
     async downloadOne(devicePath, localFile, signal) {
       await files.download(storagePath(devicePath), localFile, () => undefined, signal);

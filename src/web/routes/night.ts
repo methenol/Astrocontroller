@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { config } from '../../config.js';
 import * as sky from '../../astro/sky.js';
 import { addTarget, loadSettings, PlanSettingsSchema, ProgramTargetInput, removeTarget, reorderProgram, resetSettings, saveSettings, updateTarget, PLAN_DEFAULTS } from '../../night/program.js';
-import { PLAN_OBJECTIVE } from '../../night/service.js';
+import { planObjective } from '../../night/service.js';
 import { summarize } from '../../night/journal.js';
 import { body, notFound, queryNumber, queryString, route, HttpError } from '../http.js';
 import { teleFovArcmin, type WebContext } from '../context.js';
@@ -119,7 +119,7 @@ export function nightRoutes({ night, duty, scope }: WebContext): Router {
       const n = need();
       const plan = await n.plan.plan();
       if (Date.now() >= plan.window.end) throw new Error("tonight's plan has ended");
-      return duty.start({ objective: PLAN_OBJECTIVE, until: new Date(plan.window.end).toISOString(), by: 'user' });
+      return duty.start({ objective: planObjective(), until: new Date(plan.window.end).toISOString(), by: 'user' });
     }),
   );
 

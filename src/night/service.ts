@@ -16,6 +16,7 @@
  *   or Starfront's autonomous nights do when the roof opens (agent/starfront.ts).
  */
 import { pickDevice } from '../astro/acquisition/devices.js';
+import { driverSteps } from './procedure.js';
 import { existingProject, ensureProject, isMosaicOn, mosaicProgress, panelFilters, parentKey, type MosaicProject } from './mosaics.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -170,14 +171,8 @@ function addDays(date: string, days: number): string {
 const azDiff = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
 const newId = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
 
-export const PLAN_OBJECTIVE = [
-  "Carry out tonight's night plan (the Plan tab) until its end, maximising integration on the owner's program targets.",
-  "1. Every sample shows the plan's current block. Be on that target: goto_target name=<its goto name>, autofocus, star_focus, start_stacking. A mosaic block is worked panel by panel as its sample line says; autofocus at the block's start, not at each panel. Nothing is stacked before the plan starts; before that, get ready (connect, open the arm).",
-  '2. When the plan moves to the next block, stop_stacking and move to its target the same way. Follow the plan rather than choosing targets yourself; night_plan action=now says what to do at any time. The target you are working is locked to the end of its block: forecast updates and re-solves plan around it.',
-  '3. If the target is blocked (tele_visibility, view_camera) or clouded, tell the plan: night_plan action=obscured target=<name> cause=obstruction|cloud, then go to the target it gives. night_plan action=alternates lists other parts of the sky; a cloud bank in one direction: night_plan action=sky_hold quadrant=N|E|S|W minutes=<n>.',
-  '4. Record what matters for the owner in the journal (journal action=note): why a target was left, focus or tracking trouble, what you saw.',
-  '5. At the end of the duty: stop stacking, park, and transfer the night\'s sessions that are not in the library yet.',
-].join('\n');
+/** The night-plan duty's objective, in this driver's words (procedure.ts). */
+export { planObjective } from './procedure.js';
 
 export class PlanService extends SafeEmitter {
   private lastFacts: Awaited<ReturnType<PlanService['facts']>> = null;
@@ -964,7 +959,7 @@ export class PlanService extends SafeEmitter {
     const phase: NowView['phase'] = at < plan.window.start ? 'before' : at >= plan.window.end ? 'after' : 'night';
     const onPlan = block?.target && scopeOn ? targetKey(scopeOn) === block.target.key : null;
     const minutesLeft = block ? Math.round((block.end - at) / 60e3) : null;
-    const go = (b: Block) => `goto_target name=${b.target!.gotoName}${b.target!.filter ? ` (filter ${b.target!.filter})` : ''}, autofocus, star_focus, start_stacking`;
+    const go = (b: Block) => driverSteps().target(b.target!.gotoName, b.target!.filter);
     let instruction: string;
     if (phase === 'before') {
       const first = blocks.find((b) => b.kind === 'target' && !b.past && b.end > at);
@@ -977,7 +972,7 @@ export class PlanService extends SafeEmitter {
     } else if (onPlan) {
       instruction = `On plan: ${block.target!.displayName} until ${hm(block.end)} (${dur(minutesLeft ?? 0)} left)${next?.target ? `; next ${next.target.displayName} at ${hm(next.start)}` : ''}.`;
     } else if (scopeOn) {
-      instruction = `The scope is on ${scopeOn} but the plan says ${block.target!.displayName} since ${hm(block.start)} (until ${hm(block.end)}): stop_stacking and ${go(block)}. If ${block.target!.displayName} is blocked or clouded: night_plan action=obscured target=${block.target!.gotoName}.`;
+      instruction = `The scope is on ${scopeOn} but the plan says ${block.target!.displayName} since ${hm(block.start)} (until ${hm(block.end)}): ${driverSteps().stop}, then ${go(block)}. If ${block.target!.displayName} is blocked or clouded: night_plan action=obscured target=${block.target!.gotoName}.`;
     } else {
       instruction = `Now: ${block.target!.displayName} (${hm(block.start)}–${hm(block.end)}, ${dur(minutesLeft ?? 0)} left): ${go(block)}.`;
     }
@@ -1020,7 +1015,7 @@ export class PlanService extends SafeEmitter {
     const out: string[] = [];
     const focus = [...s.marks].reverse().find((m) => m.kind === 'focus-done' || m.kind === 'finefocus-done');
     const tempAt = (t: number) => this.lastConditions?.(new Date(t))?.temperatureC;
-    if (!focus) out.push(`- focus: none recorded for ${s.displayName ?? s.target} tonight; if the stars look soft (analyze_subs), stop_stacking, autofocus, star_focus, start_stacking`);
+    if (!focus) out.push(`- focus: none recorded for ${s.displayName ?? s.target} tonight; if the stars look soft (analyze_subs): ${driverSteps().refocus}`);
     else {
       const ageMin = Math.round((at - focus.at) / 60e3);
       const t0 = tempAt(focus.at);
@@ -1028,7 +1023,7 @@ export class PlanService extends SafeEmitter {
       const dT = t0 !== undefined && t1 !== undefined ? t1 - t0 : null;
       if ((dT !== null && Math.abs(dT) >= REFOCUS_DELTA_C) || ageMin >= REFOCUS_MAX_MIN) {
         const why = dT !== null && Math.abs(dT) >= REFOCUS_DELTA_C ? `the forecast temperature has ${dT < 0 ? 'fallen' : 'risen'} ${Math.abs(dT).toFixed(1)} °C since the focus at ${hm(focus.at)}` : `the last focus was ${dur(ageMin)} ago (${hm(focus.at)})`;
-        out.push(`- refocus due: ${why}${focus.value !== undefined ? ` at position ${focus.value}` : ''}; check analyze_subs, and if the stars have grown: stop_stacking, autofocus, star_focus, start_stacking`);
+        out.push(`- refocus due: ${why}${focus.value !== undefined ? ` at position ${focus.value}` : ''}; check analyze_subs, and if the stars have grown: ${driverSteps().refocus}`);
       }
     }
     const recent = s.samples.filter((x) => x.at >= at - REJECT_WINDOW_MIN * 60e3);

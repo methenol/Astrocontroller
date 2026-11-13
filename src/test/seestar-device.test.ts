@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { Seestar, SeestarOperationError } from '../drivers/seestar/device.js';
 import { encodeHeader, IMG_TYPE } from '../drivers/seestar/frames.js';
 import { loadDriver, MCP_SERVER_NAMES } from '../drivers/index.js';
+import { j2000ToOfDate, ofDateToJ2000 } from '../astro/sky.js';
 import { FakeSeestar, S50_PRO } from './fake-seestar.js';
 
 const until = async (cond: () => boolean, ms = 3000) => {
@@ -57,7 +58,11 @@ describe('Seestar device', () => {
     await until(() => scope.state.mount.altDeg !== undefined);
     assert.equal(scope.state.device.model, 'Seestar S30');
     assert.equal(scope.state.mount.parked, true);
-    assert.deepEqual([scope.state.mount.raHours, scope.state.mount.decDeg, scope.state.mount.altDeg, scope.state.mount.azDeg], [1.5, 30, 45, 120]);
+    // the firmware answers JNow; the state carries J2000
+    const j = ofDateToJ2000(1.5, 30);
+    assert.ok(Math.abs(scope.state.mount.raHours! - j.raHours) < 1e-9 && Math.abs(scope.state.mount.decDeg! - j.decDeg) < 1e-9);
+    assert.ok(scope.state.mount.raHours! < 1.5 - 0.01, 'J2000 RA is ~1.4 min of time below the JNow RA in 2026');
+    assert.deepEqual([scope.state.mount.altDeg, scope.state.mount.azDeg], [45, 120]);
     // portrait, as the frames are read: chip_size [1080, 1920] is width × height
     assert.ok(scope.state.fov && Math.abs(scope.state.fov.h - 1.196) < 0.01 && Math.abs(scope.state.fov.v - 2.127) < 0.01);
     assert.deepEqual((scope.state.deviceState as { ap: unknown }).ap, { passwd: 'secret' });
@@ -92,7 +97,12 @@ describe('Seestar device', () => {
     assert.equal(r.goto.state, 'complete');
     assert.equal(r.stacking, 'not requested');
     const call = fake.calls.find((c) => c.method === 'iscope_start_view')!;
-    assert.deepEqual(call.params, { mode: 'star', selected_cam: 'View', target_ra_dec: [5.58, -5.39], target_name: 'M 42', lp_filter: false });
+    // the GoTo goes out in JNow (2026-11-13: J2000 sent as is put every target 15–22′ west of centre)
+    const { target_ra_dec, ...rest } = call.params as { target_ra_dec: [number, number] };
+    assert.deepEqual(rest, { mode: 'star', selected_cam: 'View', target_name: 'M 42', lp_filter: false });
+    const now = j2000ToOfDate(5.58, -5.39);
+    assert.ok(Math.abs(target_ra_dec[0] - now.raHours) < 1e-5 && Math.abs(target_ra_dec[1] - now.decDeg) < 1e-4);
+    assert.ok(target_ra_dec[0] > 5.58 + 0.02, 'precession since 2000 moves M 42 ~1.4 min of RA east');
     assert.equal(scope.isBusy(), null);
   });
 

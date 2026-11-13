@@ -119,6 +119,10 @@ class Manager:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.slots: dict[int, Slot] = {}
+        #: slots removed whose supervisor is still releasing its telescope: a new supervisor for the
+        #: same slot waits for it, or it finds the slot's control port taken ("Address already in
+        #: use", 2026-11-12) and Astrocontroller cannot reach it for Connect, Disconnect or the lease
+        self.retiring: dict[int, list[Slot]] = {}
         self.stopping = False
         self.token = os.environ.get("SEESTAR_TUNNEL_CONTROL_TOKEN", "")
         self.port = int(os.environ.get("SEESTAR_TUNNEL_MANAGER_PORT", "4709") or 4709)
@@ -177,6 +181,7 @@ class Manager:
         def run() -> None:
             if old:
                 self._stop(old)
+            self._wait_retired(n)
             with self.lock:
                 if self.slots.get(n) is new and new.wanted and not self.stopping:
                     self._spawn(new)
@@ -186,10 +191,38 @@ class Manager:
     def remove(self, n: int) -> bool:
         with self.lock:
             slot = self.slots.pop(n, None)
+            if slot:
+                self.retiring.setdefault(n, []).append(slot)
         if not slot:
             return False
-        threading.Thread(target=self._stop, args=(slot,), name=f"remove-{n}", daemon=True).start()
+
+        def run() -> None:
+            try:
+                self._stop(slot)
+            finally:
+                with self.lock:
+                    left = [s for s in self.retiring.get(n, []) if s is not slot]
+                    if left:
+                        self.retiring[n] = left
+                    else:
+                        self.retiring.pop(n, None)
+
+        threading.Thread(target=run, name=f"remove-{n}", daemon=True).start()
         return True
+
+    def _wait_retired(self, n: int) -> None:
+        """Wait until no removed supervisor of slot n is still running (it holds the slot's ports)."""
+        while True:
+            with self.lock:
+                busy = [s for s in self.retiring.get(n, []) if s.proc is not None and s.proc.poll() is None]
+            if not busy:
+                return
+            for s in busy:
+                assert s.proc is not None
+                try:
+                    s.proc.wait(STOP_WAIT_S + 5)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def stop_all(self) -> None:
         with self.lock:

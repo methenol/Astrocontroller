@@ -59,6 +59,9 @@ export const config = {
     wideRefreshS: env.num('SEESTAR_WIDE_REFRESH_S', 60, { min: 0, max: 3600 }),
     /** seestar-portfwd publishes the device's port 80 as 8080 on the host; on the Docker network it is 80 */
     httpPort: env.port('SEESTAR_HTTP_PORT', zwo && LOOPBACK.includes(seestarHost) ? 8080 : 80),
+    /** over ZWO: a second route to the file server (seestar-portfwd's fourth session), so downloads run
+     *  over two sessions at once; 0 = none */
+    httpAltPort: env.num('SEESTAR_HTTP_ALT_PORT', 0, { min: 0, max: 65535 }),
     /** PEM private key for the firmware 7.18+ handshake (extracted by you from the official app; never shipped here) */
     keyPath: env.str('SEESTAR_KEY_PATH', ''),
     autoSyncTimeLocation: env.bool('SEESTAR_AUTO_SYNC_TIME_LOCATION', true),

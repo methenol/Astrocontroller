@@ -97,6 +97,11 @@ function fakeFiles(tree: Record<string, SeestarEntry[]>, headers: Record<string,
       deleted.push(rel);
       return true;
     },
+    deleteMany: async (rels: string[]) => {
+      deleted.push(...rels);
+      return [];
+    },
+    routes: () => [80],
   } as unknown as SeestarFiles;
   return { files, deleted };
 }

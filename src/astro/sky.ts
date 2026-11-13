@@ -186,6 +186,43 @@ export function moonState(site: Site, when = new Date()) {
   };
 }
 
+const wrapHours = (h: number) => ((h % 24) + 24) % 24;
+
+/**
+ * A J2000 position on the equator and equinox of date ("JNow": precession and nutation to `when`).
+ * The Seestar's firmware works in JNow: its GoTo targets, its mount position and its plate-solve
+ * answers. Handing it J2000 unconverted points it off by the precession since 2000 (≈15–22′ in
+ * 2026, mostly in RA, verified against the plate-solved stacks of 2026-11-11/13).
+ */
+export function j2000ToOfDate(raHours: number, decDeg: number, when = new Date()): { raHours: number; decDeg: number } {
+  const t = A.MakeTime(when);
+  const s = A.SphereFromVector(A.RotateVector(A.Rotation_EQJ_EQD(t), A.VectorFromSphere(new A.Spherical(decDeg, raHours * 15, 1), t)));
+  return { raHours: wrapHours(s.lon / 15), decDeg: s.lat };
+}
+
+/** The J2000 position of a position on the equator and equinox of date (the inverse of j2000ToOfDate). */
+export function ofDateToJ2000(raHours: number, decDeg: number, when = new Date()): { raHours: number; decDeg: number } {
+  const t = A.MakeTime(when);
+  const s = A.SphereFromVector(A.RotateVector(A.Rotation_EQD_EQJ(t), A.VectorFromSphere(new A.Spherical(decDeg, raHours * 15, 1), t)));
+  return { raHours: wrapHours(s.lon / 15), decDeg: s.lat };
+}
+
+/**
+ * Where a target sits relative to the frame centre, both J2000: arcmin east (+) / west (−) and
+ * north (+) / south (−) of the centre, and the total.
+ */
+export function offsetFromCentre(targetRaH: number, targetDec: number, centreRaH: number, centreDec: number): { eastArcmin: number; northArcmin: number; totalArcmin: number } {
+  let dRaH = targetRaH - centreRaH;
+  if (dRaH > 12) dRaH -= 24;
+  if (dRaH < -12) dRaH += 24;
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  return {
+    eastArcmin: r1(dRaH * 15 * 60 * Math.cos((((targetDec + centreDec) / 2) * Math.PI) / 180)),
+    northArcmin: r1((targetDec - centreDec) * 60),
+    totalArcmin: r1(separationDeg(targetRaH, targetDec, centreRaH, centreDec) * 60),
+  };
+}
+
 /** Angular separation in degrees between two J2000 positions. */
 export function separationDeg(ra1H: number, dec1: number, ra2H: number, dec2: number): number {
   const d2r = Math.PI / 180;

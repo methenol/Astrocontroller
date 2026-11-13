@@ -43,6 +43,8 @@ export const DeviceSpecSchema = z.object({
   /** lower-case pieces of the model name the scope reports; the longest match wins */
   match: z.array(z.string()).default([]),
   optics: z.object({ apertureMm: pos, focalLengthMm: pos, design: z.string().optional() }),
+  /** the wide-angle lens, where the scope has one and its field is known */
+  wide: z.object({ focalLengthMm: pos.optional(), hFovDeg: pos, vFovDeg: pos }).optional(),
   sensor: z.object({
     name: z.string(),
     widthPx: z.number().int().positive(),

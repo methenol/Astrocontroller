@@ -101,6 +101,9 @@ class TransientError(Exception):
     """Worth another attempt after a backoff: the API, the network, the SDK, the scope itself."""
 
 
+#: how long a tunnel asked to stop on its stdin gets before the SIGINT fallback (it looks once a second)
+STDIN_STOP_S = 15.0
+
 def env_num(name: str, default: float, minimum: float = 0.0) -> float:
     try:
         value = float(os.environ.get(name, ""))
@@ -680,7 +683,8 @@ class Supervisor:
             self.refused = False
             self.connect_code = None
         child = subprocess.Popen(  # noqa: S603  (fixed argv; the credentials go only in the env)
-            argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            # stdin is how the tunnel is asked to stop ("q"): see _stop_child
+            argv, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             errors="replace",  # the SDK's output is not always UTF-8; a bad byte must not kill the reader
         )
         with self.cond:
@@ -842,9 +846,26 @@ class Supervisor:
             child, self.child = self.child, None
         if child is None:
             return
+        with self.cond:
+            up = self.banner  # the tunnel printed "ready": it is in its hold loop, which reads stdin
+        if up and child.poll() is None and child.stdin is not None:
+            # "q" on its stdin: the tunnel closes its sessions as ordinary code. A SIGINT delivered
+            # into qemu-arm while the SDK's threads ran crashed qemu before the close went out, and
+            # the scope then refused the next connect (-42) for ten minutes (2026-11-12).
+            log("stopping the tunnel (asking on its stdin: close the sessions, then exit)")
+            try:
+                child.stdin.write("q\n")
+                child.stdin.flush()
+                child.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                child.wait(STDIN_STOP_S)
+            except subprocess.TimeoutExpired:
+                pass  # still inside a Connect_Ex, which does not look at stdin: the signal below
         if child.poll() is None:
-            # Ctrl-C for the tunnel: it stops the port mappings, then aborts and disconnects.
-            log("stopping the tunnel (SIGINT: stop mappings, abort and disconnect the session)")
+            # Ctrl-C for the tunnel (one still connecting reads no stdin)
+            log("stopping the tunnel (SIGINT)")
             try:
                 child.send_signal(signal.SIGINT)
             except OSError:

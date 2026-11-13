@@ -29,6 +29,8 @@
     <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></symbol>
     <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 12h11M4 17h7"/></symbol>
     <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8.5h13l-3.5-3.5M20 15.5H7l3.5 3.5"/></symbol>
     <symbol id="i-rain" viewBox="0 0 24 24"><path d="M7 15.5a4.5 4.5 0 0 1-.6-8.96A5.5 5.5 0 0 1 17 7a4 4 0 0 1 .5 8.5z"/><path d="M8 18.5l-1 2M12 18.5l-1 2M16 18.5l-1 2"/></symbol>
@@ -105,6 +107,7 @@
             <figcaption><span class="view-name">Tele</span><span class="view-meta" id="meta-main"></span></figcaption>
             <div class="view-empty" id="empty-main">waiting for stream…</div>
             <div class="view-buttons">
+              <button class="mini single-only" id="btn-stream-pause" title="Pause the live stream (saves bandwidth; the agent and tools still get frames)" aria-label="Pause the live stream" aria-pressed="false"><svg class="i" aria-hidden="true"><use href="#i-pause"/></svg></button>
               <button class="mini" data-swap="tele" aria-label="Main view: telephoto">Tele</button>
               <button class="mini" data-swap="wide" aria-label="Main view: wide angle">Wide</button>
               <button class="mini" data-swap="stack" aria-label="Main view: live stack">Stack</button>

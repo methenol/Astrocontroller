@@ -32,6 +32,7 @@ import { seestarFacts } from './acquisition.js';
 import type { McpSpec } from '../types.js';
 import { NUDGE_MAX_PERCENT, NUDGE_MAX_S, type Seestar } from './device.js';
 import { NOMINAL_FOV } from './focus.js';
+import { pair, withJ2000 } from './model.js';
 import { registerSeestarMediaTools } from './mcp-media.js';
 import { registerSeestarParityTools } from './mcp-parity.js';
 import type { SeestarMedia } from './web.js';
@@ -45,6 +46,9 @@ Start with seestar_status. The Seestar runs its own pipeline: goto_target slews,
 The scope exposes one camera at a time (tele or wide): the one chosen as the main view in the web UI, or with select_camera. Tools that need the other camera borrow it for the frame and give it back.
 Only one operation runs at a time. Over ZWO Telescope Network only one remote session exists per telescope: connecting takes it from the official app.
 Coordinates are J2000 (RA in hours, Dec in degrees). Never point at the Sun without the user confirming a solar filter.`;
+
+/** The target counts as centred within this fraction of the frame's short side (≈4′ on an S50). */
+const CENTRE_TOLERANCE = 0.05;
 
 export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarMedia, nights?: StarfrontNights | null, night?: NightServices | null): McpSpec {
   return {
@@ -115,6 +119,37 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
   const fov = () => scope.state.fov ?? NOMINAL_FOV;
   const plateScale = (width: number) => (fov().h * 3600) / width;
   const cameras = () => ({ selected: scope.selected, exposing: scope.exposing, tele: scope.liveNote('tele'), wide: scope.liveNote('wide') });
+  /**
+   * How far the GoTo target sits from the frame centre, from the scope's newest completed plate
+   * solve (since `since`), all J2000. The firmware's own "complete" is not this measurement.
+   */
+  const centring = (since = 0) => {
+    const solves = ['PlateSolve', 'PlateSolve.step'].map((k) => scope.state.ops[k]).filter((o) => o && o.state === 'complete' && o.at >= since && pair(o.detail?.ra_dec));
+    const op = solves.sort((a, b) => b!.at - a!.at)[0];
+    const target = scope.state.view.targetRaDec;
+    if (!op) return { measured: false, note: 'no plate solve since the GoTo: run plate_solve to measure the framing' };
+    // ops details carry J2000 already (model.withJ2000)
+    const [ra, dec] = pair(op.detail!.ra_dec)!;
+    const frameCentre = { raHours: +ra.toFixed(5), decDeg: +dec.toFixed(4) };
+    if (!target) return { measured: true, frameCentre, note: 'no GoTo target known to compare with' };
+    const off = sky.offsetFromCentre(target[0], target[1], ra, dec);
+    const shortArcmin = Math.min(fov().h, fov().v) * 60;
+    const tolArcmin = +(shortArcmin * CENTRE_TOLERANCE).toFixed(1);
+    const centred = off.totalArcmin <= tolArcmin;
+    return {
+      measured: true,
+      solvedAt: localTime(op.at),
+      target: { name: scope.state.view.target, raHours: +target[0].toFixed(5), decDeg: +target[1].toFixed(4) },
+      frameCentre,
+      targetFromCentre: off,
+      percentOfShortSide: Math.round((off.totalArcmin / shortArcmin) * 100),
+      toleranceArcmin: tolArcmin,
+      centred,
+      verdict: centred
+        ? `centred: the target is ${off.totalArcmin}′ from the frame centre (tolerance ${tolArcmin}′)`
+        : `NOT CENTRED: the target is ${off.totalArcmin}′ from the frame centre (${Math.abs(off.eastArcmin)}′ ${off.eastArcmin >= 0 ? 'east' : 'west'}, ${Math.abs(off.northArcmin)}′ ${off.northArcmin >= 0 ? 'north' : 'south'}; tolerance ${tolArcmin}′): re-centre before stacking`,
+    };
+  };
 
   // ---- status & link -------------------------------------------------------
 
@@ -221,9 +256,10 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
         const pos = sky.altAz(loc, ra, dec);
         if (pos.altitude < 0) throw new Error(`${name} is below the horizon (altitude ${pos.altitude.toFixed(1)}°)`);
       }
+      const startedAt = Date.now();
       const r = await scope.gotoTarget({ raHours: ra, decDeg: dec, name, lpFilter: a.lp_filter, stack: a.stack });
       await scope.readPointing().catch(() => {});
-      return json({ target: name, raHours: ra, decDeg: dec, goto: { state: r.goto.state, seconds: Math.round(r.goto.ms / 1000) }, stacking: r.stacking, mount: scope.state.mount, cameras: cameras() });
+      return json({ target: name, raHours: ra, decDeg: dec, goto: { state: r.goto.state, seconds: Math.round(r.goto.ms / 1000) }, centring: centring(startedAt), stacking: r.stacking, mount: scope.state.mount, cameras: cameras() });
     },
   );
 
@@ -253,7 +289,16 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
 
   tool('open_arm', 'Raise the arm out of park to the horizon position; blocks until done.', {}, async () => json(await scope.openArm()));
 
-  tool('plate_solve', 'Plate-solve the current view: where the scope really points, and the field.', {}, async () => json(await scope.plateSolve()));
+  tool(
+    'plate_solve',
+    'Plate-solve the current view: where the scope really points (J2000), the field, and `centring`: how far the GoTo target is from the frame centre (arcmin east/north), with a centred / NOT CENTRED verdict. The measurement for the framing check before stacking.',
+    {},
+    async () => {
+      const startedAt = Date.now();
+      const r = await scope.plateSolve();
+      return json({ state: r.state, seconds: Math.round(r.ms / 1000), centring: centring(startedAt), solve: withJ2000(r.event, Date.now()) });
+    },
+  );
 
   tool('polar_align', 'Run the Seestar polar alignment (EQ mode on a wedge): blocks until it reports done; the result carries the deviation (EqModePA x/y, degrees) and the correction (pitch up/down, rotate clockwise/counter-clockwise).', {}, async () => json(await scope.polarAlign()));
 

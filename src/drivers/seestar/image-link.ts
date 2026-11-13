@@ -37,6 +37,11 @@ export const TUNNEL_KICK_MS = 45_000;
 /** over the tunnel a frame can be held up past 45 s; a redial throws it away and costs ~30 s to restart */
 export const TUNNEL_STREAM_SILENCE_MS = 150_000;
 const KICKS = 2;
+/**
+ * While the stream is paused, a preview grab resumes it for the frame it needs; it stops again this
+ * long after the last one, so a run of grabs (a survey, a focus sweep) does not restart it each time.
+ */
+const PAUSED_GRAB_LINGER_MS = 20_000;
 const STREAM_SILENCE_MS = 45_000;
 const FIRST_ID = 1;
 
@@ -57,6 +62,8 @@ export interface ImageLinkStatus {
   liveFrames: number;
   lastFrameAt: number | null;
   note: string | null;
+  /** the viewer paused the live stream (to save bandwidth); preview grabs still get their frames */
+  paused: boolean;
 }
 
 /** Does a frame of this type answer a grab of this kind? */
@@ -87,6 +94,12 @@ export class SeestarImageLink extends SafeEmitter {
   private flowing = false;
   /** picture bytes arrived since the kick was last armed: a frame is on its way, do not restart it */
   private gotBytes = false;
+  /**
+   * The live stream is paused from the web UI: no begin_streaming while nothing needs a frame. A
+   * preview grab (an agent's or a tool's) resumes it until PAUSED_GRAB_LINGER_MS after the last one.
+   */
+  private paused = false;
+  private linger: NodeJS.Timeout | null = null;
   private redial: NodeJS.Timeout | null = null;
   private redialMs = FIRST_REDIAL_MS;
   private _note: string | null = null;
@@ -125,7 +138,7 @@ export class SeestarImageLink extends SafeEmitter {
   }
 
   status(): ImageLinkStatus {
-    return { camera: this.camera, connected: this.isConnected, streaming: this.isStreaming, liveFrames: this.liveFrames, lastFrameAt: this.last?.at ?? null, note: this._note };
+    return { camera: this.camera, connected: this.isConnected, streaming: this.isStreaming, liveFrames: this.liveFrames, lastFrameAt: this.last?.at ?? null, note: this._note, paused: this.paused };
   }
 
   open(): void {
@@ -155,11 +168,57 @@ export class SeestarImageLink extends SafeEmitter {
   /** Ask the camera for live frames; remembered across redials. */
   startStream(): void {
     this.wantStream = true;
-    if (this.isConnected && !this.isStreaming) {
+    this.apply();
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Pause (or resume) the live stream; grabs keep working. */
+  setPaused(on: boolean): void {
+    if (on === this.paused) return;
+    this.paused = on;
+    this.apply();
+    this.changed();
+  }
+
+  private get previewWanted(): boolean {
+    return this.waiters.some((w) => w.id === null);
+  }
+
+  /** Start or stop the stream to match `wantStream`, the pause and the grabs waiting for a frame. */
+  private apply(): void {
+    if (!this.isConnected) return;
+    if (this.wantStream && (!this.paused || this.previewWanted)) {
+      if (this.linger) clearTimeout(this.linger);
+      this.linger = null;
+      if (this.isStreaming) return;
       this.isStreaming = true;
+      this.kicks = 0;
       this.begin();
       this.changed();
+      return;
     }
+    if (!this.isStreaming) return;
+    if (!this.wantStream) {
+      this.halt();
+      return;
+    }
+    this.linger ??= setTimeout(() => {
+      this.linger = null;
+      if (this.isConnected && this.isStreaming && this.paused && !this.previewWanted) this.halt();
+    }, PAUSED_GRAB_LINGER_MS);
+  }
+
+  private halt(): void {
+    if (this.linger) clearTimeout(this.linger);
+    this.linger = null;
+    this.isStreaming = false;
+    this.write('stop_streaming');
+    this.disarmSilence();
+    this.disarmKick();
+    this.changed();
   }
 
   /**
@@ -169,6 +228,10 @@ export class SeestarImageLink extends SafeEmitter {
   restartStream(): void {
     this.wantStream = true;
     if (!this.isConnected) return;
+    if (this.paused && !this.previewWanted) {
+      this.apply();
+      return;
+    }
     if (this.isStreaming) this.write('stop_streaming');
     this.isStreaming = true;
     this.kicks = 0;
@@ -211,13 +274,7 @@ export class SeestarImageLink extends SafeEmitter {
 
   stopStream(): void {
     this.wantStream = false;
-    if (this.isConnected && this.isStreaming) {
-      this.isStreaming = false;
-      this.write('stop_streaming');
-      this.disarmSilence();
-      this.disarmKick();
-      this.changed();
-    }
+    this.apply();
   }
 
   /**
@@ -239,6 +296,7 @@ export class SeestarImageLink extends SafeEmitter {
         }, timeoutMs),
       };
       this.waiters.push(w);
+      if (id === null) this.apply();
       if (id !== null) this.write(kind === 'stacked' ? 'get_stacked_img' : 'get_current_img', id);
     });
   }
@@ -264,11 +322,7 @@ export class SeestarImageLink extends SafeEmitter {
       this.reader.reset();
       this.heartbeat = setInterval(() => this.write('test_connection'), HEARTBEAT_MS);
       log.info(`${this.camera} picture socket connected (${this.host}:${this.port})`);
-      if (this.wantStream) {
-        this.isStreaming = true;
-        this.kicks = 0;
-        this.begin();
-      }
+      this.apply();
       this.changed();
     });
     socket.on('data', (chunk: Buffer) => {
@@ -369,6 +423,7 @@ export class SeestarImageLink extends SafeEmitter {
   private forget(w: Waiter): void {
     const i = this.waiters.indexOf(w);
     if (i >= 0) this.waiters.splice(i, 1);
+    if (w.id === null) this.apply();
   }
 
   private armSilence(): void {
@@ -392,6 +447,8 @@ export class SeestarImageLink extends SafeEmitter {
     this.heartbeat = null;
     this.disarmSilence();
     this.disarmKick();
+    if (this.linger) clearTimeout(this.linger);
+    this.linger = null;
     const was = this.isConnected;
     if (socket) {
       socket.removeAllListeners();

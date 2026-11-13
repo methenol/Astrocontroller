@@ -13,8 +13,9 @@ import type { Seestar } from './device.js';
 const log = logger('seestar.focus');
 
 export const NOMINAL_FOV = { h: 1.2, v: 2.13 };
-const DEFAULT_RANGE = 40;
-const DEFAULT_STEP = 10;
+/** The owner's fine tune: ±10 focus steps at every step (21 samples). */
+const DEFAULT_RANGE = 10;
+const DEFAULT_STEP = 1;
 const MAX_POINTS = 21;
 const SETTLE_MS = 800;
 const FRAMES_PER_POSITION = 2;
@@ -134,7 +135,7 @@ export async function seestarFocusSweep(scope: Seestar, o: SeestarSweepOptions =
   const final = await measureAt(finalPosition).catch(() => undefined);
   const startHfr = Number.isFinite(start.hfrPx) ? start.hfrPx : best.hfrPx;
   const improvementPct = Math.round(((startHfr - best.hfrPx) / startHfr) * 100);
-  if (bestAtEdge) notes.push('the sharpest position was at the edge of the sweep: the best focus may lie beyond it, run it again centred there');
+  if (bestAtEdge) notes.push(`PEAK AT THE EDGE: the sharpest position (${best.position}) is at the edge of the sweep, so the best focus may lie beyond it: run star_focus again with center=${best.position} and the same range and step, until the peak is inside the sweep`);
   const verdict = `${o.apply === false ? 'Measured' : 'Focused'}: sharpest at ${best.position} (HFR ${best.hfrPx.toFixed(2)} px${best.hfrArcsec ? `, ${best.hfrArcsec.toFixed(1)}″` : ''})${fitted ? `, fitted ${fitted.toFixed(0)}` : ''}; the focuser is at ${finalPosition}${final && !final.error ? ` (HFR ${final.hfrPx.toFixed(2)} px)` : ''}.`;
   return { start, samples, best, finalPosition, final, fittedPosition: fitted ?? undefined, bestAtEdge, improvementPct, verdict, notes, settings: 'tele full-resolution frames', elapsedS: Math.round((Date.now() - startedAt) / 1000), arcsecPerPx: best.arcsecPerPx };
 }

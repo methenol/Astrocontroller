@@ -217,8 +217,8 @@ export function registerSeestarMediaTools(tool: ToolFn, scope: Seestar, media: S
 
   tool(
     'star_focus',
-    "Tune focus on the stars: step the focuser around a position (default where it is), measure every step on a full-resolution tele frame, fit the curve, and stop on the sharpest. Blocks for a few minutes. Run the Seestar's autofocus first for the wide search; this is the fine one.",
-    { center: z.number().int().min(0).optional(), range: z.number().int().min(5).max(300).optional().describe('focus steps either side (default 40)'), step: z.number().int().min(1).max(100).optional().describe('focus steps between samples (default 10)'), apply: z.boolean().optional() },
+    "Tune focus on the stars: step the focuser around a position (default where it is), measure every step on a full-resolution tele frame, fit the curve, and stop on the sharpest. Blocks for a few minutes. Run the Seestar's autofocus first for the wide search; this is the fine one (±10 steps at step 1 by default). bestAtEdge = the peak is at the sweep's edge: run it again centred on the best position.",
+    { center: z.number().int().min(0).optional(), range: z.number().int().min(5).max(300).optional().describe('focus steps either side (default 10)'), step: z.number().int().min(1).max(100).optional().describe('focus steps between samples (default 1)'), apply: z.boolean().optional() },
     async (o) => {
       const r = await seestarFocusSweep(scope, o);
       const { finalImage: _img, ...rest } = r;

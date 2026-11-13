@@ -23,7 +23,7 @@ import { config, observerLocation, requireObserverLocation, type ObserverLocatio
 import { errMsg, logger } from '../../log.js';
 import { SafeEmitter } from '../../util/events.js';
 import { writeFileAtomic } from '../../util/fs.js';
-import { altAz, bodyAlt, bodyRaDec, raDecFromAltAz, separationDeg } from '../../astro/sky.js';
+import { altAz, bodyAlt, bodyRaDec, j2000ToOfDate, ofDateToJ2000, raDecFromAltAz, separationDeg } from '../../astro/sky.js';
 import { correctionText, polarSummary, seestarCorrection } from '../../astro/polar.js';
 import type { FloatImage } from '../../media/images.js';
 import type { TelescopeDevice } from '../types.js';
@@ -451,6 +451,18 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   }
 
   /** Why a camera shows no live picture right now, or null when it should. */
+  /** The viewer paused the live picture stream (both cameras); grabs still resume it for their frames. */
+  get streamPaused(): boolean {
+    return this.images.tele.isPaused;
+  }
+
+  setStreamPaused(on: boolean): void {
+    log.info(`live stream ${on ? 'paused' : 'resumed'} from the web UI`);
+    this.images.tele.setPaused(on);
+    this.images.wide.setPaused(on);
+    this.changed();
+  }
+
   liveNote(camera: Camera): string | null {
     if (this.st.released) return 'disconnected from the Seestar (press Connect)';
     if (!this.st.connected) return this.tunnel && !this.tunnel.up ? `the ZWO tunnel is ${this.st.tunnel?.phase ?? 'down'}${this.st.tunnel?.detail ? ` (${this.st.tunnel.detail})` : ''}` : 'the Seestar is not connected';
@@ -462,6 +474,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       const why = this.borrowed ? ` for ${this.operation ?? 'a tool'}` : this.isStacking() ? ' (stacking)' : '';
       return `${exposing ?? 'the other'} camera is selected${why}${this.wanted === camera ? '; switching back when it is free' : ' — make this the main view to select it'}`;
     }
+    if (this.streamPaused) return 'live stream paused (press play to resume)';
     const stage = this.viewOf(camera).stage;
     if (stage && stage !== 'ContinuousExposure' && stage !== 'Stack') return `${this.operation ?? stage} in progress (the picture is the last frame)`;
     const sock = this.images[camera];
@@ -524,7 +537,11 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   private async doReadPointing(): Promise<SeestarState['mount']> {
     const equ = await this.call('scope_get_equ_coord', undefined, { allowError: true });
     const rd = pairOf(equ.result, 'ra', 'dec');
-    if (rd) [this.st.mount.raHours, this.st.mount.decDeg] = rd;
+    // the firmware answers in JNow; everything here is J2000
+    if (rd) {
+      const j = ofDateToJ2000(rd[0], rd[1]);
+      [this.st.mount.raHours, this.st.mount.decDeg] = [j.raHours, j.decDeg];
+    }
     const hor = await this.call('scope_get_horiz_coord', undefined, { allowError: true });
     const aa = pairOf(hor.result, 'alt', 'az');
     if (aa) [this.st.mount.altDeg, this.st.mount.azDeg] = aa;
@@ -801,7 +818,9 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
               if (this.viewRunning() && this.exposing !== 'tele') await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
               this.stackTarget = g.name;
               this.pointingChanged = true;
-              const res = await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF.tele, target_ra_dec: [g.raHours, g.decDeg], target_name: g.name, lp_filter: !!g.lpFilter, ...(g.mosaic ? { mosaic: g.mosaic } : {}) }, { timeoutMs: VIEW_TIMEOUT_MS });
+              // the firmware's GoTo takes JNow: J2000 as is lands every target off by the precession since 2000
+              const now = j2000ToOfDate(g.raHours, g.decDeg);
+              const res = await this.call('iscope_start_view', { mode: 'star', selected_cam: VIEW_OF.tele, target_ra_dec: [now.raHours, now.decDeg], target_name: g.name, lp_filter: !!g.lpFilter, ...(g.mosaic ? { mosaic: g.mosaic } : {}) }, { timeoutMs: VIEW_TIMEOUT_MS });
               this.st.camera = 'tele';
               this.st.view.state = 'working';
               this.st.view.mode = 'star';
@@ -837,7 +856,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     if (this.st.mount.parked) await this.openArm();
     this.stackTarget = null;
     this.pointingChanged = true;
-    return Seestar.ok('slew', await this.follow('slew', ['ScopeGoto'], () => this.call('scope_goto', [raHours, decDeg]), GOTO_TIMEOUT_MS, () => true));
+    const now = j2000ToOfDate(raHours, decDeg);
+    return Seestar.ok('slew', await this.follow('slew', ['ScopeGoto'], () => this.call('scope_goto', [now.raHours, now.decDeg]), GOTO_TIMEOUT_MS, () => true));
   }
 
   slewAltAz(azDeg: number, altDeg: number): Promise<OperationResult> {
@@ -1337,12 +1357,17 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       if (!this.liveStage(camera)) throw new Error(`a raw ${camera} frame needs the ${camera} camera exposing (${this.liveNote(camera) ?? 'it is changing stage'})`);
       await this.setTransferMode(camera, 'Raw');
       try {
+        // JPEGs already exposed or in flight keep arriving after the switch, more of them over the
+        // ZWO tunnel and with the wide's fast auto-exposed frames than the first RAW takes to expose
+        // (2026-11-13: an obstruction survey failed after three JPEGs): skip them until the deadline
         const until = Date.now() + timeoutMs;
-        for (let n = 0; n < 3 && Date.now() < until; n++) {
+        let jpegs = 0;
+        while (Date.now() < until) {
           const f = await this.images[camera].grab('preview', until - Date.now());
           if (f.header.imgType === IMG_TYPE.preview) return f;
+          jpegs++;
         }
-        throw new Error(`the ${camera} camera kept sending JPEG frames after the switch to RAW`);
+        throw new Error(`the ${camera} camera kept sending JPEG frames after the switch to RAW (${jpegs} in ${Math.round(timeoutMs / 1000)} s)`);
       } finally {
         await this.setTransferMode(camera, 'Jpg').catch((e) => log.warn(`could not put the ${camera} camera's live frames back to JPEG: ${errMsg(e)}`));
       }

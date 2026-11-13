@@ -51,8 +51,9 @@ Filter is not part of the profile, so the same darks serve every filter. Duo-Ban
 5. Run **session-qc** on the first cohort (12 subs < 60 s, 20 subs at 60 s: two dither blocks).
 
 ## Allowed adaptation during a session
-- EQ-60 → EQ-30 if trailing or rejection is high.
+- Early in the stack (the first cohort): the corrections `acquisition_measure action=check` and `sub_length` measure (SHORTEN, LENGTHEN), reported in the journal with the measurement.
+- Later: a shorter sub (e.g. EQ-60 → EQ-30) when trailing or rejection is high because of wind or cloud, with corroborating evidence (`weather_forecast` gusts or cloud, the wide view), reported in the journal.
 - Stop / pause for clouds (keep the settings; do not touch gain).
 - Refocus.
 
-Nothing else. Write what happened in `session-log.jsonl` (see session-qc), so experiments can use it later.
+Nothing else. A new sub length needs a dark master for it (`dark_frames action=list`). Write what happened in `session-log.jsonl` (see session-qc), so experiments can use it later.

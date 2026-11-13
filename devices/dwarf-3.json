@@ -5,6 +5,7 @@
   "driver": "dwarf",
   "match": ["dwarf 3", "dwarf3", "dwarf_3"],
   "optics": { "apertureMm": 35, "focalLengthMm": 150, "design": "6-element apochromat" },
+  "wide": { "focalLengthMm": 6.7, "hFovDeg": 45, "vFovDeg": 26 },
   "sensor": {
     "name": "Sony IMX678 Starvis 2 (1/1.8\")",
     "widthPx": 3840,

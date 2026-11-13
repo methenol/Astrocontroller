@@ -22,7 +22,7 @@ After the first ~6 subs of a normal target, with the Moon down and the target ab
 Repeat on two more nights for the site's sky. Moonlit or low cohorts are recorded but do not count toward the site.
 
 ## 3. During a capture
-`acquisition_measure action=check session=latest` after the first cohort: SHORTEN / REFOCUS act now; LENGTHEN only with the owner's leave. It records sky and seeing samples too.
+`acquisition_measure action=check session=latest` after the first cohort: SHORTEN / LENGTHEN / REFOCUS are acted on now, early in the stack, never midway through it (system prompt P2 step 8); report the change and the measurement behind it with `journal action=note`. It records sky and seeing samples too.
 
 ## 4. Sub length (once per filter and gain in use; again when the sky or the season changes)
 `sub_length action=analyze session=latest` runs Deep Sky Detail's Sub Length Calculator on the newest sub: it fetches the dark master of the sub's exposure and gain from CALI_FRAME itself (two `_stack_1` single darks, when the scope has them, also give the read noise by their pair difference; a master gives the offset only and the read noise is the stored one — the result says which). Read:

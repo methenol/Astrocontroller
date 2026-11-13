@@ -119,4 +119,4 @@ export function withNightPlan(device: DutyDevice, night: () => NightServices | n
   };
 }
 
-export { PLAN_OBJECTIVE } from './service.js';
+export { planObjective } from './service.js';

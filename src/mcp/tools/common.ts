@@ -10,6 +10,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { config } from '../../config.js';
+import { pickDevice } from '../../astro/acquisition/devices.js';
 import { errMsg, logger } from '../../log.js';
 import type { Dwarf } from '../../drivers/dwarf/device.js';
 import * as http from '../../drivers/dwarf/http.js';
@@ -127,7 +128,22 @@ export function capturedLine(img: FloatImage): string {
 
 export const localTime = (ms: number | Date = Date.now()) => new Date(ms).toLocaleString('en-US', { timeZone: config.observer.timezone });
 
-export const cameraArg = z.enum(['tele', 'wide']).describe('tele = 150mm telephoto (2.95°×1.66° FOV), wide = 6.7mm wide-angle (45°×26°)');
+/** The lenses in words, from the device spec file this driver runs (PLAN_DEVICE, else the driver's first). */
+function lensesText(): string {
+  try {
+    const { spec } = pickDevice({ driver: config.telescope.driver as 'dwarf' | 'seestar' });
+    const f = spec.optics.focalLengthMm;
+    const side = (px: number) => (2 * Math.atan((px * spec.sensor.pixelUm) / 1000 / 2 / f) * 180) / Math.PI;
+    const long = side(Math.max(spec.sensor.widthPx, spec.sensor.heightPx));
+    const short = side(Math.min(spec.sensor.widthPx, spec.sensor.heightPx));
+    const w = spec.wide;
+    const wide = w ? `${w.focalLengthMm ? `${w.focalLengthMm}mm ` : ''}wide-angle (${w.hFovDeg}°×${w.vFovDeg}°)` : 'the wide-angle lens';
+    return `tele = ${f}mm telephoto (${long.toFixed(2)}°×${short.toFixed(2)}° FOV), wide = ${wide}`;
+  } catch {
+    return 'tele = the telephoto, wide = the wide-angle lens';
+  }
+}
+export const cameraArg = z.enum(['tele', 'wide']).describe(lensesText());
 
 export const cropArg = z
   .object({

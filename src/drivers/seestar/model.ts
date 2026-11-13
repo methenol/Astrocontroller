@@ -11,6 +11,7 @@
 import type { LinkHealth } from './link.js';
 import type { TunnelStatus } from './tunnel.js';
 import type { Camera } from './frames.js';
+import { ofDateToJ2000 } from '../../astro/sky.js';
 
 /** 'ended' is ours, never the scope's: see reconcileLostOps */
 export const TERMINAL_STATES = new Set(['complete', 'fail', 'cancel', 'ended']);
@@ -121,6 +122,36 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== 
 const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
 export const pair = (v: unknown): [number, number] | undefined => (Array.isArray(v) && v.length >= 2 && num(v[0]) !== undefined && num(v[1]) !== undefined ? [v[0], v[1]] : undefined);
 
+/** A firmware position (JNow: equator and equinox of date) as J2000, which is what the rest of the app uses. */
+export function j2000Pair(rd: [number, number] | undefined, at = Date.now()): [number, number] | undefined {
+  if (!rd) return undefined;
+  const j = ofDateToJ2000(rd[0], rd[1], new Date(at));
+  return [j.raHours, j.decDeg];
+}
+
+/** The firmware's position fields: JNow pairs, [RA hours, Dec degrees]. */
+const RADEC_KEYS = new Set(['ra_dec', 'cur_ra_dec', 'target_ra_dec']);
+
+/**
+ * A copy of what the scope sent with its positions in J2000 (the app's frame): each `ra_dec`,
+ * `cur_ra_dec` and `target_ra_dec` pair converted, the firmware's own JNow value kept beside it as
+ * `<key>_jnow`. Kept for display (ops, the device state), so that nothing read there is JNow
+ * compared with a J2000 target (≈20′ apart in 2026).
+ */
+export function withJ2000(v: unknown, at = Date.now(), depth = 0): unknown {
+  if (depth > 6 || !v || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map((x) => withJ2000(x, at, depth + 1));
+  const out: Obj = {};
+  for (const [k, x] of Object.entries(v as Obj)) {
+    const rd = RADEC_KEYS.has(k) ? pair(x) : undefined;
+    if (rd) {
+      out[k] = j2000Pair(rd, at)!.map((n, i) => +n.toFixed(i ? 5 : 6));
+      out[`${k}_jnow`] = x;
+    } else out[k] = withJ2000(x, at, depth + 1);
+  }
+  return out;
+}
+
 /** Field of view (degrees) from the sensor and focal length. */
 export function fovFromOptics(chip: [number, number] | undefined, pixelUm: number | undefined, focalMm: number | undefined): { h: number; v: number } | null {
   if (!chip || !pixelUm || !focalMm) return null;
@@ -132,7 +163,7 @@ export function fovFromOptics(chip: [number, number] | undefined, pixelUm: numbe
 }
 
 export function applyDeviceState(st: SeestarState, r: Obj): void {
-  st.deviceState = r;
+  st.deviceState = withJ2000(r) as Obj;
   const d = obj(r.device);
   if (d) {
     st.device.name = str(d.name) ?? st.device.name;
@@ -208,7 +239,7 @@ export function applyView(view: ViewState, v: Obj): void {
   view.targetType = str(v.mode) ? str(v.target_type) : view.targetType;
   view.stage = str(v.stage) ?? view.stage;
   view.target = str(v.target_name) ?? view.target;
-  view.targetRaDec = pair(v.target_ra_dec) ?? view.targetRaDec;
+  view.targetRaDec = j2000Pair(pair(v.target_ra_dec)) ?? view.targetRaDec;
   view.lpFilter = bool(v.lp_filter) ?? view.lpFilter;
   view.gain = num(v.gain) ?? view.gain;
   if (view.state && TERMINAL_STATES.has(view.state)) view.stage = undefined;
@@ -237,7 +268,7 @@ export function applyEvent(st: SeestarState, e: Obj): void {
   const outer = isOuter(e);
   if (state) {
     const key = TERMINAL_STATES.has(state) && !outer && st.ops[name] && !TERMINAL_STATES.has(st.ops[name]!.state) && st.ops[name]!.outer ? `${name}.step` : name;
-    st.ops[key] = { state, at, outer, error: str(e.error), code: num(e.code), detail: e };
+    st.ops[key] = { state, at, outer, error: str(e.error), code: num(e.code), detail: withJ2000(e, at) as Obj };
   }
   if (STAGE_EVENTS.has(name) && state) {
     const view = st[viewOfEvent(e)];
@@ -290,7 +321,7 @@ export function applyEvent(st: SeestarState, e: Obj): void {
       else if (state && TERMINAL_STATES.has(state)) st.mount.moving = undefined;
       break;
     case 'ScopeGoto': {
-      const rd = pair(e.cur_ra_dec);
+      const rd = j2000Pair(pair(e.cur_ra_dec), at);
       if (rd) [st.mount.raHours, st.mount.decDeg] = rd;
       if (state === 'working') {
         st.mount.parked = false;

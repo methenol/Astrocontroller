@@ -125,7 +125,7 @@ function modeName(v: SeestarState['view']): string | undefined {
 const gb = (mb: number | undefined) => (mb === undefined ? undefined : +(mb / 1024).toFixed(1));
 
 /** The Seestar's state in the UI's field names; the fields it has no equivalent of are left out. */
-export function projectState(scope: Pick<Seestar, 'state' | 'isBusy' | 'selected' | 'exposing'>): WebTelescope['state'] {
+export function projectState(scope: Pick<Seestar, 'state' | 'isBusy' | 'selected' | 'exposing' | 'streamPaused'>): WebTelescope['state'] {
   const st = scope.state;
   const busy = scope.isBusy();
   const stackRunning = isStacking(st);
@@ -165,7 +165,7 @@ export function projectState(scope: Pick<Seestar, 'state' | 'isBusy' | 'selected
     mount: st.mount,
     alert: st.alert,
     // which camera the scope exposes, and which one the UI chose (they differ while something borrows the other)
-    camera: { selected: scope.selected, exposing: scope.exposing },
+    camera: { selected: scope.selected, exposing: scope.exposing, streamPaused: scope.streamPaused },
   } as WebTelescope['state'];
 }
 
@@ -395,6 +395,16 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
     api.get('/seestar/tunnel', route(async () => scope.tunnel?.status() ?? null));
     api.post('/seestar/tunnel/restart', route(async () => scope.tunnel?.restart()));
     api.get('/seestar/zwo-devices', route(async () => listDevices()));
+    // pause / resume the live picture stream (saves the ZWO link's bandwidth); agent operations
+    // that need a frame still get one
+    api.post(
+      '/seestar/stream',
+      route(async (req) => {
+        const b = body(req, z.object({ paused: z.boolean() }));
+        scope.setStreamPaused(b.paused);
+        return { paused: scope.streamPaused };
+      }),
+    );
     api.post(
       '/seestar/camera',
       route(async (req) => {
