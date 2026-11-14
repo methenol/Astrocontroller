@@ -9,6 +9,23 @@ export function nightKey(site: sky.Site, at: Date, tz = config.observer.timezone
   return sky.localDate(w.sunset ?? w.darkStart ?? at, tz);
 }
 
+/**
+ * The night a journal entry belongs to: the local date of the evening, turning over at local noon
+ * rather than at dawn. nightKey moves on to the coming night the moment the darkness ends, which is
+ * right for the plan but not for the record: the duty ending at dawn, the closing note, a hold set
+ * in twilight, the scope dropping off the network in the morning all belong to the night that just
+ * ended, and filed under the next one they stretched its span back to the morning before.
+ */
+export function journalNight(at: Date | number, tz = config.observer.timezone): string {
+  const when = new Date(at);
+  const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(when));
+  const date = sky.localDate(when, tz);
+  if (hour >= 12) return date;
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /** The local date of a library session stamp ("2026-10-28T01:12:00", the scope's wall clock) as a night key: before noon is the previous evening. */
 export function nightOfStamp(stamp: string): string | null {
   const m = stamp.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})/);

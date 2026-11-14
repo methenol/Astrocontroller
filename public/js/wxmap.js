@@ -121,7 +121,7 @@ export class WxMap {
   paint() {
     this.layers.forEach((l, i) => (l.hidden = i !== this.index));
     const f = this.frames[this.index];
-    this.timeEl.textContent = `${f?.label ?? ''}${this.index === this.frames.length - 1 ? ' (latest)' : ''}${this.note ? ` · ${this.note}` : ''}`;
+    this.timeEl.textContent = `${f?.label ?? ''}${this.note ? ` · ${this.note}` : ''}`;
   }
 
   play(on) {

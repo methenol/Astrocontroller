@@ -91,8 +91,11 @@ export function renderAgentStatus(s) {
   state.agent = s;
   const el = $('#agent-status');
   el.className = `agent-status${s.busy ? ' busy' : ''}${!s.ready ? ' down' : ''}`;
-  el.textContent = !s.ready ? `agent offline${s.error ? ` — ${s.error}` : ' (starting…)'}` : s.model ?? 'agent';
+  // the bar only says something when the agent is down; the model it runs is on the hover of the thinking selector
+  el.textContent = !s.ready ? `agent offline${s.error ? ` — ${s.error}` : ' (starting…)'}` : '';
+  el.hidden = !!s.ready;
   el.title = `${s.model ?? ''} @ ${s.baseUrl ?? ''}`;
+  $('#sel-thinking').closest('.think').title = s.model ? `${s.model}${s.baseUrl ? ` @ ${s.baseUrl}` : ''}` : '';
   if (s.thinking) $('#sel-thinking').value = s.thinking;
   $('#btn-abort').hidden = !s.busy;
   $('#btn-queue').hidden = !s.busy;

@@ -70,7 +70,7 @@ export function registerMapObstructions(tool: ToolFn, port: SurveyPort): void {
 
   tool(
     'map_obstructions',
-    `The site's obstruction map (horizon mask): how high trees, houses and roofs reach in each compass direction, in true azimuth (0 = N, 90 = E) and altitude, so plan_targets only offers what is actually visible from where the scope stands. action=run surveys it: ${port.how}. action=status (default) says whether this site has a map and what it holds; show adds the panorama with the skyline (red) and the limit the planner uses (yellow); clear forgets this site's map (the planner then uses the minimum altitude alone); import takes 'azimuth altitude' lines (N.I.N.A./Stellarium/Clear Night Coach/Telescopius horizon files); export gives them; stop ends a running survey; resolve solves the newest kept survey (or survey_id) again from its saved frames with the current judgement, without moving the telescope (surveys keep their frames from 2026-11-04 on); evidence shows what the last solve judged (red obstruction, blue sky, green verified stars) to find a missed tree or a false block. Maps are kept per site (300 m): a new location needs its own.`,
+    `The site's obstruction map (horizon mask): how high trees, houses and roofs reach in each compass direction, in true azimuth (0 = N, 90 = E) and altitude, so plan_targets only offers what is actually visible from where the scope stands. action=run surveys it — only when the owner tells you to: the survey is the owner's to start (the Tonight tab, or asking you), never part of a night's routine and never started because a site has no map: ${port.how}. action=status (default) says whether this site has a map and what it holds; show adds the panorama with the skyline (red) and the limit the planner uses (yellow); clear forgets this site's map (the planner then uses the minimum altitude alone); import takes 'azimuth altitude' lines (N.I.N.A./Stellarium/Clear Night Coach/Telescopius horizon files); export gives them; stop ends a running survey; resolve solves the newest kept survey (or survey_id) again from its saved frames with the current judgement, without moving the telescope (surveys keep their frames from 2026-11-04 on); evidence shows what the last solve judged (red obstruction, blue sky, green verified stars) to find a missed tree or a false block. Maps are kept per site (300 m): a new location needs its own.`,
     {
       action: z.enum(['status', 'run', 'show', 'evidence', 'resolve', 'clear', 'import', 'export', 'stop']).optional().describe('default status'),
       survey_id: z.string().regex(/^[\w.-]+$/).optional().describe('resolve: the kept survey to solve again (default: the one this site\'s map came from, else the newest)'),
@@ -118,7 +118,7 @@ export function registerMapObstructions(tool: ToolFn, port: SurveyPort): void {
           const m = maskFor(site());
           const progress = port.progress();
           const body = {
-            map: m ? maskReport(m) : 'none for this site: plan_targets uses the minimum altitude alone (run action=run at night to map it)',
+            map: m ? maskReport(m) : 'none for this site: plan_targets uses the minimum altitude alone (the owner maps it from the Tonight tab; do not run the survey unless the owner tells you to)',
             survey: port.running() ? progress : progress ? { last: progress } : undefined,
           };
           if (action === 'show' && m) return withImage(panoramaOf(m), JSON.stringify(body, null, 1));

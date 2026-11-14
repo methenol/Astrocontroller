@@ -11,13 +11,13 @@ import { planNight } from '../astro/planner.js';
 import { PLAN_DEFAULTS, addTarget, removeTarget, type PlanSettings } from '../night/program.js';
 import { setRest, liftRest } from '../astro/rest.js';
 import { alternatesAt, daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
-import { Journal } from '../night/journal.js';
+import { Journal, summarize } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
 import { dwarfProbe } from '../drivers/dwarf/journal.js';
 import type { Dwarf } from '../drivers/dwarf/device.js';
 import type { StreamHub } from '../media/streams.js';
 import { learn } from '../night/progress.js';
-import { nightOfStamp, planWindow } from '../night/clock.js';
+import { journalNight, nightOfStamp, planWindow } from '../night/clock.js';
 import { PlanService } from '../night/service.js';
 
 const SITE = { lat: 31.5475, lon: -99.3817, elev: 454 };
@@ -432,6 +432,56 @@ describe('night journal: the recorder', () => {
     assert.equal(s[0].status, 'done');
     assert.equal(s[1].target, 'M 33');
     assert.equal(rec.active()?.session.target, 'M 33');
+  });
+
+  test("the journal's night turns over at local noon, not at dawn: the morning after belongs to the night that ended", () => {
+    const tz = 'America/Chicago';
+    // 2026-11-14 05:40 CST is astronomical dawn at the site: the duty ending then is the 13th's
+    assert.equal(journalNight(Date.parse('2026-11-14T11:40:00Z'), tz), '2026-11-13');
+    assert.equal(journalNight(Date.parse('2026-11-14T17:59:00Z'), tz), '2026-11-13'); // 11:59
+    assert.equal(journalNight(Date.parse('2026-11-14T18:00:00Z'), tz), '2026-11-14'); // 12:00
+    assert.equal(journalNight(Date.parse('2026-11-15T03:00:00Z'), tz), '2026-11-14'); // 21:00
+    assert.equal(journalNight(Date.parse('2026-11-01T06:00:00Z'), tz), '2026-10-31', 'across a month');
+  });
+
+  test('a session still open at dawn closes then, though the journal keeps the morning for its night', () => {
+    const journal = new Journal({ dir: dir() });
+    const probe = new FakeProbe();
+    const dawn = W.astroDawn!.getTime();
+    let t = dawn - 2 * 3600e3;
+    const rec = new JournalRecorder({ journal, probe, site: () => SITE, now: () => t, settleMs: 0 });
+    rec.observe();
+    probe.set((x) => (x.stack = { running: true, target: 'M 31', stacked: 10, rejected: 0, subS: 10 }));
+    rec.observe();
+    const open = rec.active()!;
+    t = dawn - 60e3;
+    rec.tick();
+    assert.equal(open.session.status, 'active', 'still dark');
+    t = dawn + 60e3;
+    rec.tick();
+    assert.equal(open.session.status, 'done');
+    assert.equal(open.session.endReason, 'the night ended');
+    assert.equal(open.session.endedAt, dawn + 60e3);
+  });
+
+  test("the night's span is its activity: plan re-solves and the scope's link coming and going do not stretch it", () => {
+    const at = (h: number) => Date.parse('2026-11-14T00:00:00Z') + h * 3600e3;
+    const s = summarize({
+      night: '2026-11-13',
+      sessions: [{ id: 's', target: 'M 31', startedAt: at(1), endedAt: at(10), status: 'done', marks: [], samples: [], stats: {} }],
+      events: [
+        { at: at(-8), kind: 'plan', text: 'plan made: M 31 19:00–05:00' },
+        { at: at(0.5), kind: 'duty', text: 'duty on' },
+        { at: at(11), kind: 'duty', text: 'duty ended: end time reached' },
+        { at: at(-6), kind: 'link', text: 'telescope connected' },
+        { at: at(11.5), kind: 'hold', text: 'hold M 31 until 06:12 — obscured (cloud)' },
+        { at: at(12), kind: 'link', text: 'telescope connection lost' },
+        { at: at(13), kind: 'plan', text: 'plan changed (the forecast was updated): no target blocks' },
+      ],
+      notes: [],
+    });
+    assert.equal(s.firstAt, at(0.5));
+    assert.equal(s.lastAt, at(11.5));
   });
 
   test('notes are kept and show on the active session', () => {

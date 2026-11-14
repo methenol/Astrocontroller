@@ -323,14 +323,15 @@ input[type=range]::-moz-range-thumb { width: 26px; height: 26px; border: 2px sol
 .row-head button.ghost { min-height: var(--tap-sm); padding: 0 10px; }
 
 /* ---------- agent / chat ---------- */
-.agent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; flex: none; }
-.agent-bar { display: flex; align-items: center; gap: 6px 10px; font-size: 12px; flex-wrap: wrap; flex: 1 1 300px; min-width: 0; }
-.agent-status { color: var(--muted); flex: 1 1 120px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the head is one row where it fits (the agent's controls, then the duty bar), two at most: never a control alone on a line */
+.agent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: none; }
+.agent-bar { display: flex; align-items: center; gap: 6px; font-size: 12px; flex-wrap: nowrap; flex: 0 1 auto; min-width: 0; }
+.agent-status { color: var(--muted); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-status.busy { color: var(--accent); }
 .agent-status.down { color: var(--err); }
 .think { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
-.think select { min-height: 34px; padding: 0 8px; font-size: 13px; }
-.agent-bar button { min-height: 34px; padding: 0 10px; font-size: 13px; }
+.think select { min-height: 30px; height: 30px; padding: 0 6px; font-size: 12.5px; }
+.agent-bar button, .duty-bar button { min-height: 30px; height: 30px; padding: 0 9px; font-size: 12.5px; white-space: nowrap; flex: none; }
 .chat-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 .chat { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px 10px; }
 .chat-inner { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -374,13 +375,19 @@ details.thinking pre.t-body { white-space: pre-wrap; max-height: 320px; overflow
 .msg.assistant.typing .content:empty::after, .msg.assistant.typing .content > :last-child:not(ol):not(ul):not(pre):not(table)::after, .msg.assistant.typing .content > :is(ol, ul):last-child > li:last-child::after { content: '▍'; color: var(--accent); animation: blink 1s steps(1) infinite; margin-left: 2px; }
 @keyframes blink { 50% { opacity: 0; } }
 
-.duty-bar { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); flex: 1 1 320px; min-width: 0; }
+.duty-bar { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); flex: 1 1 auto; min-width: 0; padding: 2px 3px 2px 8px; gap: 6px; }
 .duty-bar .duty-state { font-weight: 600; color: var(--muted); white-space: nowrap; }
 .duty-bar.active { border-color: var(--accent-2); }
 .duty-bar.active .duty-state { color: var(--accent); }
 .duty-bar.paused .duty-state { color: var(--warn); }
 .duty-text { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 80px; }
-.duty-bar button { min-height: 34px; padding: 0 10px; font-size: 13px; }
+/* in the bar the text takes what the buttons leave and adds nothing to the bar's width: the bar sits beside the
+   agent's controls when its buttons fit there, and takes a row of its own when they do not, rather than wrapping */
+.duty-bar .duty-text { flex: 1 1 0; width: 0; }
+.duty-bar .spacer { display: none; }
+@media (max-width: 699px) {
+  .think-word, .duty-bar .wide-only { display: none; }
+}
 .duty-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); flex: none; }
 .duty-form textarea { width: 100%; resize: vertical; }
 .duty-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
@@ -855,7 +862,6 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
   .panel { grid-area: 1 / 2; }
   .topbar .profiles-btn:not([hidden]) { display: inline-flex; }
   #btn-profiles-menu { display: none; }
-  .agent-bar button, .duty-bar button { min-height: 30px; }
   /* the control groups: a picker, one group open at a time */
   /* a tab strip that sits on the open group like a folder tab: unlike the action buttons it has no box */
   .controls { gap: 0; }
@@ -892,6 +898,9 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
   .skill-editor textarea, #composer textarea { font-size: 16px }
   .slider label { font-size: 13px }
   .tile button, .job button, .lib-target button, .muted button { font-size: 12px }
+  /* the chat's head stays one short row: its controls are kept a little under the floor, still a thumb's width */
+  #panel-chat .agent-head :is(button, select) { min-height: 36px; height: 36px; padding: 0 8px }
+  .agent-head, .agent-bar, .duty-bar { gap: 5px }
 }
 
 /* ================= phone: overlays stay out of the thumb zone ================= */

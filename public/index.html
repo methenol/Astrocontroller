@@ -259,8 +259,8 @@
       <div class="agent-bar">
         <span id="agent-status" class="agent-status">agent: –</span>
         <span id="ctx" class="ctx" hidden><span class="ctx-bar"><i></i></span><span id="ctx-text"></span></span>
-        <label class="think">thinking
-          <select id="sel-thinking" aria-label="Reasoning effort">
+        <label class="think"><span class="think-word">thinking</span>
+          <select id="sel-thinking" aria-label="Reasoning effort" title="Reasoning effort">
             <option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option>
           </select>
         </label>
@@ -271,10 +271,10 @@
         <span class="duty-state" id="duty-state">Duty off</span>
         <span class="duty-text" id="duty-text"></span>
         <span class="spacer"></span>
-        <button type="button" class="ghost" id="btn-duty-wake" hidden title="Send the next sample now">Wake now</button>
+        <button type="button" class="ghost" id="btn-duty-wake" hidden title="Wake the agent: send the next sample now">Wake</button>
         <button type="button" class="ghost" id="btn-duty-pause" hidden>Pause</button>
-        <button type="button" class="ghost" id="btn-duty" title="Put the agent on duty: it is woken with fresh measurements every few minutes and on events until the end time">Start duty…</button>
-        <button type="button" class="ghost" id="btn-auto-nights" hidden title="Autonomous Starfront nights: every night the roof opens, the agent carries out the night plan (Plan tab) from astronomical dark to dawn, transfers each target and stows the arm; it can be left on for days or weeks">Autonomous nights: off</button>
+        <button type="button" class="ghost" id="btn-duty" title="Put the agent on duty: it is woken with fresh measurements every few minutes and on events until the end time">Start<span class="wide-only"> duty</span>…</button>
+        <button type="button" class="ghost" id="btn-auto-nights" hidden title="Autonomous nights (Starfront): every night the roof opens, the agent carries out the night plan (Plan tab) from astronomical dark to dawn, transfers each target and stows the arm; it can be left on for days or weeks">Auto<span class="wide-only"> nights</span>: off</button>
       </div>
       </div>
       <div class="duty-text auto-nights-text" id="auto-nights-text" hidden></div>

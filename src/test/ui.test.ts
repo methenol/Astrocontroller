@@ -63,7 +63,9 @@ test('a hello renders the chips, the chat history and the transfers', () => {
   assert.equal(text('#chip-conn span'), 'DWARF3');
   assert.ok(ui.$('#chip-conn').classList.contains('ok'));
   assert.equal(text('#chip-battery'), '🔋 80% ⚡');
-  assert.equal(text('#agent-status'), 'test-model');
+  // the model's name is not in the bar (it is on the thinking selector's hover)
+  assert.ok(ui.$('#agent-status').hidden);
+  assert.equal((ui.$('.think') as HTMLElement).title, 'test-model');
   assert.equal(ui.$('#chat-inner').children.length, 1);
   assert.equal(text('#chat-inner .msg.user'), 'hello there');
   assert.ok(ui.$('#chat-empty').hidden);

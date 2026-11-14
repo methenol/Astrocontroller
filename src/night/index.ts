@@ -15,7 +15,7 @@ import type { DutyDevice, DutyLoop } from '../agent/duty.js';
 import { Journal } from './journal.js';
 import { JournalRecorder, type JournalProbe } from './recorder.js';
 import { PlanService } from './service.js';
-import { nightKey } from './clock.js';
+import { journalNight } from './clock.js';
 import { setFrameField } from '../processing/roi.js';
 import type { FactsSource } from '../astro/acquisition/index.js';
 import { cleanQualityTmp } from '../astro/acquisition/probe.js';
@@ -26,7 +26,7 @@ export interface NightServices {
   journal: Journal;
   recorder: JournalRecorder;
   plan: PlanService;
-  /** the night a moment belongs to (null without a location) */
+  /** the journal night a moment belongs to: the evening's date, turning over at local noon (null without a location) */
   nightOf(at?: number): string | null;
   start(): void;
   stop(): void;
@@ -62,11 +62,7 @@ export function createNight(d: NightDeps): NightServices {
   const nightOf = (at = Date.now()) => {
     const s = d.site();
     if (!s) return null;
-    try {
-      return nightKey(s, new Date(at));
-    } catch {
-      return null;
-    }
+    return journalNight(at, tz);
   };
 
   // what happens to the night as a whole goes in its journal: the duty, and everything it is woken for

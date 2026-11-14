@@ -32,7 +32,8 @@ export function renderDuty(d) {
   if (d.pendingEvents) parts.push(`${d.pendingEvents} event(s) waiting`);
   $('#duty-text').textContent = parts.join(' · ');
   bar.title = d.objective ? `Objective: ${d.objective}` : '';
-  $('#btn-duty').textContent = d.status === 'off' ? 'Start duty…' : 'Stop duty';
+  // static markup only: the word in .wide-only is dropped on a phone so the bar stays one row
+  $('#btn-duty').innerHTML = d.status === 'off' ? 'Start<span class="wide-only"> duty</span>…' : 'Stop<span class="wide-only"> duty</span>';
   $('#btn-duty-pause').hidden = d.status === 'off';
   $('#btn-duty-pause').textContent = d.status === 'paused' ? 'Resume' : 'Pause';
   $('#btn-duty-wake').hidden = d.status !== 'active';
@@ -85,7 +86,7 @@ function renderNights(n) {
   const btn = $('#btn-auto-nights');
   const line = $('#auto-nights-text');
   state.starfront = n;
-  btn.textContent = `Autonomous nights: ${n.enabled ? 'on' : 'off'}`;
+  btn.innerHTML = `Auto<span class="wide-only"> nights</span>: ${n.enabled ? 'on' : 'off'}`;
   btn.classList.toggle('on', !!n.enabled);
   const roof = `roof${n.building ? ` (building ${n.building})` : n.candidates ? ` (building unknown: ${n.candidates.length} candidates)` : ''} ${n.roof}`;
   const win = n.window?.astroDusk ? `dark ${n.window.astroDusk} → ${n.window.astroDawn}` : '';

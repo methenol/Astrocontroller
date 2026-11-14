@@ -14,7 +14,7 @@ import { findObject, displayName } from '../astro/catalog.js';
 import * as sky from '../astro/sky.js';
 import type { HourConditions } from '../astro/weather.js';
 import type { Journal, JournalSession, StackQuality } from './journal.js';
-import { nightKey } from './clock.js';
+import { journalNight, nightKey } from './clock.js';
 import { probing } from '../astro/acquisition/probe.js';
 
 const log = logger('journal');
@@ -92,7 +92,9 @@ export class JournalRecorder {
   }
 
   start(): void {
-    const closed = this.d.journal.closeStale(this.nightNow());
+    // a session left open is still under way only when its night is: after dawn, every open one is stale
+    const night = this.nightNow();
+    const closed = this.d.journal.closeStale(night && night === this.darkNight(this.now()) ? night : null);
     if (closed) log.info(`journal: closed ${closed} session(s) left open by a night that ended while the server was down`);
     this.d.probe.on('state', this.onState);
     this.timer = setInterval(() => this.tick(), TICK_MS);
@@ -124,11 +126,17 @@ export class JournalRecorder {
     this.settle.unref?.();
   }
 
+  /** The journal night now: what happens after dawn still goes in the night that just ended. */
   private nightNow(): string | null {
+    return this.d.site() ? journalNight(this.now()) : null;
+  }
+
+  /** The astronomical night a moment falls in (it moves on to the coming night at dawn). */
+  private darkNight(at: number): string | null {
     const site = this.d.site();
     if (!site) return null;
     try {
-      return nightKey(site, new Date(this.now()));
+      return nightKey(site, new Date(at));
     } catch {
       return null;
     }
@@ -365,8 +373,9 @@ export class JournalRecorder {
       this.close('done', 'idle after its stack ended', c.idleSince);
       return;
     }
-    const night = this.nightNow();
-    if (night && night !== c.night) {
+    // a session ends with its darkness (dawn), though the journal keeps the morning for its night
+    const dark = this.darkNight(t);
+    if (dark && dark !== this.darkNight(c.s.startedAt)) {
       this.close(c.s.marks.some((m) => m.kind === 'stack-start') ? 'done' : 'aborted', 'the night ended', t);
       return;
     }

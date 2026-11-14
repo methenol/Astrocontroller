@@ -152,8 +152,11 @@ const id = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().toStr
 
 export function summarize(n: JournalNight): NightSummary {
   const sum = (f: (s: JournalSession) => number | undefined) => n.sessions.reduce((a, s) => a + (f(s) ?? 0), 0);
-  const ats = [...n.sessions.map((s) => s.startedAt), ...n.events.map((e) => e.at)];
-  const ends = [...n.sessions.map((s) => s.endedAt ?? s.startedAt), ...n.events.map((e) => e.at)];
+  // the span is the night's activity: plan changes are re-solves of it, made at any hour of the day, and the
+  // scope joining or leaving the network (it is powered on by day, it drops off in the morning) is not work
+  const activity = n.events.filter((e) => e.kind !== 'plan' && e.kind !== 'link');
+  const ats = [...n.sessions.map((s) => s.startedAt), ...activity.map((e) => e.at)];
+  const ends = [...n.sessions.map((s) => s.endedAt ?? s.startedAt), ...activity.map((e) => e.at)];
   return {
     night: n.night,
     sessions: n.sessions.length,

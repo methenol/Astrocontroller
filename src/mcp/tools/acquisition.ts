@@ -141,7 +141,8 @@ async function windowFor(ctx: AcquisitionContext, name: string, from?: string, u
   const site = ctx.site();
   const now = new Date();
   const w = sky.nightWindow(site, now);
-  const nightKey = ctx.night?.nightOf() ?? sky.localDate(now, config.observer.timezone);
+  // the plan's night (the coming one by day), which the asked times are read on
+  const nightKey = sky.localDate(w.sunset ?? w.darkStart ?? now, config.observer.timezone);
   if (from || until) {
     const f = timeArg(from, nightKey) ?? Math.max(now.getTime(), w.darkStart?.getTime() ?? now.getTime());
     const t = timeArg(until, nightKey) ?? w.darkEnd?.getTime() ?? f + 4 * 3600e3;

@@ -35,7 +35,7 @@ import { recordBlocked, clearsAt } from '../astro/sightings.js';
 import { targetKey, loadRest, restSettings, restState } from '../astro/rest.js';
 import type { HourConditions } from '../astro/weather.js';
 import { addTarget, loadProgram, loadSettings, type PlanSettings, type ProgramTarget } from './program.js';
-import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
+import { planWindow, nightKey, journalNight, hm, dur, type PlanWindow } from './clock.js';
 import { buildCalendar, type CalendarOptions } from './calendar.js';
 import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
@@ -843,7 +843,7 @@ export class PlanService extends SafeEmitter {
     });
     if (f.holds.length !== before) {
       this.save(night);
-      this.d.journal.event(night, 'hold', `${before - f.holds.length} hold(s) ran out`, now);
+      this.d.journal.event(journalNight(now), 'hold', `${before - f.holds.length} hold(s) ran out`, now);
       return true;
     }
     return false;
@@ -866,7 +866,7 @@ export class PlanService extends SafeEmitter {
     f.holds = f.holds.filter((x) => !(x.kind === hold.kind && x.target === hold.target && x.quadrant === hold.quadrant));
     f.holds.push(hold);
     this.save(night);
-    this.d.journal.event(night, 'hold', `${hold.kind}${hold.displayName ? ` ${hold.displayName}` : ''}${hold.quadrant ? ` ${hold.quadrant} sky` : ''}${hold.until ? ` until ${hm(hold.until)}` : ' for the night'} — ${hold.reason}${hold.note ? `; ${hold.note}` : ''} (${hold.by})`, this.now(), hold.displayName);
+    this.d.journal.event(journalNight(this.now()), 'hold', `${hold.kind}${hold.displayName ? ` ${hold.displayName}` : ''}${hold.quadrant ? ` ${hold.quadrant} sky` : ''}${hold.until ? ` until ${hm(hold.until)}` : ' for the night'} — ${hold.reason}${hold.note ? `; ${hold.note}` : ''} (${hold.by})`, this.now(), hold.displayName);
     this.emit('holds', f.holds);
     return hold;
   }
@@ -969,7 +969,7 @@ export class PlanService extends SafeEmitter {
     const n = before - f.holds.length;
     if (!n) throw new Error(`no hold matches "${ref}"`);
     this.save(night);
-    this.d.journal.event(night, 'hold', `${n} hold(s) lifted (${ref})`, this.now());
+    this.d.journal.event(journalNight(this.now()), 'hold', `${n} hold(s) lifted (${ref})`, this.now());
     await this.replan('a hold was lifted');
     return n;
   }
