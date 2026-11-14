@@ -16,6 +16,7 @@ import { errMsg, logger } from '../../log.js';
 import { deviceLibrary } from '../../library/device-library.js';
 import type { ProbeDriver, ProbeShot } from '../../astro/acquisition/probe.js';
 import { dwarfSessionSubs } from './acquisition.js';
+import { listDir } from './ftp.js';
 import type { Dwarf } from './device.js';
 
 const log = logger('dwarf.probe');
@@ -27,6 +28,29 @@ const FILE_MAX_BYTES = 64 * 1024 * 1024;
 /** the session folder appears on the card a little after the stop */
 const AFTER_STOP_MS = 5_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** how long the subs may take to appear on the card once the stack has counted them */
+const SAVE_WAIT_MS = 60_000;
+
+async function astronomyFolders(): Promise<string[]> {
+  return (await listDir('/Astronomy')).filter((f) => f.isDir).map((f) => f.name);
+}
+
+/** Until a session folder new since `before`, of this point's exposure and gain, holds `frames` subs. */
+async function waitForSubs(before: Set<string>, o: ProbeShot, frames: number): Promise<void> {
+  const re = new RegExp(`^DWARF_RAW_TELE_.*_EXP_${String(o.subS).replace('.', '\\.')}_GAIN_${o.gain}_`);
+  const until = Date.now() + SAVE_WAIT_MS;
+  while (Date.now() < until && !o.signal.aborted) {
+    try {
+      const fresh = (await astronomyFolders()).filter((n) => !before.has(n) && re.test(n));
+      for (const f of fresh) if ((await dwarfSessionSubs(f)).length >= frames) return;
+    } catch (e) {
+      log.debug(`probe: card not listed: ${errMsg(e)}`);
+    }
+    await sleep(3_000);
+  }
+  log.warn(`probe: the ${o.subS}s gain ${o.gain} subs did not appear on the card within ${SAVE_WAIT_MS / 1000}s; stopping the stack anyway`);
+}
 
 export function dwarfProbeDriver(dwarf: Dwarf): ProbeDriver {
   return {
@@ -42,25 +66,41 @@ export function dwarfProbeDriver(dwarf: Dwarf): ProbeDriver {
     async shoot(o: ProbeShot) {
       const notes: string[] = [];
       const startedAt = Date.now();
-      // every sub is saved raw, the stacker's reference frame too: no extra sub is shot
-      const frames = o.count;
+      // one more frame than needed: the stacker's first is its reference. A 1-frame stack never
+      // counts a frame nor saves a sub (2026-11-14 C 20: 220 s of a 120 s 1-frame stack, no session on the card)
+      const frames = o.count + 1;
       // forced: the probe needs the raw subs, never the Dwarf's own dark-calibrated stack, so a dark
       // master of another sensor temperature (-11530) or none of this pair must not refuse it
+      const before = new Set(await astronomyFolders().catch(() => [] as string[]));
       await dwarf.startStackingWith('tele', { exposure: o.subS, gain: o.gain, filter: o.filter, frames, force: true, startedBy: 'agent' });
+      const shotStart = Date.now();
+      let counted = false;
       try {
-        const until = Date.now() + frames * (o.subS * 1000 + 3_000) + START_SLACK_MS;
+        const until = shotStart + frames * (o.subS * 1000 + 3_000) + START_SLACK_MS;
         let last = -1;
         while (Date.now() < until) {
           if (o.signal.aborted) throw new Error('cancelled');
           const tele = dwarf.state.stacking.tele;
-          const n = tele.currentCount ?? 0;
+          // a count is only this stack's once its exposures can have elapsed: the firmware repeats
+          // the previous stack's last progress after a start (2026-11-13 C 20: "sub 1/1" 9 s into a
+          // 90 s sub, the stack stopped before it saved anything)
+          const possible = Math.floor((Date.now() - shotStart) / (o.subS * 1000));
+          const n = Math.min(tele.currentCount ?? 0, possible);
           if (n !== last) {
             last = n;
             if (n) o.progress(`${o.filter} gain ${o.gain} ${o.subS}s: sub ${n}/${frames}`);
           }
-          if (n >= frames || tele.state !== 'running') break;
+          if (n >= frames) {
+            counted = true;
+            break;
+          }
+          // a stack that ends before its exposures can have elapsed is the start settling, not the end
+          if (tele.state !== 'running' && Date.now() - shotStart > Math.max(30_000, o.subS * 1000)) break;
           await sleep(POLL_MS);
         }
+        // the count comes when a frame is taken, before the firmware writes it: a stop then leaves no
+        // session on the card (2026-11-14 C 20, 1-sub 120s point: 0 subs). Wait for the subs themselves.
+        if (counted) await waitForSubs(before, o, o.count);
       } finally {
         if (dwarf.state.stacking.tele.state === 'running') await dwarf.stopStacking('tele', true).catch((e) => log.warn(`probe stack not stopped: ${errMsg(e)}`));
       }
