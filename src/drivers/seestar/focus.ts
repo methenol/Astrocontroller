@@ -20,25 +20,53 @@ const MAX_POINTS = 21;
 const SETTLE_MS = 800;
 const FRAMES_PER_POSITION = 2;
 const GRAB_TIMEOUT_MS = 60_000;
+/** binned frames in a row before bin 1 is asked for again */
+const REBIN_AFTER = 3;
+/** a sample this much coarser than the sweep's finest is another bin, not comparable */
+const COARSER_THAN = 1.2;
 
 export interface SeestarSweepOptions {
   center?: number;
   range?: number;
   step?: number;
   apply?: boolean;
+  /** wait after each focuser move before the frame (default 800 ms) */
+  settleMs?: number;
   onProgress?: (sample: FocusSample, index: number, total: number) => void;
 }
 
-/** One full-resolution tele frame, measured (the tele is borrowed if the wide is selected). */
+/**
+ * One full-resolution tele frame, measured (the tele is borrowed if the wide is selected). Frames
+ * narrower than the sensor are bin-2 previews still in flight after the switch to bin 1 (2026-11-14
+ * C 34: the first 2-5 samples of every sweep came back at 4.6″/px; their HFR in px is half a
+ * full-res frame's, so they won the sweep and sent it chasing a false edge): they are discarded,
+ * bin 1 asked for again while they keep coming, and no measurement is made from one.
+ */
 export async function measureSeestar(scope: Seestar): Promise<{ sharp: StarSharpness; img: FloatImage }> {
   await scope.ensureLiveView();
   return scope.withCamera('tele', 'a star measurement', () =>
     scope.withFullRes('tele', 'a star measurement', async () => {
-      let frame = await scope.grabImage('tele', 'preview', GRAB_TIMEOUT_MS);
-      for (let i = 1; i < FRAMES_PER_POSITION; i++) frame = await scope.grabImage('tele', 'preview', GRAB_TIMEOUT_MS);
-      const img = frame.image;
+      const fullW = scope.state.device.chipSize?.[0];
+      const until = Date.now() + GRAB_TIMEOUT_MS;
+      let img: FloatImage | undefined;
+      let taken = 0;
+      let binned = 0;
+      while (taken < FRAMES_PER_POSITION) {
+        const left = until - Date.now();
+        if (left <= 0) throw new Error(`no full-resolution tele frame in ${GRAB_TIMEOUT_MS / 1000} s (${binned} binned frame(s) discarded)`);
+        const frame = await scope.grabImage('tele', 'preview', left);
+        const w = frame.image.frameWidth ?? frame.image.width;
+        if (fullW && w < fullW) {
+          binned++;
+          if (binned % REBIN_AFTER === 0) await scope.applyBin('binned frames during a star measurement').catch((e) => log.warn(`camera bin: ${errMsg(e)}`));
+          continue;
+        }
+        img = frame.image;
+        taken++;
+      }
+      if (binned) log.info(`star measurement: ${binned} binned frame(s) discarded before the full-resolution one`);
       const fovH = (scope.state.fov ?? NOMINAL_FOV).h;
-      return { sharp: starSharpness(img, { arcsecPerPx: (fovH * 3600) / (img.frameWidth ?? img.width) }), img };
+      return { sharp: starSharpness(img!, { arcsecPerPx: (fovH * 3600) / (img!.frameWidth ?? img!.width) }), img: img! };
     }),
   );
 }
@@ -84,7 +112,7 @@ export async function seestarFocusSweep(scope: Seestar, o: SeestarSweepOptions =
   const measureAt = async (p: number): Promise<FocusSample> => {
     const t0 = Date.now();
     const at = (await scope.focusTo(p)) ?? p;
-    await new Promise((r) => setTimeout(r, SETTLE_MS));
+    await new Promise((r) => setTimeout(r, o.settleMs ?? SETTLE_MS));
     try {
       return sampleOf(at, (await measureSeestar(scope)).sharp, (Date.now() - t0) / 1000);
     } catch (e) {
@@ -107,6 +135,18 @@ export async function seestarFocusSweep(scope: Seestar, o: SeestarSweepOptions =
     if (origin !== undefined) await scope.focusTo(origin).catch(() => undefined);
     throw e;
   }
+  // HFR is in pixels: only samples at one plate scale compare. Any that is coarser than the finest
+  // (a binned frame that got through) is set aside rather than allowed to win the sweep.
+  const scales = samples.filter((s) => !s.error && s.arcsecPerPx).map((s) => s.arcsecPerPx!);
+  const finest = scales.length ? Math.min(...scales) : undefined;
+  let coarse = 0;
+  if (finest) for (const s of samples) {
+    if (!s.error && s.arcsecPerPx && s.arcsecPerPx > finest * COARSER_THAN) {
+      s.error = `a ${s.arcsecPerPx.toFixed(1)}″/px (binned) frame, not comparable with the ${finest.toFixed(1)}″/px ones: left out`;
+      coarse++;
+    }
+  }
+  if (coarse) notes.push(`${coarse} sample(s) came from binned frames and were left out of the fit`);
   const good = samples.filter((s) => !s.error && Number.isFinite(s.hfrPx));
   const start = samples.find((s) => s.position === center) ?? samples[Math.floor(samples.length / 2)]!;
   if (good.length < 3) {
@@ -128,7 +168,10 @@ export async function seestarFocusSweep(scope: Seestar, o: SeestarSweepOptions =
   const bestIndex = samples.reduce((bi, s, i) => (!s.error && s.hfrPx < samples[bi]!.hfrPx ? i : bi), samples.findIndex((s) => !s.error));
   const best = samples[bestIndex]!;
   const fitted = fitMinimum(samples, bestIndex);
-  const bestAtEdge = bestIndex === 0 || bestIndex === samples.length - 1;
+  // the edge of what was measured: a peak next to left-out samples has nothing beyond it either
+  const firstGood = samples.findIndex((s) => !s.error);
+  const lastGood = samples.length - 1 - [...samples].reverse().findIndex((s) => !s.error);
+  const bestAtEdge = bestIndex === firstGood || bestIndex === lastGood;
   const target = o.apply === false ? (origin ?? center) : Math.round(fitted ?? best.position);
   await scope.focusTo(Math.max(0, target - step));
   const finalPosition = (await scope.focusTo(target)) ?? target;
