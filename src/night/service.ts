@@ -39,7 +39,7 @@ import { planWindow, nightKey, hm, dur, type PlanWindow } from './clock.js';
 import { buildCalendar, type CalendarOptions } from './calendar.js';
 import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
 import { collected, learn, type Learned } from './progress.js';
-import { adviseFor, qualityFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
+import { qualityFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
 import { pointsDurationS } from '../astro/acquisition/quality.js';
 import { qualityJob } from '../astro/acquisition/probe.js';
 import type { Journal, JournalSession } from './journal.js';
@@ -321,6 +321,15 @@ export class PlanService extends SafeEmitter {
     // the owner's own say in the target memory (Tonight / Plan: snooze, don't suggest again); a capture's rest is the program's goal here
     const userRests = loadRest().filter((r) => r.role === 'snoozed' || r.role === 'done');
     const restDays = restSettings().restDays;
+    // the collection quality engine's measured filter for the night (the target's own cohorts, any night within VALID_DAYS): it wins over the catalog's guess
+    const measuredFilter = (t: ProgramTarget): string | undefined => {
+      if (!facts || (t.filter && t.filter !== 'auto')) return undefined;
+      try {
+        return qualityFor({ facts, site, target: targetInfo(t.name), from: w.start, to: w.end, conditions, filterMode: 'auto', journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore, now: this.now() }).answer.settings?.filter;
+      } catch {
+        return undefined;
+      }
+    };
     for (const target of program) {
       const key = targetKey(target.name);
       const prog = progress.get(key);
@@ -353,7 +362,7 @@ export class PlanService extends SafeEmitter {
         excluded.push({ ...row, status: 'waiting', reason: `waits until ${t.notBefore}` });
         continue;
       }
-      list.push({ ...this.programCandidate(t, key, got, glassFilters, moonIllum), ...(project ? { mosaic: { projectId: project.id, panels: project.panels.length, execution: project.execution } } : {}) });
+      list.push({ ...this.programCandidate(t, key, got, glassFilters, moonIllum, measuredFilter(t)), ...(project ? { mosaic: { projectId: project.id, panels: project.panels.length, execution: project.execution } } : {}) });
     }
     if (settings.fillers) {
       try {
@@ -473,7 +482,9 @@ export class PlanService extends SafeEmitter {
       try {
         const from = k.bestFrom ?? Math.max(now, w.start.getTime());
         const to = k.bestUntil ?? end;
-        return adviseFor({ facts, site, target: targetInfo(c.name), from: new Date(from), to: new Date(to), conditions: this.lastConditions, journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore }).rec;
+        // the target's own measurements win over the model's, as in the plan's blocks
+        const q = qualityFor({ facts, site, target: targetInfo(c.name), from: new Date(from), to: new Date(to), conditions: this.lastConditions, filterMode: 'auto', journal: this.d.journal, cloudFloor: loadSettings().weatherMinScore, now });
+        return q.measured ?? q.model;
       } catch {
         return null;
       }
@@ -611,9 +622,9 @@ export class PlanService extends SafeEmitter {
     return ensureProject(t, { field, mount: eqMode === true ? 'eq' : eqMode === false ? 'altaz' : 'unknown', eqMode, native, settings }, today);
   }
 
-  private programCandidate(t: ProgramTarget, key: string, got: number, glassFilters: string[], moonIllum: number): Candidate {
+  private programCandidate(t: ProgramTarget, key: string, got: number, glassFilters: string[], moonIllum: number, measured?: string): Candidate {
     const o = findObject(t.name);
-    let filter = t.filter && t.filter !== 'auto' ? t.filter : undefined;
+    let filter = t.filter && t.filter !== 'auto' ? t.filter : measured;
     let keep = 1 - 0.7 * moonIllum;
     if (o) {
       const defaults = planDefaults();
@@ -668,7 +679,8 @@ export class PlanService extends SafeEmitter {
     const conditions = settings.useForecast ? await this.conditions().catch(() => null) : null;
     this.lastConditions = conditions;
     const tc = Date.now();
-    this.lastFacts = settings.mosaicEnabled || loadProgram().some((t) => t.mosaic === 'on') ? await this.facts() : null;
+    // the rig's facts: mosaics, and the quality engine's measured settings for the program's targets
+    this.lastFacts = await this.facts();
     const { list, excluded } = this.candidates(site, w, settings, conditions);
     const buildMs = Date.now() - tc;
     const horizon = settings.useHorizon ? horizonFor(site) : undefined;

@@ -152,6 +152,50 @@ describe('collection quality: the solve', () => {
   });
 });
 
+describe('collection quality: it learns across nights', () => {
+  const NIGHT = 86400e3;
+  const t: TargetInfo = { ...target, name: 'NGC 7000', type: 'HII', emission: 'Ha_dominant' };
+  // last night: both filters measured, Duo-Band the clear winner
+  const lastNight = () => [sample({ subS: 30, nSky: 8, at: NOW - NIGHT }), sample({ subS: 15, nSky: 8, at: NOW - NIGHT + 300e3 }), sample({ filter: 'Duo-Band', subS: 30, nSky: 0.6, at: NOW - NIGHT + 600e3 }), sample({ filter: 'Duo-Band', subS: 60, nSky: 0.6, at: NOW - NIGHT + 900e3 })];
+
+  test("a new night does not start over: last night's measurements still settle the filter", () => {
+    const a = solveQuality(input(lastNight(), { target: t, filterMode: 'auto' }));
+    assert.notEqual(a.status, 'needed');
+    assert.equal(a.settings?.filter, 'Duo-Band', JSON.stringify(a.table.slice(0, 4)));
+    // tonight's budget is tonight's: nothing shot yet
+    assert.equal(a.budget.used, 0);
+  });
+
+  test("tonight's few cohorts refine last night's set rather than replace it", () => {
+    // tonight only an Astro point was shot (a refresh): last night's Duo-Band cohorts still count
+    const a = solveQuality(input([...lastNight(), sample({ subS: 30, nSky: 8, at: NOW - 600e3 })], { target: t, filterMode: 'auto' }));
+    assert.equal(a.settings?.filter, 'Duo-Band', JSON.stringify(a.table.slice(0, 4)));
+    assert.equal(a.set?.sittings, 2);
+    assert.equal(a.budget.used, 1);
+    assert.ok(!a.points.some((p) => /not measured/.test(p.why)), JSON.stringify(a.points));
+  });
+
+  test('a point spoiled one night and measured another is no gap', () => {
+    const spoiled = { ...sample({ filter: 'Duo-Band', subS: 30, at: NOW - 2 * NIGHT }), valid: false, invalidWhy: 'the analysis failed: timeout' };
+    const a = solveQuality(input([spoiled, ...lastNight()], { target: t, filterMode: 'auto' }));
+    assert.equal(a.set?.invalid.length, 0, JSON.stringify(a.set?.invalid));
+  });
+
+  test("a gap from an earlier night can be retried tonight", () => {
+    const night = [sample({ subS: 15, at: NOW - NIGHT }), { ...sample({ subS: 30, at: NOW - NIGHT + 60e3 }), valid: false, invalidWhy: 'the analysis failed: timeout' }, sample({ subS: 30, at: NOW - NIGHT + 120e3, stars: 5 }), sample({ subS: 60, round: 0.5, fwhm: 12, at: NOW - NIGHT + 180e3 })];
+    const a = solveQuality(input(night));
+    assert.ok(a.points.some((p) => p.subS === 30 && p.retry), JSON.stringify(a.points));
+  });
+
+  test('refresh only when the block is unlike every night measured', () => {
+    const moon = { alt: 50, sep: 25, illum: 0.97 };
+    const dark = [15, 30, 60].map((s, k) => sample({ subS: s, round: s === 60 ? 0.5 : 0.9, at: NOW - 3 * NIGHT + k * 60e3 }));
+    const lit = [15, 30, 60].map((s, k) => sample({ subS: s, nSky: 5, round: s === 60 ? 0.5 : 0.9, moon, at: NOW - NIGHT + k * 60e3 }));
+    const moonless = solveQuality(input([...dark, ...lit]));
+    assert.notEqual(moonless.status, 'refresh', moonless.why.join(' | '));
+  });
+});
+
 describe('collection quality: per target, out of the journal', () => {
   test("one target's cohorts are not another's", () => {
     resetStoreCache();

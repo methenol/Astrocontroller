@@ -105,7 +105,8 @@ export interface QualityAnswer {
   /** the Moon's effect on the sky through the chosen filter: measured scattering and what it costs the block */
   moon: { measuredK: number | null; deltaMagBlock: number | null; basis: string } | null;
   /** the set solved from */
-  set: { at: number; points: number; valid: number; invalid: Array<{ filter: string; gain: number; subS: number; why: string }> } | null;
+  /** what was solved from: every sitting within VALID_DAYS (at: the newest cohort) */
+  set: { at: number; points: number; valid: number; invalid: Array<{ filter: string; gain: number; subS: number; why: string }>; sittings?: number } | null;
   budget: { used: number; max: number };
 }
 
@@ -336,7 +337,8 @@ export function solveQuality(i: QualityInput): QualityAnswer {
   const now = i.now ?? Date.now();
   // a capture the scope refused (stored by an earlier version as a gap) is no measurement of the sky
   i = { ...i, samples: i.samples.filter((s) => s.valid || !/^the capture failed/.test(s.invalidWhy ?? '')) };
-  const set = currentSet(i.samples, rig.mount, now);
+  // every sitting within VALID_DAYS counts: what earlier nights measured is kept and refined, never started over
+  const set = i.samples.filter((s) => s.cond.mount === rig.mount && now - s.at < VALID_DAYS * 86400e3).sort((a, b) => a.at - b.at);
   const maxPoints = INITIAL_POINTS_MAX + EXTRA_POINTS_MAX;
   if (!set.length) {
     const points = initialPoints(i);
@@ -351,13 +353,20 @@ export function solveQuality(i: QualityInput): QualityAnswer {
       budget: { used: 0, max: INITIAL_POINTS_MAX },
     };
   }
-  const checked = validate(set, rig);
+  // each sitting validated on its own: another night's sky is not this one's cloud
+  const sits = sittings(set);
+  const checkedBySitting = sits.map((x) => validate(x, rig));
+  const checked = checkedBySitting.flat();
   const valid = checked.filter((s) => !s.gapWhy);
-  const invalid = checked.filter((s) => s.gapWhy);
+  const validKeys = new Set(valid.map((s) => pointKey(s, rig)));
+  // a gap still open: a point no sitting measured (the newest spoiled try of it)
+  const invalid = [...new Map(checked.filter((s) => s.gapWhy && !validKeys.has(pointKey(s, rig))).map((s) => [pointKey(s, rig), s])).values()];
+  // tonight's sitting (the newest, while it is still going): the point budget and the retries are its own
+  const latest = sits[sits.length - 1];
+  const tonight = now - latest[latest.length - 1].at <= SET_HOURS * 3600e3 ? latest : [];
   const wantedFilters = probeFilters(rig, i.filterMode, i.model);
-  // the same target's moon-down and moon-up cohorts (any set within VALID_DAYS) calibrate the Moon's part
-  // (each sitting validated on its own: another night's sky is not this one's cloud)
-  const history = sittings(i.samples.filter((s) => now - s.at < VALID_DAYS * 86400e3 && s.cond.mount === rig.mount)).flatMap((x) => validate(x, rig)).filter((s) => !s.gapWhy);
+  // the same target's moon-down and moon-up cohorts (any sitting within VALID_DAYS) calibrate the Moon's part
+  const history = valid;
   const groups: Group[] = [];
   for (const fName of wantedFilters) {
     const f = findFilter(rig.filters, fName);
@@ -394,14 +403,16 @@ export function solveQuality(i: QualityInput): QualityAnswer {
     }
   }
 
-  const used = set.length;
-  const testedKeys = new Set(set.map((s) => pointKey(s, rig)));
-  const retried = new Set(set.filter((s) => set.filter((x) => pointKey(x, rig) === pointKey(s, rig)).length > 1).map((s) => pointKey(s, rig)));
+  const used = tonight.length;
+  const testedKeys = new Set(checked.map((s) => pointKey(s, rig)));
+  const retried = new Set(tonight.filter((s) => tonight.filter((x) => pointKey(x, rig) === pointKey(s, rig)).length > 1).map((s) => pointKey(s, rig)));
 
-  // the stars: tested quality per sub, and how the measured trailing compares with the model's cap at the set's pointing
-  const sq = starQuality(valid);
-  const fwhmMeasured = valid.map((s) => s.fwhmArcsec).filter((x): x is number => x !== undefined);
-  const fwhmPx = (fwhmMeasured.length ? Math.min(...fwhmMeasured) : starFwhm(rig, 2)) / rig.plateScale;
+  // the stars: each sitting against its own sharpest (seeing differs night to night), merged per sub
+  const sqBySub = new Map<number, number[]>();
+  for (const sit of checkedBySitting) for (const p of starQuality(sit.filter((s) => !s.gapWhy))) sqBySub.set(p.t, [...(sqBySub.get(p.t) ?? []), p.q]);
+  const sq = [...sqBySub.entries()].map(([t, qs]) => ({ t, q: median(qs) })).sort((a, b) => a.t - b.t);
+  const sharpest = checkedBySitting.map((sit) => sit.filter((s) => !s.gapWhy && s.fwhmArcsec !== undefined).map((s) => s.fwhmArcsec!)).filter((xs) => xs.length).map((xs) => Math.min(...xs));
+  const fwhmPx = (sharpest.length ? median(sharpest) : starFwhm(rig, 2)) / rig.plateScale;
   const ref = valid[valid.length - 1] ?? set[set.length - 1];
   const capProbe = trailCap(rig, site.lat, { altDeg: ref.cond.altDeg, azDeg: ref.cond.azDeg, windKmh: ref.cond.windKmh }, fwhmPx)?.capS ?? Infinity;
   let capFactor = 1;
@@ -466,7 +477,7 @@ export function solveQuality(i: QualityInput): QualityAnswer {
   }
 
   const invalidList = invalid.map((s) => ({ filter: s.filter, gain: s.gain, subS: s.subS, why: s.gapWhy! }));
-  const setInfo = { at: set[set.length - 1].at, points: set.length, valid: valid.length, invalid: invalidList };
+  const setInfo = { at: set[set.length - 1].at, points: set.length, valid: valid.length, invalid: invalidList, sittings: sits.length };
   const budgetLeft = maxPoints - used;
   if (!scored.length || scored.every((c) => c.merit <= 0)) {
     // nothing usable: every cohort was a gap — shoot the model's points again, once
@@ -510,7 +521,7 @@ export function solveQuality(i: QualityInput): QualityAnswer {
   }
   // a filter of the program never measured in this set (auto)
   for (const fName of wantedFilters) {
-    if (!set.some((s) => filterName(rig, s.filter) === fName)) addMore({ filter: fName, gain: best.g.gain, subS: best.t, why: `${fName} not measured in this set` });
+    if (!valid.some((s) => filterName(rig, s.filter) === fName)) addMore({ filter: fName, gain: best.g.gain, subS: best.t, why: `${fName} not measured on this target yet` });
   }
 
   // the Moon: measured scattering, and what it does to the block through the chosen filter
@@ -522,17 +533,19 @@ export function solveQuality(i: QualityInput): QualityAnswer {
 
   // refresh: the block far from what the set saw
   const why: string[] = [];
-  const setSky = mean(best.g.samples.map((s) => { const m = modelSky(rig, best.g.filter, zenithSqm, { altDeg: s.cond.altDeg, moon: condMoon(s.cond), transparencyIdx: s.cond.transparencyIdx }); return best.g.s0 * m.moonless + best.g.moonK * m.moon; }));
-  const dMag = setSky > 0 && blockTotal > 0 ? -2.5 * Math.log10(blockTotal / setSky) : 0;
-  const setAlt = mean(best.g.samples.map((s) => s.cond.altDeg));
+  // against the nearest measurement: a block like any sitting's sky is covered by it
+  const dMags = best.g.samples.map((s) => { const m = modelSky(rig, best.g.filter, zenithSqm, { altDeg: s.cond.altDeg, moon: condMoon(s.cond), transparencyIdx: s.cond.transparencyIdx }); const v = best.g.s0 * m.moonless + best.g.moonK * m.moon; return v > 0 && blockTotal > 0 ? -2.5 * Math.log10(blockTotal / v) : 0; });
+  const dMag = dMags.reduce((a, b) => (Math.abs(b) < Math.abs(a) ? b : a), dMags[0] ?? 0);
   const blockAlt = mean(slices.map((s) => s.altDeg));
+  const dAlt = best.g.samples.map((s) => blockAlt - s.cond.altDeg).reduce((a, b) => (Math.abs(b) < Math.abs(a) ? b : a));
   const refresh: string[] = [];
   const setMoonUp = best.g.samples.some((s) => (s.cond.moonAltDeg ?? -90) > 0);
   const blockMoonUp = slices.some((s) => (s.moon?.altDeg ?? -90) > 0);
-  if (Math.abs(dMag) > REFRESH_SKY_DMAG && !(best.g.moonKMeasured && setMoonUp !== blockMoonUp)) refresh.push(`the block's sky through ${best.g.filter.name} is ${r2(Math.abs(dMag))} mag ${dMag < 0 ? 'brighter' : 'darker'} than when measured${blockMoonUp && !setMoonUp ? ' (the Moon is up now)' : ''}`);
-  if (rig.mount === 'alt-az' && Math.abs(blockAlt - setAlt) > REFRESH_ALT_DEG) refresh.push(`the target is ${Math.round(Math.abs(blockAlt - setAlt))}° ${blockAlt < setAlt ? 'lower' : 'higher'} than when measured`);
+  if (Math.abs(dMag) > REFRESH_SKY_DMAG && !(best.g.moonKMeasured && setMoonUp !== blockMoonUp)) refresh.push(`the block's sky through ${best.g.filter.name} is ${r2(Math.abs(dMag))} mag ${dMag < 0 ? 'brighter' : 'darker'} than any measurement${blockMoonUp && !setMoonUp ? ' (the Moon is up now)' : ''}`);
+  if (rig.mount === 'alt-az' && Math.abs(dAlt) > REFRESH_ALT_DEG) refresh.push(`the target is ${Math.round(Math.abs(dAlt))}° ${dAlt < 0 ? 'lower' : 'higher'} than when measured`);
 
-  why.push(`measured: ${valid.length} cohort(s) of ${new Date(setInfo.at).toISOString().slice(0, 16).replace('T', ' ')} UTC${invalid.length ? `, ${invalid.length} spoiled (${invalidList.map((x) => `${x.filter} ${x.subS}s`).join(', ')})` : ''}`);
+  const nights = sits.length > 1 ? ` over ${sits.length} sittings` : '';
+  why.push(`measured: ${valid.length} cohort(s)${nights}, newest ${new Date(setInfo.at).toISOString().slice(0, 16).replace('T', ' ')} UTC${invalid.length ? `, ${invalid.length} spoiled (${invalidList.map((x) => `${x.filter} ${x.subS}s`).join(', ')})` : ''}`);
   why.push(`${best.g.filter.name}${rig.gainSettable ? ` gain ${best.g.gain}` : ''} ${best.t}s: the most SNR per hour from the measured sky (${best.g.setSkyMag !== null ? `${r2(best.g.setSkyMag)} mag/arcsec² there` : 'its level'}), read noise ${r2(best.g.rnE)} e⁻ and stars${best.tested ? '' : ' (interpolated between tested subs)'}`);
   const otherF = table.find((r) => r.filter !== best.g.filter.name);
   if (otherF) why.push(`${otherF.filter}: ${Math.round(otherF.relative * 100)}% of the rate at its best (${otherF.subS}s)`);
