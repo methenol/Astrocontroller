@@ -15,7 +15,6 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { errMsg, logger } from '../log.js';
 import { writeFileAtomic } from '../util/fs.js';
-import { sightingsFor, withSightings } from './sightings.js';
 
 const log = logger('horizon');
 
@@ -128,14 +127,14 @@ export function horizonOf(mask: HorizonMask): Horizon {
 }
 
 /**
- * The horizon the planner uses at a site: the mask in use, raised wherever the tele was found
- * blocked tonight (sightings.ts); undefined when there is neither. `night`: a time inside the night
- * being planned, so a plan for tonight solved in the morning does not carry last night's sightings.
+ * The horizon the planner uses at a site: its obstruction map, and nothing else; undefined without
+ * one. A view found blocked is not part of it: the frame cannot tell a tree from a cloud, and the
+ * weather changes from one night to the next. A target found blocked is held on its own (the night
+ * plan's obscured), with when its path takes it clear.
  */
-export function horizonFor(site: { lat: number; lon: number } | null | undefined, now = new Date(), night?: Date): Horizon | undefined {
+export function horizonFor(site: { lat: number; lon: number } | null | undefined): Horizon | undefined {
   const m = maskFor(site);
-  const base = m ? horizonOf(m) : undefined;
-  return site ? withSightings(base, sightingsFor(site, now, night)) : base;
+  return m ? horizonOf(m) : undefined;
 }
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];

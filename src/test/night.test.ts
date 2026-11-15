@@ -10,7 +10,7 @@ import { findObject } from '../astro/catalog.js';
 import { planNight } from '../astro/planner.js';
 import { PLAN_DEFAULTS, addTarget, removeTarget, type PlanSettings } from '../night/program.js';
 import { setRest, liftRest } from '../astro/rest.js';
-import { alternatesAt, daysFromFull, moonFactor, moonRequiredSep, quadrantOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
+import { alternatesAt, daysFromFull, moonFactor, moonRequiredSep, quadrantOf, seasonOf, solveNight, type Block, type Candidate, type Hold } from '../night/solver.js';
 import { Journal, summarize } from '../night/journal.js';
 import { JournalRecorder, type ScopeSnapshot } from '../night/recorder.js';
 import { dwarfProbe } from '../drivers/dwarf/journal.js';
@@ -19,6 +19,7 @@ import type { StreamHub } from '../media/streams.js';
 import { learn } from '../night/progress.js';
 import { journalNight, nightOfStamp, planWindow } from '../night/clock.js';
 import { PlanService } from '../night/service.js';
+import { sightingsFor } from '../astro/sightings.js';
 
 const SITE = { lat: 31.5475, lon: -99.3817, elev: 454 };
 const NOON = new Date('2026-11-01T18:00:00Z');
@@ -56,6 +57,122 @@ describe('night plan: the Moon rule', () => {
 });
 
 describe('night plan: the solver', () => {
+  test("the window's short last slot yields its own minutes, not a whole slot's", () => {
+    const end = new Date(W.start.getTime() + 2 * 3600e3 + 4 * 60e3); // 2 h 4 min: twelve slots and a 4-min tail
+    const r = solveNight({ site: SITE, start: W.start, end, candidates: [cand('M 31')], settings: { ...SETTINGS, minBlockMin: 30 }, overheadMin: 8, efficiency: 1 });
+    const b = targetBlocks(r)[0];
+    assert.equal(b.end, end.getTime());
+    assert.equal(b.expectedMin, Math.round((end.getTime() - b.start) / 60e3 - 8), 'its minutes less the overhead');
+  });
+
+  test('a pin before its target rises promises no minutes for the time it is down, and says so', () => {
+    const m42 = cand('M 42');
+    const pin: Hold = { id: 'p', kind: 'pin', target: m42.key, from: W.start.getTime(), until: W.start.getTime() + 2 * 3600e3, reason: 'owner', by: 'user', createdAt: 0 };
+    const r = solve([m42, cand('M 31')], { holds: [pin], mount: 'eq' });
+    const pinned = r.blocks.find((b) => b.pinned)!;
+    assert.ok(pinned.alt!.max < SETTINGS.minAltitude, 'the pin holds M 42 below the minimum altitude (test premise)');
+    assert.equal(pinned.expectedMin, 0, 'nothing to collect while it is down');
+    assert.match(pinned.reason, /below the limits or the Moon's for \d+ min of it/);
+  });
+
+  test('a target collecting on past its goal goes on after tonight meets the goal, instead of leaving the sky idle', () => {
+    // IC 1805 is circumpolar here: up all night, 60 min to its goal, then kept collecting
+    const r = solve([cand('IC 1805', { goalMin: 60, keepCollecting: true })], { mount: 'eq' });
+    const t = targetBlocks(r);
+    const total = t.reduce((p, b) => p + b.expectedMin, 0);
+    // past the goal it takes up to a night's cap for collecting on (240 min), as it would had the goal been met before tonight
+    assert.ok(total >= 60 + 200, `it keeps collecting past its 60-min goal, up to the night's cap (got ${total} min)`);
+  });
+
+  test('once tonight meets its goal, a kept-collecting target gives way to one that still needs time', () => {
+    const r = solve([cand('IC 1805', { goalMin: 60, keepCollecting: true, priority: 3 }), cand('M 31', { goalMin: 2000, priority: 3 })], { mount: 'eq' });
+    const ic = targetBlocks(r).filter((b) => b.target!.displayName === 'IC 1805').reduce((p, b) => p + b.expectedMin, 0);
+    const m31 = targetBlocks(r).filter((b) => b.target!.displayName === 'M 31').reduce((p, b) => p + b.expectedMin, 0);
+    assert.ok(m31 > ic, `M 31 (still to collect) gets more of the night than IC 1805 past its goal (${m31} vs ${ic})`);
+  });
+
+  test('at the longest block, a target nothing can replace goes on in a new block: no idle slot, no second GoTo', () => {
+    const r = solve([cand('IC 1805', { goalMin: 2000 })], { settings: { ...SETTINGS, maxBlockMin: 180 }, mount: 'eq' });
+    const t = targetBlocks(r);
+    assert.ok(t.length >= 2, 'split at the longest block');
+    for (let i = 1; i < t.length; i++) {
+      assert.equal(t[i].start, t[i - 1].end, 'no gap between the parts');
+      assert.equal(t[i].overheadMin, 0, 'no second GoTo');
+    }
+  });
+
+  test("in the night's last minutes no block is started that its switch would eat", () => {
+    // M 42 is up for the last half hour only in this window: ending it 9 min after it clears the limit
+    const o = findObject('M 42')!;
+    let rise = W.start.getTime();
+    while (rise < W.end.getTime() && sky.altAz(SITE, o.raHours, o.decDeg, new Date(rise + 300e3)).altitude < SETTINGS.minAltitude) rise += 600e3;
+    const end = new Date(rise + 600e3 + 9 * 60e3);
+    const r = solveNight({ site: SITE, start: W.start, end, candidates: [cand('M 42')], settings: SETTINGS, overheadMin: 8, efficiency: 0.75 });
+    assert.ok(targetBlocks(r).every((b) => b.expectedMin >= 8), targetBlocks(r).map((b) => `${b.target!.displayName} ${b.expectedMin}`).join(', ') || 'no blocks');
+  });
+
+  test('a re-solve in the middle of a slot counts only the minutes left in it', () => {
+    const from = new Date(W.start.getTime() + 3 * 3600e3 + 7 * 60e3); // 3 min left in its slot
+    const r = solve([cand('M 31'), cand('M 42')], { from, mount: 'eq' });
+    for (const b of targetBlocks(r)) assert.ok(b.expectedMin <= (b.end - b.start) / 60e3 + 0.5, `${b.target!.displayName} expects ${b.expectedMin} in ${(b.end - b.start) / 60e3} min`);
+  });
+
+  test('a re-solve on the running target keeps its block whole: start, switch and expected minutes', () => {
+    const cs = [cand('M 31', { goalMin: 2000 }), cand('M 42', { goalMin: 2000 })];
+    const p1 = solve(cs, { mount: 'eq' });
+    const b0 = p1.blocks[0];
+    const from = new Date(b0.start + 2 * 3600e3);
+    const p2 = solve(cs, { mount: 'eq', from, current: { key: b0.target!.key, since: b0.start }, history: p1.blocks });
+    const m = p2.blocks[0];
+    assert.equal(m.start, b0.start);
+    assert.equal(m.end, b0.end, 'same block (test premise)');
+    assert.equal(m.overheadMin, b0.overheadMin, 'its switch stays');
+    assert.ok(Math.abs(m.expectedMin - b0.expectedMin) <= 2, `its expected minutes stay whole (${m.expectedMin} vs ${b0.expectedMin})`);
+  });
+
+  test('a target planned under a 0/100 forecast is scheduled in its outlook, not "weather"', () => {
+    const r = solve([cand('M 31')], { settings: { ...SETTINGS, useForecast: true }, conditions: () => ({ observability: 0 }) as never, mount: 'eq' });
+    assert.ok(targetBlocks(r).length, 'it has blocks (advisory floor)');
+    const o = r.outlook.find((x) => x.displayName === 'M 31')!;
+    assert.equal(o.status, 'scheduled');
+    assert.match(o.reason, /forecast is below \d+\/100 for all of it/);
+  });
+
+  test('a pin that starts after the window is not placed tonight', () => {
+    const m31 = cand('M 31');
+    const pin: Hold = { id: 'p', kind: 'pin', target: m31.key, from: W.end.getTime() + 2 * 3600e3, until: W.end.getTime() + 3 * 3600e3, reason: 'tomorrow', by: 'user', createdAt: 0 };
+    const r = solve([cand('M 42'), m31], { holds: [pin] });
+    assert.ok(r.blocks.every((b) => !b.pinned), 'nothing pinned');
+  });
+
+  test("a season ends on the observer's night, not the UTC date (west of Greenwich dusk is already tomorrow in UTC)", () => {
+    const c = cand('M 27', { goalMin: 6000 });
+    const local = seasonOf({ site: SITE, start: W.start, end: W.end, settings: SETTINGS, efficiency: 0.8, timezone: 'America/Chicago' }, c).endsAround;
+    const utc = seasonOf({ site: SITE, start: W.start, end: W.end, settings: SETTINGS, efficiency: 0.8 }, c).endsAround;
+    assert.ok(local && utc, 'its season ends within the look-ahead');
+    assert.equal(Date.parse(utc!) - Date.parse(local!), 86_400e3, `the local night (${local}) is the day before the UTC date (${utc})`);
+  });
+
+  test('a gap says what keeps the targets out, counted', () => {
+    // M 42 rises late; the obstruction map walls off the whole sky below 80° until it is high
+    const wall = { limit: () => 80, summary: 'test wall' };
+    const r = solve([cand('M 42', { goalMin: 300 }), cand('M 31', { goalMin: 0, collectedMin: 50 })], { horizon: wall, settings: { ...SETTINGS, useHorizon: true } });
+    const gap = r.blocks.find((b) => b.kind === 'gap');
+    assert.ok(gap, 'a gap');
+    assert.match(gap!.reason, /of the 1 with time still to collect, 1 (below the minimum altitude|behind the obstruction map)/);
+    assert.match(gap!.reason, /1 program target has met its goal/);
+    assert.doesNotMatch(gap!.reason, /below the limits, the Moon, holds, or every goal met/);
+  });
+
+  test('a gap before and after the blocks says tonight already covers the goals, not that the targets are too short', () => {
+    const r = solve([cand('M 42', { goalMin: 150 }), cand('M 31', { goalMin: 120 })]);
+    const gaps = r.blocks.filter((b) => b.kind === 'gap');
+    assert.ok(gaps.length >= 2, 'idle before and after the blocks');
+    for (const g of gaps) {
+      assert.match(g.reason, /nothing left to shoot then: 2 get all they still need in tonight's other blocks/);
+      assert.doesNotMatch(g.reason, /shorter than the/);
+    }
+  });
   test('blocks cover the window in order, without overlap', () => {
     const r = solve([cand('M 31'), cand('M 42'), cand('M 33')]);
     assert.ok(r.blocks.length > 0);
@@ -643,6 +760,20 @@ describe('night plan: obstruction holds follow the sky', () => {
     const cloud = await svc.obscured('M 31', { cause: 'cloud', by: 'agent' });
     assert.equal(cloud.hold.until, now + 45 * 60e3);
     assert.equal(svc.holds().length, 3);
+  });
+
+  test('a cloud, or a cause not given, holds the target and never raises the horizon', async () => {
+    const now = Date.parse('2026-11-02T03:30:00Z');
+    const site = { lat: SITE.lat + 3, lon: SITE.lon, elev: SITE.elev }; // a site of its own: no other test's blocked views
+    const svc = new PlanService({ site: () => site, fovArcmin: () => ({ w: 83, h: 147 }), journal: new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-j-')) }), now: () => now, conditions: async () => null, forecastStamp: async () => null, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-')) });
+    const cloud = await svc.obscured('M 31', { cause: 'cloud', by: 'agent' });
+    assert.equal(cloud.hold.until, now + 45 * 60e3, 'held for a while');
+    const unsaid = await svc.obscured('M 45', { by: 'agent' });
+    assert.equal(unsaid.hold.cause, 'other');
+    assert.equal(unsaid.hold.until, now + 45 * 60e3, 'held for a while, like a cloud');
+    assert.equal(sightingsFor(site, new Date(now)).length, 0, 'nothing filed for the horizon');
+    await svc.obscured('NGC 7000', { cause: 'obstruction', by: 'user' });
+    assert.equal(sightingsFor(site, new Date(now)).length, 1, 'only the obstruction is');
   });
 });
 

@@ -95,6 +95,12 @@ const TIGHT_BRANDS = ['l-extreme', 'l-ultimate', 'nbz'];
 const DUO_KEYS = ['dual-band', 'dual band', 'dual narrowband', 'duo', 'tri-band', 'tri band', 'l-enhance'];
 const UHC_KEYS = ['uhc'];
 const LINE_KEYS = ['h-alpha', 'halpha', 'hα', 'oiii', 'o-iii', 'o iii', 'sii', 's-ii', 's ii'];
+/**
+ * Names that are a filter by themselves, not by a keyword: the Seestar calls its dual-band
+ * (OIII 30 nm + Hα 20 nm, devices/seestar-*.json) just "LP", in its journal, its measured settings
+ * and its own app, and a keyword match reads that as broadband.
+ */
+const EXACT_NAMES: Record<string, BandClass> = { lp: 'duo_wide', lp_filter: 'duo_wide' };
 /** A named single-line filter is 3–12 nm wide; ≤9 nm on a duo is a tight-band (dual 5 nm class). */
 const WIDTH_RE = /(\d+(?:\.\d+)?)\s*nm/g;
 const TIGHT_NM = 9;
@@ -108,6 +114,8 @@ const LINE_NM_HI = 12;
  */
 export function classifyFilter(text: string | undefined): BandClass {
   const b = String(text ?? '').toLowerCase();
+  const exact = EXACT_NAMES[b.replace(/\s*\(.*\)\s*$/, '').trim()];
+  if (exact) return exact;
   const widths = [...b.matchAll(WIDTH_RE)].map((m) => Number(m[1]));
   const duo = DUO_KEYS.some((k) => b.includes(k));
   if (TIGHT_BRANDS.some((k) => b.includes(k))) return 'duo_tight';

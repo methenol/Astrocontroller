@@ -333,6 +333,11 @@ describe('detectability', () => {
     assert.equal(classifyFilter('Ha 7nm'), 'line');
   });
 
+  test("the Seestar's \"LP\" is its dual-band, by name (devices/seestar-*.json), whatever names it", () => {
+    for (const n of ['LP', 'lp', 'LP Dual-Band', 'lp_filter', 'LP (Ha/OIII)']) assert.equal(classifyFilter(n), 'duo_wide', n);
+    for (const n of ['IRCUT', 'IR-cut', 'Optolong L-Pro']) assert.equal(classifyFilter(n), 'broadband', n);
+  });
+
   test('an unknown site is the reference class, and a wild class is clamped', () => {
     assert.equal(sqmFor(undefined), 20);
     assert.equal(sqmFor(3), 21.8);

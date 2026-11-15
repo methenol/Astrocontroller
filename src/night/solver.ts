@@ -380,9 +380,11 @@ export function moonFactor(sepDeg: number, requiredDeg: number, keep: number): n
  * and the Moon are taken as tonight's; the Moon averages out over a month). Each night's usable
  * minutes become integration through the clear-night fraction and a target's share of a night.
  */
-export function seasonOf(input: Pick<SolveInput, 'site' | 'start' | 'end' | 'settings' | 'horizon' | 'efficiency'>, c: Candidate): Season {
+export function seasonOf(input: Pick<SolveInput, 'site' | 'start' | 'end' | 'settings' | 'horizon' | 'efficiency' | 'timezone'>, c: Candidate): Season {
   const { site, settings, horizon } = input;
   const step = 20 * 60e3;
+  // the night's date where the observer is: west of Greenwich dusk already falls on the next UTC date
+  const nightDate = (d: number) => sky.localDate(new Date(input.start.getTime() + d * 86_400e3), input.timezone ?? 'UTC');
   let capacity = 0;
   let endsAround: string | null = null;
   let perUsableNight = 0;
@@ -397,7 +399,7 @@ export function seasonOf(input: Pick<SolveInput, 'site' | 'start' | 'end' | 'set
     const yieldMin = Math.min(min, 6 * 60) * input.efficiency * NIGHT_SHARE;
     if (d > 0) capacity += yieldMin * CLEAR_NIGHTS * SEASON_STEP_D;
     if (min >= 60) {
-      endsAround = new Date(input.start.getTime() + d * 86_400e3).toISOString().slice(0, 10);
+      endsAround = nightDate(d);
       perUsableNight += yieldMin;
       usableNights++;
     }
@@ -406,7 +408,7 @@ export function seasonOf(input: Pick<SolveInput, 'site' | 'start' | 'end' | 'set
   const per = usableNights ? perUsableNight / usableNights : 0;
   return {
     capacityMin: Math.round(capacity),
-    endsAround: endsAround && endsAround !== new Date(input.start.getTime() + SEASON_DAYS * 86_400e3).toISOString().slice(0, 10) ? endsAround : null,
+    endsAround: endsAround && endsAround !== nightDate(SEASON_DAYS) ? endsAround : null,
     nightsToGoal: need <= 0 ? 0 : per > 0 ? Math.ceil(need / per) : null,
     urgency: need <= 0 ? 0 : capacity <= 0 ? 1 : clamp01(need / capacity),
   };
@@ -606,12 +608,8 @@ export function solveNight(input: SolveInput): Solved {
   const maxBlockSlots = settings.maxBlockMin > 0 ? Math.max(minBlockSlots, Math.round(settings.maxBlockMin / SLOT_MIN)) : Infinity;
   const slotYield = SLOT_MIN * input.efficiency;
   /** what a slot yields of a clear one: an hour the forecast puts below the floor is expected to give its observability's share */
-  const slotW = allSlots.map((s) => (s.cloudy ? clamp01((s.sky ?? 0) / 100) : 1));
-  const wSum = (a: number, b: number) => {
-    let k = 0;
-    for (let j = a; j < b && j < n; j++) k += slotW[j];
-    return k;
-  };
+  // a slot counts only its minutes inside [from, end): the window's 4-min tail, or a re-solve in the middle of a slot, is not 10 min of sky
+  const slotW = allSlots.map((s) => (s.cloudy ? clamp01((s.sky ?? 0) / 100) : 1) * clamp01((Math.min(input.end.getTime(), s.t + SLOT_MS) - Math.max(from, s.t)) / SLOT_MS));
 
   // what each target still needs tonight, in integration minutes
   const remaining = new Map<Curve, number>();
@@ -620,9 +618,20 @@ export function solveNight(input: SolveInput): Solved {
     if (c.source === 'filler') remaining.set(cv, fillerInProgress(c) ? Math.min(FILLER_CAP_MIN, (c.goalMin ?? 0) - (c.collectedMin ?? 0)) : FILLER_CAP_MIN);
     else {
       const left = Math.max(0, (c.goalMin ?? 0) - (c.collectedMin ?? 0));
-      remaining.set(cv, left > 0 ? left : c.keepCollecting ? FILLER_CAP_MIN : 0);
+      // collecting on past the goal: once tonight meets it, it goes on at the kept-collecting value (below)
+      remaining.set(cv, left > 0 ? left + (c.keepCollecting ? FILLER_CAP_MIN : 0) : c.keepCollecting ? FILLER_CAP_MIN : 0);
     }
   }
+  const remainingAtStart = new Map(remaining);
+  /** a program target collecting on past its goal whose goal tonight has met (need: what it still has to go of tonight's cap) */
+  const metTonight = (cv: Curve, need: number) => {
+    const c = cv.c;
+    const left = Math.max(0, (c.goalMin ?? 0) - (c.collectedMin ?? 0));
+    return c.source === 'program' && !!c.keepCollecting && left > 0 && (remainingAtStart.get(cv) ?? 0) - need >= left;
+  };
+  // who still wanted time before the night was handed out: what a gap is explained against
+  const wanted = cvs.filter((cv) => (remaining.get(cv) ?? 0) > 0);
+  const goalsMet = cvs.filter((cv) => cv.c.source === 'program' && !(remaining.get(cv) ?? 0)).length;
   const usable = (cv: Curve, i: number) => cv.merit[i] > 0 && !heldAt(holds, cv, i, allSlots[i].t);
   /** integration minutes still to be had for a target from slot i to the end */
   const available = (cv: Curve, i: number) => {
@@ -637,7 +646,10 @@ export function solveNight(input: SolveInput): Solved {
   for (const h of holds.filter((x) => x.kind === 'pin' && x.target)) {
     const cv = cvs.find((x) => x.c.key === h.target);
     if (!cv) continue;
-    const a = Math.max(firstIdx, allSlots.findIndex((s) => s.t + SLOT_MS > h.from));
+    // a pin that starts after the window is not tonight's (findIndex's -1 must not become "from now")
+    const a0 = allSlots.findIndex((s) => s.t + SLOT_MS > h.from);
+    if (a0 < 0) continue;
+    const a = Math.max(firstIdx, a0);
     const until = h.until ?? input.end.getTime();
     let b = allSlots.findIndex((s) => s.t >= until);
     if (b < 0) b = n;
@@ -673,7 +685,9 @@ export function solveNight(input: SolveInput): Solved {
   }
   const nearPeak = (cv: Curve, i: number) => cv.place[i] > 0 && cv.place[i] >= FILLER_PEAK_SHARE * (peakOf.get(cv) ?? 0);
   for (const cv of withGoals) {
-    const wallMin = (remaining.get(cv) ?? 0) / input.efficiency + input.overheadMin;
+    // the window is for the goal: what a target collecting on past it takes beyond comes after, at the kept-collecting value
+    const goalLeft = cv.c.source === 'program' && cv.c.keepCollecting && (cv.c.goalMin ?? 0) > (cv.c.collectedMin ?? 0) ? (cv.c.goalMin ?? 0) - (cv.c.collectedMin ?? 0) : (remaining.get(cv) ?? 0);
+    const wallMin = goalLeft / input.efficiency + input.overheadMin;
     let len = Math.min(maxBlockSlots, Math.max(minBlockSlots, Math.ceil(wallMin / SLOT_MIN)));
     const isFiller = cv.c.source === 'filler';
     if (isFiller) {
@@ -708,7 +722,12 @@ export function solveNight(input: SolveInput): Solved {
   const runs: Run[] = [];
   const st: { cur: Run | null } = { cur: running ? { cv: running, startIdx: firstIdx, endIdx: firstIdx, overheadMin: 0, expectedMin: 0, pinned: false, ranSlots: Math.max(0, Math.floor((from - input.current!.since) / SLOT_MS)) } : null };
   const currentKey = input.current?.key ?? null;
-  const yieldOf = (r: Run, slots: number) => Math.max(0, wSum(r.startIdx, r.startIdx + slots) * SLOT_MIN - r.overheadMin) * input.efficiency;
+  // only the slots its target is up in yield: a pin can hold a target below the limits (the owner's word), and those minutes are not integration
+  const yieldOf = (r: Run, slots: number) => {
+    let k = 0;
+    for (let j = r.startIdx; j < r.startIdx + slots && j < n; j++) if (r.cv.merit[j] > 0) k += slotW[j];
+    return Math.max(0, k * SLOT_MIN - r.overheadMin) * input.efficiency;
+  };
   const close = () => {
     if (!st.cur) return;
     // the running target, replaced in the very first slot: it has no block
@@ -770,11 +789,24 @@ export function solveNight(input: SolveInput): Solved {
         sum += cv.merit[j];
       }
       if (!ok) continue;
+      // in the night's last minutes (less than a minimum block left) a new block must be worth its switch:
+      // a GoTo, centring and focus for a minute of integration is not
+      if (!isCur && look < minBlockSlots) {
+        const prev = runs[runs.length - 1];
+        const cost = prev && prev.cv === cv && prev.endIdx === i ? 0 : switchCost(cv, i);
+        let k = 0;
+        for (let j = i; j < i + look && usable(cv, j); j++) k += slotW[j] * SLOT_MIN;
+        if (cost > 0 && k - cost < Math.max(SLOT_MIN, cost)) continue;
+      }
       const meanMerit = sum / look;
       // a filler has no goal to race the night for: the one about to set is not worth more for it
       const urgency = cv.c.source === 'filler' ? 0 : clamp01(need / Math.max(slotYield, available(cv, i)));
       // past its good hours a filler in progress is one filler among the others: better placed ones may take over
-      const value = fillerInProgress(cv.c) && !nearPeak(cv, i) ? settings.fillerWeight * clamp01((cv.c.fillerScore ?? 50) / 100) : base(cv);
+      const value = fillerInProgress(cv.c) && !nearPeak(cv, i)
+        ? settings.fillerWeight * clamp01((cv.c.fillerScore ?? 50) / 100)
+        : metTonight(cv, need)
+          ? (PRIORITY_VALUE[cv.c.priority ?? 3] ?? 1) * KEEP_COLLECTING_VALUE
+          : base(cv);
       let v = value * meanMerit * (1 + URGENCY_WEIGHT * urgency);
       if (isCur || (input.incumbent?.key === cv.c.key && allSlots[i].t >= input.incumbent.start && allSlots[i].t < input.incumbent.end)) v *= 1 + settings.switchHysteresis;
       open.push({ cv, v, waiting });
@@ -789,6 +821,13 @@ export function solveNight(input: SolveInput): Solved {
       if (!best || x.v > best.v) best = x;
     }
     if (!best || best.v <= 0) {
+      // the running target reached the longest block and nothing else can take over: it goes on in a new block
+      // (no idle slot, no second GoTo) rather than leaving the sky empty
+      if (live && !live.pinned && curUsable && curLen >= maxBlockSlots) {
+        close();
+        st.cur = { cv: live.cv, startIdx: i, endIdx: i + 1, overheadMin: 0, expectedMin: 0, pinned: false };
+        continue;
+      }
       close();
       continue;
     }
@@ -811,6 +850,50 @@ export function solveNight(input: SolveInput): Solved {
     return xs.length ? Math.round(xs.reduce((p, q) => p + q, 0) / xs.length) : null;
   };
   let cursor = firstIdx;
+  /**
+   * Why nothing is usable in slots [a, b): each target that wanted time tonight, by what kept it out
+   * for most of the gap, counted. "Below the limits" alone hid a horizon raised over the whole sky.
+   */
+  const gapWhy = (a: number, b: number): string => {
+    const why = { low: 0, map: 0, moon: 0, held: 0, waiting: 0, short: 0 };
+    let covered = 0;
+    let opensFirst = Infinity;
+    for (const cv of wanted) {
+      // what tonight's blocks already give it covers its goal: it has nothing left to take
+      if (!(remaining.get(cv) ?? 0)) {
+        covered++;
+        continue;
+      }
+      const k = { low: 0, map: 0, moon: 0, held: 0, waiting: 0, short: 0 };
+      const opens = opensAt.get(cv);
+      for (let i = a; i < b; i++) {
+        if (!cv.geom[i]) k[cv.alt[i] < Math.max(settings.minAltitude, cv.c.minAltitude ?? 0) ? 'low' : 'map']++;
+        else if (!cv.geomMoon[i]) k.moon++;
+        else if (heldAt(holds, cv, i, allSlots[i].t)) k.held++;
+        else if (opens !== undefined && i < opens) k.waiting++;
+        else k.short++;
+      }
+      const top = (Object.keys(k) as Array<keyof typeof k>).reduce((x, y) => (k[y] > k[x] ? y : x));
+      why[top]++;
+      if (top === 'waiting' && opens !== undefined) opensFirst = Math.min(opensFirst, allSlots[opens].t);
+    }
+    const parts = [
+      why.low && `${why.low} below the minimum altitude (${settings.minAltitude}°)`,
+      why.map && `${why.map} behind the obstruction map`,
+      why.moon && `${why.moon} too close to the Moon`,
+      why.held && `${why.held} held`,
+      why.waiting && `${why.waiting} kept for ${why.waiting === 1 ? 'its' : 'their'} best hours (from ${hhmm(opensFirst)}), with nothing else to shoot before then`,
+      why.short && `${why.short} up only for runs shorter than the ${settings.minBlockMin}-min minimum block`,
+    ].filter(Boolean);
+    const met = [
+      goalsMet && `${goalsMet} program target${goalsMet === 1 ? ' has' : 's have'} met ${goalsMet === 1 ? 'its goal' : 'their goals'}`,
+      covered && `${covered} ${covered === 1 ? 'gets' : 'get'} all ${covered === 1 ? 'it still needs' : 'they still need'} in tonight's other blocks`,
+    ].filter(Boolean).join('; ');
+    const still = wanted.length - covered;
+    const fillersOff = settings.fillers ? '' : '; fillers are off';
+    if (!still) return `nothing left to shoot then: ${met || 'no targets'}${fillersOff}`;
+    return `no target is usable then: of the ${still} with time still to collect, ${parts.join(', ')}${met ? `; ${met}` : ''}${fillersOff}`;
+  };
   // a gap is nothing usable (limits, the Moon, holds, every goal met): the forecast alone never makes one
   const pushGap = (a: number, b: number) => {
     const cloudyMin = allSlots.slice(a, b).filter((s) => s.cloudy).length * SLOT_MIN;
@@ -823,7 +906,7 @@ export function solveNight(input: SolveInput): Solved {
       expectedMin: 0,
       sky: meanSky(a, b),
       merit: 0,
-      reason: `no target in the program or the fillers is usable then (below the limits, the Moon, holds, or every goal met)${cloudyMin ? `; the forecast is also below ${settings.weatherMinScore}/100 for ${cloudyMin} min of it` : ''}`,
+      reason: `${gapWhy(a, b)}${cloudyMin ? `; the forecast is also below ${settings.weatherMinScore}/100 for ${cloudyMin} min of it` : ''}`,
       alternates: [],
     });
   };
@@ -865,7 +948,11 @@ export function solveNight(input: SolveInput): Solved {
     const q = quadrantOf(cv.az[Math.floor((a + b - 1) / 2)]);
     const c = cv.c;
     const why: string[] = [];
-    if (r.pinned) why.push('pinned');
+    if (r.pinned) {
+      let down = 0;
+      for (let j = a; j < b; j++) if (!(cv.merit[j] > 0)) down += SLOT_MIN;
+      why.push(down ? `pinned; below the limits or the Moon's for ${down} min of it (no integration then)` : 'pinned');
+    }
     if (c.source === 'program') {
       const left = Math.max(0, (c.goalMin ?? 0) - (c.collectedMin ?? 0));
       why.push(`program, priority ${c.priority ?? 3}`, left > 0 ? `${Math.round(left)} of ${c.goalMin} min still to collect` : 'goal met, collecting more');
@@ -982,10 +1069,12 @@ export function solveNight(input: SolveInput): Solved {
     const anyHeld = holds.some((h) => (h.kind === 'hold' || h.kind === 'skip') && h.target === c.key && (h.until === null || h.until > from));
     let status: TargetOutlook['status'];
     let reason: string;
-    if (planned > 0) {
+    const mine = blocks.filter((b) => b.target?.key === c.key);
+    if (mine.length) {
+      // on tonight's plan whatever it is expected to yield: a forecast at 0/100 plans it for nothing, it is still planned
       status = 'scheduled';
-      const bs = blocks.filter((b) => b.target?.key === c.key);
-      reason = `${bs.map((b) => `${hhmm(b.start)}–${hhmm(b.end)}`).join(', ')}: about ${Math.round(planned)} min${left > 0 ? `, ${Math.max(0, Math.round(left - planned))} min to go after tonight` : ''}`;
+      const cloudy = mine.some((b) => b.clouds);
+      reason = `${mine.map((b) => `${hhmm(b.start)}–${hhmm(b.end)}`).join(', ')}: about ${Math.round(planned)} min${cloudy ? ` (the forecast is below ${settings.weatherMinScore}/100 for ${planned > 0 ? 'part' : 'all'} of it: advisory, the sky decides)` : ''}${left > 0 ? `, ${Math.max(0, Math.round(left - planned))} min to go after tonight` : ''}`;
     } else if (left <= 0 && !c.keepCollecting) {
       status = 'complete';
       reason = `goal of ${goal} min reached (${collectedMin} min collected)`;
@@ -1039,7 +1128,10 @@ export function solveNight(input: SolveInput): Solved {
   const first = blocks[0];
   const last = kept[kept.length - 1];
   if (first && last && first.kind === last.kind && first.target?.key === last.target?.key && last.end >= first.start - 1000) {
+    // one block: what its earlier part yielded and the switch it began with stay part of it
     first.start = last.start;
+    first.expectedMin += last.expectedMin;
+    first.overheadMin = last.overheadMin;
     kept.pop();
   }
   if (!input.conditions || !settings.useForecast) notes.push('no forecast: scheduled on geometry and the Moon alone');

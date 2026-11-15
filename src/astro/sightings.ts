@@ -1,32 +1,23 @@
 /**
- * Blocked views seen tonight: where in the sky the tele was pointing, and when, each time
- * tele_visibility found it blocked.
- *
- * A blocked verdict is a fact about the landscape at one altitude and azimuth, not about the
- * target: the sky turns, so the same target rises clear of a tree later (or sinks behind it), and
- * another target passing through that patch is blocked there too. Each sighting therefore raises
- * the site's horizon at that azimuth to just above the altitude that was blocked (obstructions
- * stand on the ground: what is behind them at that altitude is also behind them lower down), and
- * the planner works out from that horizon when each target is clear. A sighting is kept for the
- * night it was seen in, which runs from one mid-morning (10:00 local solar time) to the next: a verdict caused by cloud, dew or a
- * focus problem must not hold the sky back tomorrow — and the plan for tonight, solved during the
- * day, must not inherit last night's verdicts (an age limit measured from the solve did exactly
- * that: last night's 00:30 sighting was 12 hours old at a 12:20 re-solve and carved a hole in tonight's plan).
+ * Blocked views: where in the sky the tele was pointing, and when, each time something on the
+ * ground was found blocking it (mark_blocked, night_plan obscured cause=obstruction). A record, not
+ * the site's horizon: the planner works from the obstruction map alone (horizon.ts), and a target
+ * found blocked is held on its own until its path takes it clear (raisedBy). A BLOCKED
+ * tele_visibility is not filed at all: cloud and dew read the same. A record is kept for the night
+ * it was seen in (sky.nightWindow), so the file does not grow.
  */
 import path from 'node:path';
 import fs from 'node:fs';
 import { config } from '../config.js';
 import { errMsg, logger } from '../log.js';
 import { writeFileAtomic } from '../util/fs.js';
-import { altAz, type Site } from './sky.js';
+import { altAz, nightWindow, type Site } from './sky.js';
 import { distanceKm, SAME_SITE_KM, type Horizon } from './horizon.js';
 
 const log = logger('sightings');
 
 /** Upper bound on a sighting's life whatever the clock says (a stale file, a site far west of its timezone). */
 const KEEP_HOURS = 24;
-/** Local solar hour at which one night's sightings give way to the next night's. */
-const NIGHT_BOUNDARY_SOLAR_H = 10;
 /** The blocked altitude plus this: the frame was blocked, so its top edge is at least about this high. */
 const ALT_MARGIN_DEG = 1.5;
 /** Half the azimuth width a sighting covers at the horizon; it widens with 1/cos(alt), as a frame does. */
@@ -58,38 +49,29 @@ function loadAll(): Sighting[] {
 }
 
 /**
- * The start of the night `now` belongs to at this longitude: the latest 10:00 local solar time at
- * or before it. Views are judged in the dark, so a boundary in the full light of morning keeps 00:30
- * and the dusk before it in the same night, while a plan for tonight solved any time from late
- * morning on starts clean.
+ * When the night `now` is in began: the sunset of the planner's night window. After its darkness
+ * has ended that window is tonight's, still to come, so nothing seen before it is in force.
  */
-export function nightStartAt(lon: number, now: Date): number {
-  const DAY = 24 * 3600e3;
-  // 10:00 local solar time in UTC: less the longitude's share of the day (15° an hour)
-  const boundary = (NIGHT_BOUNDARY_SOLAR_H - lon / 15) * 3600e3;
-  const t = now.getTime();
-  return Math.floor((t - boundary) / DAY) * DAY + boundary;
+export function nightBeganAt(site: { lat: number; lon: number }, now: Date): number {
+  const w = nightWindow({ lat: site.lat, lon: site.lon, elev: 0 }, now);
+  return (w.sunset ?? w.darkStart)?.getTime() ?? now.getTime() - KEEP_HOURS * 3600e3;
 }
 
-const live = (s: Sighting, now: Date, night?: Date) => {
+const live = (s: Sighting, now: Date, began: number) => {
   const at = Date.parse(s.at);
-  const from = Math.max(nightStartAt(s.site.lon, now), night ? nightStartAt(s.site.lon, night) : -Infinity);
-  return at <= now.getTime() + 60e3 && now.getTime() - at < KEEP_HOURS * 3600e3 && at >= from;
+  return at <= now.getTime() + 60e3 && now.getTime() - at < KEEP_HOURS * 3600e3 && at >= began;
 };
 
-/**
- * The sightings still in force at this site. `night` is a time inside the night being planned when
- * that is not the one `now` is in: a plan for tonight solved before the morning boundary (06:50,
- * with last night's verdicts still live by the clock) must not inherit them.
- */
-export function sightingsFor(site: { lat: number; lon: number }, now = new Date(), night?: Date): Sighting[] {
-  return loadAll().filter((s) => live(s, now, night) && distanceKm(s.site, site) <= SAME_SITE_KM);
+/** The sightings still in force at this site: the ones seen in the night `now` is in. */
+export function sightingsFor(site: { lat: number; lon: number }, now = new Date()): Sighting[] {
+  const began = nightBeganAt(site, now);
+  return loadAll().filter((s) => distanceKm(s.site, site) <= SAME_SITE_KM && live(s, now, began));
 }
 
 /** Remember that the tele was blocked pointing here, now. Expired sightings are dropped as it goes. */
 export function recordBlocked(site: { lat: number; lon: number }, target: string, azimuth: number, altitude: number, reason: string, now = new Date()): Sighting {
   const s: Sighting = { at: now.toISOString(), site: { lat: site.lat, lon: site.lon }, target, azimuth: Math.round(azimuth * 10) / 10, altitude: Math.round(altitude * 10) / 10, reason };
-  writeFileAtomic(file(), JSON.stringify([...loadAll().filter((x) => live(x, now)), s], null, 1));
+  writeFileAtomic(file(), JSON.stringify([...loadAll().filter((x) => live(x, now, nightBeganAt(x.site, now))), s], null, 1));
   return s;
 }
 
@@ -105,13 +87,11 @@ export function sightingLimit(sightings: Sighting[], azDeg: number): number {
   return lim;
 }
 
-/** The site's horizon raised by tonight's sightings; undefined only when there is neither. */
-export function withSightings(base: Horizon | undefined, sightings: Sighting[]): Horizon | undefined {
-  if (!sightings.length) return base;
-  const n = `${sightings.length} blocked view${sightings.length === 1 ? '' : 's'} seen tonight`;
+/** The site's horizon raised by these sightings (for one target's own hold: when its path takes it clear of where it was blocked). */
+export function raisedBy(base: Horizon | undefined, sightings: Sighting[]): Horizon {
   return {
     limit: (az) => Math.max(base?.limit(az) ?? 0, sightingLimit(sightings, az)),
-    summary: base ? `${base.summary}; ${n}` : n,
+    summary: base?.summary ?? 'blocked view',
   };
 }
 

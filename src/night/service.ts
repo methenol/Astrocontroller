@@ -451,7 +451,7 @@ export class PlanService extends SafeEmitter {
       filter: defaults.filter || undefined,
       filters: defaults.filters,
       rig: defaults.rig,
-      horizon: settings.useHorizon ? horizonFor(site, new Date(this.now()), w.start) : undefined,
+      horizon: settings.useHorizon ? horizonFor(site) : undefined,
       started: o.started,
       spanNight: { blockMin: settings.minBlockMin },
     });
@@ -683,7 +683,7 @@ export class PlanService extends SafeEmitter {
     this.lastFacts = await this.facts();
     const { list, excluded } = this.candidates(site, w, settings, conditions);
     const buildMs = Date.now() - tc;
-    const horizon = settings.useHorizon ? horizonFor(site, new Date(this.now()), w.start) : undefined;
+    const horizon = settings.useHorizon ? horizonFor(site) : undefined;
     const learned = this.learned(settings);
     const active = this.d.active?.();
     const current = active && active.night === w.night ? { key: parentKey(active.session.target), since: active.session.startedAt } : null;
@@ -751,7 +751,8 @@ export class PlanService extends SafeEmitter {
     const site = this.site();
     const moon = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2));
     const stamp = await this.forecastStamp();
-    const sumBy = (k: Block['kind'], src?: 'program' | 'filler') => solved.blocks.filter((b) => !b.past && b.kind === k && (!src || b.target?.source === src)).reduce((a, b) => a + (k === 'target' ? b.expectedMin : (b.end - b.start) / 60e3), 0);
+    // the whole night's (the Plan tab's 'Night of'): the part already behind counts too, so a re-solve does not shrink it
+    const sumBy = (k: Block['kind'], src?: 'program' | 'filler') => solved.blocks.filter((b) => b.kind === k && (!src || b.target?.source === src)).reduce((a, b) => a + (k === 'target' ? b.expectedMin : (b.end - b.start) / 60e3), 0);
     const plan: PlannedNight = {
       ...solved,
       night: w.night,
@@ -835,7 +836,7 @@ export class PlanService extends SafeEmitter {
         if (o) {
           // clear of the obstruction it was blocked by (it rose out, or moved past it in azimuth), and above every other limit
           const aa = sky.altAz(site, o.raHours, o.decDeg, new Date(now));
-          const lim = Math.max(loadSettings().minAltitude, this.obstructionHorizon(site, h.markedAz, h.markedAlt, now).limit(aa.azimuth));
+          const lim = Math.max(loadSettings().minAltitude, this.obstructionHorizon(site, h.markedAz, h.markedAlt).limit(aa.azimuth));
           if (aa.altitude >= lim) return false;
         }
       }
@@ -872,12 +873,12 @@ export class PlanService extends SafeEmitter {
   }
 
   /**
-   * The horizon an obstruction hold is judged against: the site's (with tonight's blocked views),
+   * The horizon an obstruction hold is judged against: the site's obstruction map,
    * raised in the direction the target was blocked to a little above where it was seen blocked:
    * the obstruction's top is at least there, and the frame's top edge has to clear it too.
    */
-  private obstructionHorizon(site: sky.Site, az: number, alt: number, at: number): Horizon {
-    const base = horizonFor(site, new Date(at));
+  private obstructionHorizon(site: sky.Site, az: number, alt: number): Horizon {
+    const base = horizonFor(site);
     const half = Math.min(OBSTRUCTION_AZ_MAX_DEG, OBSTRUCTION_AZ_HALF_DEG / Math.max(0.1, Math.cos((alt * Math.PI) / 180)));
     return {
       limit: (x) => Math.max(base?.limit(x) ?? 0, azDiff(x, az) <= half ? alt + CLEAR_RISE_DEG : 0),
@@ -903,13 +904,14 @@ export class PlanService extends SafeEmitter {
     const now = this.now();
     const end = this.currentNight().window.end;
     const aa = sky.altAz(site, t.raHours, t.decDeg, new Date(now));
-    const cause = o.cause ?? 'obstruction';
+    // only something on the ground teaches the site's horizon: a cause not given is held for a while, like a cloud
+    const cause = o.cause ?? 'other';
     const given = o.until ?? (o.minutes ? now + o.minutes * 60e3 : null);
     let until: number | null = given;
     let note: string;
     if (cause === 'obstruction') {
       recordBlocked(site, t.name, aa.azimuth, aa.altitude, o.reason ?? 'obscured (night plan)', new Date(now));
-      const horizon = this.obstructionHorizon(site, aa.azimuth, aa.altitude, now);
+      const horizon = this.obstructionHorizon(site, aa.azimuth, aa.altitude);
       const clear = clearsAt(site, t.raHours, t.decDeg, loadSettings().minAltitude, horizon, new Date(now + 5 * 60e3), end);
       const soon = sky.altAz(site, t.raHours, t.decDeg, new Date(now + 20 * 60e3));
       const side = quadrantOf(aa.azimuth);
@@ -1011,7 +1013,7 @@ export class PlanService extends SafeEmitter {
     } else if (onPlan) {
       instruction = `On plan: ${block.target!.displayName} until ${hm(block.end)} (${dur(minutesLeft ?? 0)} left)${next?.target ? `; next ${next.target.displayName} at ${hm(next.start)}` : ''}.`;
     } else if (scopeOn) {
-      instruction = `The scope is on ${scopeOn} but the plan says ${block.target!.displayName} since ${hm(block.start)} (until ${hm(block.end)}): ${driverSteps().stop}, then ${go(block)}. If ${block.target!.displayName} is blocked or clouded: night_plan action=obscured target=${block.target!.gotoName}.`;
+      instruction = `The scope is on ${scopeOn} but the plan says ${block.target!.displayName} since ${hm(block.start)} (until ${hm(block.end)}): ${driverSteps().stop}, then ${go(block)}. If ${block.target!.displayName} is clouded: night_plan action=obscured target=${block.target!.gotoName} cause=cloud; blocked by something on the ground: cause=obstruction.`;
     } else {
       instruction = `Now: ${block.target!.displayName} (${hm(block.start)}–${hm(block.end)}, ${dur(minutesLeft ?? 0)} left): ${go(block)}.`;
     }
@@ -1132,7 +1134,7 @@ export class PlanService extends SafeEmitter {
   async calendar(o: Pick<CalendarOptions, 'filters' | 'programOnly' | 'teleFovWidthArcmin' | 'limit'>): Promise<Awaited<ReturnType<typeof buildCalendar>>> {
     const site = this.site();
     const settings = loadSettings();
-    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site, new Date(this.now()), planWindow(site, new Date(this.now()), settings).start) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal), now: this.now() });
+    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal), now: this.now() });
   }
 
   /** The program or the settings changed: solve again shortly. */

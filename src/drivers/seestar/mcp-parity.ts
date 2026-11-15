@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { config, type ObserverLocation } from '../../config.js';
 import * as sky from '../../astro/sky.js';
 import { analyze } from '../../media/images.js';
-import { blockedAt } from '../../mcp/tools/motion.js';
+import { blockedAt, NOT_VISIBLE_NEXT } from '../../mcp/tools/motion.js';
 import { skyVerdict } from '../../mcp/tools/planning.js';
 import { capturedLine, displayJpeg, imageResult, localTime, saveCapture, text, withImage, type ToolFn } from '../../mcp/tools/common.js';
 import type { Seestar } from './device.js';
@@ -160,7 +160,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'tele_visibility',
-    `Is the target really in view of the tele after a GoTo? Measures the stars on one full-resolution tele frame: VISIBLE = at least ${VISIBLE_MIN_STARS} measurable stars with a median HFR at most ${VISIBLE_MAX_HFR_PX} px; anything else is BLOCKED (a wall, the roof, cloud or dew). A BLOCKED verdict is remembered as that patch of sky at that time: plan_targets then raises the site's horizon there for tonight and gives \`clearsAt\`.`,
+    `Is the target really in view of the tele after a GoTo? Measures the stars on one full-resolution tele frame: VISIBLE = at least ${VISIBLE_MIN_STARS} measurable stars with a median HFR at most ${VISIBLE_MAX_HFR_PX} px; anything else is BLOCKED (a wall, the roof, cloud or dew). The frame cannot tell those apart, so a BLOCKED verdict is not filed as a blocked view: check the sky and report it with night_plan action=obscured — cause=cloud holds the target, cause=obstruction holds it until its path takes it clear.`,
     { target: z.string().optional().describe('the target the scope is pointing at; default the current view target') },
     async (a) => {
       const { img, sharp } = await measureSeestar(scope);
@@ -168,14 +168,14 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
       const saved = saveCapture(jpeg, 'tele_visibility');
       const visible = sharp.ok && sharp.starsUsed >= VISIBLE_MIN_STARS && sharp.hfrPx <= VISIBLE_MAX_HFR_PX;
       const why = !sharp.ok ? sharp.blocking : sharp.starsUsed < VISIBLE_MIN_STARS ? `only ${sharp.starsUsed} measurable stars` : `median HFR ${sharp.hfrPx.toFixed(1)} px: blurred near structure, not stars`;
-      const blocked = visible ? null : blockedAt(scope.requireLocation(), a.target ?? scope.state.view.target, why ?? 'not visible');
       return withImage(
         jpeg,
         JSON.stringify(
           {
             verdict: visible ? 'VISIBLE' : 'BLOCKED',
+            target: a.target ?? scope.state.view.target ?? null,
+            ...(visible ? {} : { next: NOT_VISIBLE_NEXT }),
             reason: visible ? `${sharp.starsUsed} stars, median HFR ${sharp.hfrPx.toFixed(1)} px` : why,
-            ...(blocked ?? {}),
             focusPosition: scope.state.focus.position,
             captured: capturedLine(img) || undefined,
             image: `captures/${saved}`,
@@ -189,7 +189,7 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
 
   tool(
     'mark_blocked',
-    "Record that the owner says the tele's view is blocked here (a wall, the roof, a tree): the patch of sky the target is in right now, as a BLOCKED tele_visibility files it. plan_targets then raises the site's horizon there for tonight. Returns when this target clears (null = not tonight).",
+    "Record that the owner says the tele's view is blocked here (a wall, the roof, a tree): the patch of sky the target is in right now. Returns when this target clears it as the sky turns (null = not tonight). It does not change the planner's horizon (the site's obstruction map); on the night plan use night_plan action=obscured cause=obstruction instead.",
     { target: z.string().optional().describe('the target the scope is pointing at; default the current view target') },
     async (a) => text(blockedAt(scope.requireLocation(), a.target ?? scope.state.view.target, 'the owner said the view is blocked')),
   );

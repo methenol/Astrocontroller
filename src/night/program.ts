@@ -72,7 +72,7 @@ export const PlanSettingsSchema = z.object({
   startOffsetMin: z.number().int().min(-180).max(180),
   endOffsetMin: z.number().int().min(-180).max(180),
   minAltitude: z.number().min(0).max(80),
-  /** the site's obstruction map (map_obstructions) and tonight's blocked views */
+  /** the site's obstruction map (map_obstructions) */
   useHorizon: z.boolean(),
   /** a target is only put in a block at least this long */
   minBlockMin: z.number().int().min(10).max(240),

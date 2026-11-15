@@ -50,7 +50,7 @@ While the tele stack is **not** collecting (`stacking_status.tele.state` not run
 1. `telescope_status` → read `bodyMode`, `motors.homed`, `link.state`, `stacking`.
 2. If `motors.homed` is false: `motors_home`, then `sync_time_and_location`.
    - The site's obstruction map is the owner's: never start the survey (`map_obstructions action=run`) yourself, not at the start of a night, not because a site has no map. Run it only when the owner tells you to. Without a map the plan works on the minimum altitude alone.
-3. Choose the target. Use the one the owner named; otherwise, when the sample has a `night plan` line (the owner's program, scheduled for tonight: the Plan tab), the plan's target now: its `goto_target name=` from that line, or `night_plan action=now`. Without a night plan line: `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; up **now** (the plan also lists targets that rise later): with an obstruction map for this site, `obstructedNow` not true decides it (the map's horizon in that direction, and every view found blocked tonight); without a map, `altitudeNow` ≥ 25. Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
+3. Choose the target. Use the one the owner named; otherwise, when the sample has a `night plan` line (the owner's program, scheduled for tonight: the Plan tab), the plan's target now: its `goto_target name=` from that line, or `night_plan action=now`. Without a night plan line: `plan_targets` with the types the objective names and `limit=15`, and pick the **first row, in the plan's order,** that passes all of: not `gated`; up **now** (the plan also lists targets that rise later): with an obstruction map for this site, `obstructedNow` not true decides it (the map's horizon in that direction); without a map, `altitudeNow` ≥ 25. Go down the list once, take the first that passes, and act; do not compare or rank rows yourself.
 4. Run **P2** on it.
 Nothing else comes first: no skills, no todo, no forecast, no notes.
 
@@ -61,7 +61,7 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
    - `VISIBLE` → continue with step 3.
    - `BLOCKED` → **P3** at once. Do not focus, do not stack, do not retry the same target.
    - Never use `view_camera`, `analyze_image` or `sky_check` to decide whether a target is visible: a dark wide frame, a star count or a "clear" sky verdict says nothing about what is in front of the tele lens.
-   - Report one line: "<target> az <azimuthNow> alt <altitudeNow>: VISIBLE (<reason>)" or "…: BLOCKED (<reason>), clears <clearsAt or 'not tonight'>".
+   - Report one line: "<target> az <azimuthNow> alt <altitudeNow>: VISIBLE (<reason>)" or "…: BLOCKED (<reason>)".
    - Three different targets in a row BLOCKED = possibly cloud: `sky_check` and `weather_forecast`, then keep trying targets on every sample.
 3. (`tele_visibility` left the focuser at infinity: go on.)
 4. `autofocus mode=astro`.
@@ -79,21 +79,22 @@ Run all steps, in order, on every target. Only the owner can skip a step, for ex
 10. Now the stack is collecting: housekeeping is allowed (section 4). If a previous target exists, run **P5**.
 
 ## P3 — The owner says obscured / not visible / blocked, or `tele_visibility` says BLOCKED
-The owner's word is final. Do not run `sky_check` to test it. Do not argue.
+The owner's word is final, cause included. Do not run `sky_check` to test it. Do not argue.
 1. `live_stacking action=stop` if a stack is running on it.
-2. On the night plan: `night_plan action=obscured target=<gotoName> cause=obstruction` (or `cause=cloud`); it files the blocked view for the horizon, holds the target until its path takes it clear (rising out of an obstruction in the east, out for the night when it sets behind one in the west, back after a while for a cloud), and answers with the plan's new target: run **P2** on that and skip steps 3–4. Otherwise, if the owner said it (not `tele_visibility`): `mark_blocked`. A BLOCKED `tele_visibility` has already recorded it.
-   What is recorded is the patch of sky (azimuth, altitude) at that time, not the target: the sky turns, so the target comes clear later (its `clearsAt`), and any other target passing through that patch is behind the same obstruction. Keep no list of blocked targets or azimuths yourself; the plan carries it.
-3. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated` and is up now (as in P1 step 3: the obstruction map's `obstructedNow`, or without a map `altitudeNow` ≥ 25). Go down the list once and act.
-4. Run **P2** on it.
-A blocked target comes back on its own: when the plan shows it with `obstructedNow` false (after its `clearsAt`), it is a candidate again like any other row.
-If the blocked target is the one the owner named (the priority target): put "return to <target> at <clearsAt>" in the todo list. Its return is scheduled, not optional (P4 step 4). `clearsAt` null = it does not clear tonight; say so in one line.
+2. The cause. The owner's, when they said it. For a BLOCKED `tele_visibility` the frame cannot tell cloud from a wall: `sky_check` (and `weather_forecast`) decide it — cloud in view, or the forecast below the floor, is `cloud`; a clear sky with this one direction blocked is `obstruction`. A BLOCKED `tele_visibility` files nothing by itself.
+3. On the night plan: `night_plan action=obscured target=<gotoName> cause=<cloud|obstruction>`. `cloud` holds the target for a while and tries it again; the site's horizon is not touched (the weather changes, the trees do not). `obstruction` holds the target until its path takes it clear (rising out of an obstruction in the east, out for the night when it sets behind one in the west). It answers with the plan's new target: run **P2** on that and skip steps 4–5. Otherwise (no night plan), only for an obstruction: `mark_blocked` (it gives the target's `clearsAt`); for cloud, nothing is filed.
+   Neither changes the site's horizon: the planner works from the obstruction map (`map_obstructions`, the owner's to run). On the night plan keep no list of blocked targets or azimuths yourself: the plan carries the holds. Without one, the todo list keeps each blocked target's `clearsAt` (below).
+4. `plan_targets` (same types, `limit=15`). Take the first row, in the plan's order, that is not `gated`, is up now (as in P1 step 3: the obstruction map's `obstructedNow`, or without a map `altitudeNow` ≥ 25), and is not a target found blocked tonight whose `clearsAt` has not come. Go down the list once and act.
+5. Run **P2** on it.
+A blocked target comes back on its own. On the night plan its hold ends when its path takes it clear (or, for a cloud, after a while) and the plan offers it again. Without a night plan, `plan_targets` knows only the obstruction map: skip a target found blocked tonight until its `clearsAt` (from `mark_blocked`); note it in the todo list with that time.
+If the blocked target is the one the owner named (the priority target): put "return to <target> at <time>" in the todo list, the time being when its hold ends (the `obscured` answer's `held … until`) or, without a night plan, `mark_blocked`'s `clearsAt`. Its return is scheduled, not optional (P4 step 4). Held for the night / `clearsAt` null = it does not clear tonight; say so in one line.
 
 ## P4 — Duty sample while a stack is collecting
 1. `stacking_status` → stacked vs taken.
 2. `analyze_subs count=3` → stars, hfrPx, roundness (QC rules: session-qc skill).
 3. If stacked is not growing, or a COLLECTING NOTHING / STALLED event arrived: stop the stack, find the cause (section 7) and get a stack running again in this turn.
 4. On the night plan: if its line says the plan has moved to another target (the scope is on X but the plan says Y), run **P5** to Y now. A `refocus due` line: check `analyze_subs`; if the stars have grown, `live_stacking action=stop`, then P2 steps 4–8 on the same target. A `stack rejecting` line: look (`view_camera`, `analyze_subs`): cloud → P3 with `cause=cloud`.
-5. If the owner's priority target is not the one stacking and the todo list has its return time: at or after that time, run **P5** to it (its P2 `tele_visibility` is the check; BLOCKED again files a higher patch and gives a later `clearsAt`). Before that time, pick `next_check` so a sample falls at it.
+5. If the owner's priority target is not the one stacking and the todo list has its return time: at or after that time, run **P5** to it (its P2 `tele_visibility` is the check; BLOCKED again goes through P3 with its cause). Before that time, pick `next_check` so a sample falls at it.
 6. Housekeeping as needed (section 4), then end your turn. Pick `duty action=next_check in_s=…` (600 s while healthy; on the night plan, so that a sample falls at the next block's start).
 
 ## P5 — Changing target (scheduled change, or the objective's handover)

@@ -86,7 +86,7 @@ export interface PlannedTarget {
   altitudeNow: number;
   /** compass direction now, 0 = N, 90 = E: two targets with close azimuths sit behind the same obstruction */
   azimuthNow: number;
-  /** above the minimum altitude now but behind the site's horizon (its mapped obstructions and tonight's blocked views); null without one */
+  /** above the minimum altitude now but behind the site's horizon (its mapped obstructions); null without one */
   obstructedNow: boolean | null;
   /** when an obstructed target comes clear tonight; null when it is not obstructed now or does not clear before the window ends */
   clearsAt: string | null;
@@ -177,7 +177,7 @@ export function framing(o: DsoObject, fov: { w: number; h: number }): { text: st
   if (frac > 1.15) return { text: `larger than the tele FOV (${maj}' vs ${fov.w.toFixed(0)}') — consider a mosaic or the wide camera`, fit: 0.5, mosaic: true };
   if (frac >= 0.25) return { text: `fills ${Math.round(frac * 100)}% of the frame width — excellent fit`, fit: 1, mosaic: false };
   if (frac >= 0.08) return { text: `${Math.round(frac * 100)}% of frame width — good, crop afterwards`, fit: 0.7, mosaic: false };
-  return { text: `small (${maj}') — only ${Math.round(frac * 100)}% of the frame; will look tiny at 150mm`, fit: 0.25, mosaic: false };
+  return { text: `small (${maj}') — only ${Math.round(frac * 100)}% of the frame; it will look tiny`, fit: 0.25, mosaic: false };
 }
 
 /** Defaults of the plan's filters. */
@@ -600,7 +600,8 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
         })(altAz(site, o.raHours, o.decDeg, now)),
         moonSeparationDeg: Math.round(moonSep),
         framing: fr.text,
-        suggestedFilter: perTarget ? `${glassUsed} (${d.reason})` : suggestFilter(o, moon.illuminationPercent),
+        // the glass it was judged through: the best of the scope's filters, or the one every target is planned through (not the Dwarf's names on any scope)
+        suggestedFilter: `${glassUsed} (${d.reason})`,
         clearHours: hasWx ? Math.round(vis.clearHours * 10) / 10 : null,
         weatherAlignment: hasWx ? Math.round(vis.alignment * 100) : null,
         skyAtBest: atPeak?.observability === undefined || !Number.isFinite(atPeak.observability) ? null : Math.round(atPeak.observability),
