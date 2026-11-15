@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import WebSocket from 'ws';
 import { cmdToModule } from '@alikh/dwarflab-sdk';
 import { requestType, responseType, decodeWith, decodeNotification, errorText, type ProtoType } from './protocol.js';
@@ -7,6 +9,8 @@ import { logger, errMsg } from '../../log.js';
 import { assertCommandAllowed, assertLinked, gate } from './gate.js';
 import { wire, cmdName } from './wirelog.js';
 import { SafeEmitter } from '../../util/events.js';
+import { writeFileAtomic } from '../../util/fs.js';
+import { LinkQualityTracker, type LinkQuality } from '../link-quality.js';
 
 const log = logger('link');
 
@@ -77,6 +81,8 @@ export interface LinkHealth {
   lastTrafficAgoS: number | null;
   unansweredCommands: number;
   reconnects: number;
+  /** the network link's round trip and loss, timed from the keepalive pings */
+  quality: LinkQuality;
 }
 
 interface Pending {
@@ -85,6 +91,27 @@ interface Pending {
   timer: NodeJS.Timeout;
   opts: RequestOptions;
   resType?: ProtoType;
+}
+
+const CLIENT_ID_FILE = 'dwarf-client-id';
+/** On stop, the close handshake gets this long before the socket is cut. */
+const CLOSE_GRACE_MS = 1000;
+
+function stableClientId(): string {
+  const file = path.join(config.paths.data, CLIENT_ID_FILE);
+  try {
+    const saved = fs.readFileSync(file, 'utf8').trim();
+    if (/^[\w-]{4,64}$/.test(saved)) return saved;
+  } catch {
+    /* none yet */
+  }
+  const id = `astrocontroller_${Date.now().toString(36)}`;
+  try {
+    writeFileAtomic(file, id);
+  } catch (e) {
+    log.warn(`could not keep the telescope client id in ${file}: ${errMsg(e)} (a restart will connect as a new client)`);
+  }
+  return id;
 }
 
 /** Firmware command used to probe the command service: cheap, always answered by healthy firmware. */
@@ -174,6 +201,12 @@ export class DwarfLink extends SafeEmitter {
   private stopped = true;
   private openedAt = 0;
   private lastPingAt = 0;
+  /** the keepalive ping still waiting for its pong (0: none) */
+  private pingOutAt = 0;
+  /** pings counted as missed whose pong may still arrive: a pong carries no id, so one that comes now is not timed */
+  private latePongs: number[] = [];
+  private readonly quality = new LinkQualityTracker('lan');
+  private publishedQuality: LinkQuality | null = null;
   /** last frame of any kind (binary packet or text pong) on the current socket */
   private lastRxAt = 0;
   /** last binary packet (reply or notification): the command service is alive */
@@ -192,7 +225,14 @@ export class DwarfLink extends SafeEmitter {
   private attempted = false;
   private stateSince = Date.now();
   private lastState: LinkState = 'released';
-  readonly clientId = `astrocontroller_${Date.now().toString(36)}`;
+  /**
+   * The id the telescope knows this controller by, kept across restarts (DATA_DIR/dwarf-client-id).
+   * The firmware holds one controller session and refuses a different client_id while it holds one
+   * (close 4409). A fresh id per process meant a restart that did not close its socket cleanly left
+   * the scope holding a session nobody could take over, the DWARFLAB app included, until a power
+   * cycle. With the same id a restarted process is the same client and gets its session back.
+   */
+  readonly clientId = stableClientId();
   /** the socket is open (it may still be unresponsive: see `usable`) */
   connected = false;
 
@@ -240,6 +280,20 @@ export class DwarfLink extends SafeEmitter {
     if (this.monitor) clearInterval(this.monitor);
     this.monitor = null;
     const wasConnected = this.connected;
+    // a clean close tells the telescope the session is over; cutting the socket (terminate) leaves it
+    // holding the session when the reset is lost on the way (long-range Wi-Fi), and it then refuses
+    // every other client until it is power cycled
+    const ws = this.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      this.ws = null;
+      ws.removeAllListeners('message');
+      try {
+        ws.close(1000, 'controller stopped');
+        setTimeout(() => ws.terminate(), CLOSE_GRACE_MS).unref();
+      } catch {
+        ws.terminate();
+      }
+    }
     this.teardown(new Error('link stopped'));
     this.unresponsiveSince = 0;
     this.strikes = 0;
@@ -338,6 +392,7 @@ export class DwarfLink extends SafeEmitter {
       lastTrafficAgoS: this.lastRxAt ? Math.round((now - this.lastRxAt) / 1000) : null,
       unansweredCommands: this.strikes,
       reconnects: this.reconnects,
+      quality: this.quality.snapshot(),
     };
   }
 
@@ -346,6 +401,16 @@ export class DwarfLink extends SafeEmitter {
     if (this.unresponsiveSince) return 'unresponsive';
     if (this.contendedSince) return 'contended';
     return this.connected ? 'connected' : 'connecting';
+  }
+
+  /** A keepalive's outcome (its round trip, or null: unanswered); 'quality' when what the UI shows moved. */
+  private qualitySample(rttMs: number | null): void {
+    if (rttMs === null) this.quality.missed();
+    else this.quality.answered(rttMs);
+    const q = this.quality.snapshot();
+    if (!LinkQualityTracker.differs(this.publishedQuality, q)) return;
+    this.publishedQuality = q;
+    this.emit('quality', q);
   }
 
   /** Emit 'health' when the state changes. */
@@ -373,6 +438,12 @@ export class DwarfLink extends SafeEmitter {
     }
     if (now - this.lastPingAt >= this.t.pingEveryMs) {
       this.lastPingAt = now;
+      // the last ping never got its pong (in time)
+      if (this.pingOutAt) {
+        this.qualitySample(null);
+        this.latePongs.push(this.pingOutAt);
+      }
+      this.pingOutAt = now;
       try {
         ws.send('ping');
       } catch {
@@ -473,6 +544,9 @@ export class DwarfLink extends SafeEmitter {
       this.openedAt = Date.now();
       this.lastRxAt = Date.now();
       this.lastPingAt = 0;
+      this.pingOutAt = 0;
+      this.latePongs = [];
+      this.quality.reset();
       log.info(`connected to ${url}`);
       wire('!', `connected to ${url}`);
       this.publish();
@@ -490,7 +564,18 @@ export class DwarfLink extends SafeEmitter {
     ws.on('message', (raw: Buffer, isBinary: boolean) => {
       if (this.ws !== ws) return;
       this.lastRxAt = Date.now();
-      if (!isBinary) return; // "pong" keepalive replies
+      if (!isBinary) {
+        // "pong" keepalive replies: the network's round trip
+        if (raw.toString() === 'pong') {
+          this.latePongs = this.latePongs.filter((at) => this.lastRxAt - at < this.t.deadSocketMs);
+          if (this.latePongs.length) this.latePongs.shift(); // an overdue ping's pong: which one it answers is unknown
+          else if (this.pingOutAt) {
+            this.qualitySample(this.lastRxAt - this.pingOutAt);
+            this.pingOutAt = 0;
+          }
+        }
+        return;
+      }
       this.handlePacket(new Uint8Array(raw));
     });
 

@@ -451,7 +451,7 @@ export class PlanService extends SafeEmitter {
       filter: defaults.filter || undefined,
       filters: defaults.filters,
       rig: defaults.rig,
-      horizon: settings.useHorizon ? horizonFor(site) : undefined,
+      horizon: settings.useHorizon ? horizonFor(site, new Date(this.now()), w.start) : undefined,
       started: o.started,
       spanNight: { blockMin: settings.minBlockMin },
     });
@@ -683,7 +683,7 @@ export class PlanService extends SafeEmitter {
     this.lastFacts = await this.facts();
     const { list, excluded } = this.candidates(site, w, settings, conditions);
     const buildMs = Date.now() - tc;
-    const horizon = settings.useHorizon ? horizonFor(site) : undefined;
+    const horizon = settings.useHorizon ? horizonFor(site, new Date(this.now()), w.start) : undefined;
     const learned = this.learned(settings);
     const active = this.d.active?.();
     const current = active && active.night === w.night ? { key: parentKey(active.session.target), since: active.session.startedAt } : null;
@@ -1132,7 +1132,7 @@ export class PlanService extends SafeEmitter {
   async calendar(o: Pick<CalendarOptions, 'filters' | 'programOnly' | 'teleFovWidthArcmin' | 'limit'>): Promise<Awaited<ReturnType<typeof buildCalendar>>> {
     const site = this.site();
     const settings = loadSettings();
-    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal), now: this.now() });
+    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site, new Date(this.now()), planWindow(site, new Date(this.now()), settings).start) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal), now: this.now() });
   }
 
   /** The program or the settings changed: solve again shortly. */

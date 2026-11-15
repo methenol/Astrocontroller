@@ -52,6 +52,19 @@ describe('blocked views', () => {
     assert.equal(sightingsFor(FL, new Date('2026-11-08T00:30:00Z')).length, 0, 'and not at dusk either');
   });
 
+  test("a plan for tonight solved at dawn does not carry the night just ending", () => {
+    // seen 21:00 local; the plan for the coming night (dusk 18:54) solved at 06:53 local, before the 10:00 solar boundary
+    const FL = { lat: 28.8, lon: -81.7 };
+    recordBlocked(FL, 'IC 353', 78, 37, 'blurred', new Date('2026-11-21T02:00:00Z'));
+    const solvedAt = new Date('2026-11-21T11:53:00Z');
+    const tonight = new Date('2026-11-21T23:54:00Z');
+    assert.equal(sightingsFor(FL, solvedAt).length, 1, 'by the clock it is still that night');
+    assert.equal(sightingsFor(FL, solvedAt, tonight).length, 0, "tonight's plan does not inherit it");
+    assert.equal(horizonFor(FL, solvedAt, tonight), undefined, 'nor does its horizon');
+    recordBlocked(FL, 'IC 353', 78, 37, 'blurred', new Date('2026-11-22T01:00:00Z'));
+    assert.equal(sightingsFor(FL, new Date('2026-11-22T02:00:00Z'), tonight).length, 1, "tonight's own sightings still count");
+  });
+
   test('the night starts mid-morning, local solar time', () => {
     // 10:00 solar time in Florida is about 15:27 UTC
     const start = new Date(nightStartAt(-81.7, new Date('2026-11-08T03:00:00Z')));

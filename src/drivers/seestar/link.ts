@@ -12,6 +12,7 @@
  */
 import net from 'node:net';
 import { SafeEmitter } from '../../util/events.js';
+import { LinkQualityTracker, type LinkQuality } from '../link-quality.js';
 import { errMsg, logger } from '../../log.js';
 import { estop } from '../../safety/estop.js';
 import { handshake, type RpcResponse, type Send } from './auth.js';
@@ -53,6 +54,8 @@ export interface LinkHealth {
   connectedAt: number | null;
   reconnects: number;
   lastError: string | null;
+  /** the link's round trip and loss, from the test_connection heartbeat (through the ZWO tunnel when remote) */
+  quality: LinkQuality;
 }
 
 export interface LinkOptions {
@@ -66,6 +69,8 @@ export interface LinkOptions {
   /** every request waits at least this long for its reply (over the ZWO tunnel: its stalls) */
   minRequestTimeoutMs?: number;
   backoffMinMs?: number;
+  /** through a relay (ZWO Telescope Network): the link's quality is judged against a relay's round trips */
+  remote?: boolean;
 }
 
 export interface RequestOptions {
@@ -96,6 +101,8 @@ export class SeestarLink extends SafeEmitter {
   private socket: net.Socket | null = null;
   private wanted = false;
   private ready = false;
+  private readonly quality: LinkQualityTracker;
+  private publishedQuality: LinkQuality | null = null;
   private buffer = '';
   private nextId = FIRST_ID;
   private readonly pending = new Map<number, Pending>();
@@ -121,7 +128,8 @@ export class SeestarLink extends SafeEmitter {
     this.minRequestTimeoutMs = opts.minRequestTimeoutMs ?? 0;
     this.backoffMinMs = opts.backoffMinMs ?? BACKOFF_MIN_MS;
     this.backoffMs = this.backoffMinMs;
-    this.h = { host: opts.host, port: opts.port, connected: false, authenticated: false, authRequired: false, lastRxAt: null, connectedAt: null, reconnects: 0, lastError: null };
+    this.quality = new LinkQualityTracker(opts.remote ? 'remote' : 'lan');
+    this.h = { host: opts.host, port: opts.port, connected: false, authenticated: false, authRequired: false, lastRxAt: null, connectedAt: null, reconnects: 0, lastError: null, quality: this.quality.snapshot() };
   }
 
   /** connected and past the handshake */
@@ -134,7 +142,7 @@ export class SeestarLink extends SafeEmitter {
   }
 
   health(): LinkHealth {
-    return { ...this.h };
+    return { ...this.h, quality: this.quality.snapshot() };
   }
 
   start(): void {
@@ -260,10 +268,27 @@ export class SeestarLink extends SafeEmitter {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
+    this.quality.reset();
+    const gen = this.generation;
     this.heartbeat = setInterval(() => {
       if (!this.ready) return;
-      this.send('test_connection', undefined, this.silentAfterMs).catch(() => undefined);
+      // each heartbeat is timed: its round trip, or a miss when no reply came in time (not when the link dropped)
+      const sentAt = Date.now();
+      this.send('test_connection', undefined, this.silentAfterMs).then(
+        () => gen === this.generation && this.qualitySample(Date.now() - sentAt),
+        (err) => gen === this.generation && /no reply/.test(errMsg(err)) && this.qualitySample(null),
+      );
     }, this.heartbeatMs);
+  }
+
+  /** A heartbeat's outcome; 'quality' when what the UI shows moved. */
+  private qualitySample(rttMs: number | null): void {
+    if (rttMs === null) this.quality.missed();
+    else this.quality.answered(rttMs);
+    const q = this.quality.snapshot();
+    if (!LinkQualityTracker.differs(this.publishedQuality, q)) return;
+    this.publishedQuality = q;
+    this.emit('quality', q);
   }
 
   private stopHeartbeat(): void {

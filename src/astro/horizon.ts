@@ -129,12 +129,13 @@ export function horizonOf(mask: HorizonMask): Horizon {
 
 /**
  * The horizon the planner uses at a site: the mask in use, raised wherever the tele was found
- * blocked tonight (sightings.ts); undefined when there is neither.
+ * blocked tonight (sightings.ts); undefined when there is neither. `night`: a time inside the night
+ * being planned, so a plan for tonight solved in the morning does not carry last night's sightings.
  */
-export function horizonFor(site: { lat: number; lon: number } | null | undefined, now = new Date()): Horizon | undefined {
+export function horizonFor(site: { lat: number; lon: number } | null | undefined, now = new Date(), night?: Date): Horizon | undefined {
   const m = maskFor(site);
   const base = m ? horizonOf(m) : undefined;
-  return site ? withSightings(base, sightingsFor(site, now)) : base;
+  return site ? withSightings(base, sightingsFor(site, now, night)) : base;
 }
 
 const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];

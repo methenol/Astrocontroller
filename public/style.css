@@ -121,6 +121,17 @@ h3 { margin: 0 0 8px; font-size: 14px; }
 .chip { flex: none; scroll-snap-align: start; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px; white-space: nowrap; line-height: 1.3; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--err); margin-right: 6px; vertical-align: 1px; }
 .chip.ok .dot { background: var(--ok); }
+/* the link's quality: signal bars by grade, then the median round trip (and the loss when it counts) */
+.chip-net { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; cursor: help; }
+.chip-net[hidden] { display: none; }
+.chip-net .bars { width: 15px; height: 12px; flex: none; }
+.chip-net .bars rect { fill: var(--line); }
+.chip-net[data-grade=good] .bars rect { fill: var(--ok); }
+.chip-net[data-grade=fair] .bars rect:nth-child(-n+3) { fill: var(--ok); }
+.chip-net[data-grade=poor] .bars rect:nth-child(-n+2) { fill: var(--warn); }
+.chip-net[data-grade=bad] .bars rect:nth-child(1) { fill: var(--err); }
+.chip-net[data-grade=poor] { color: var(--warn); }
+.chip-net[data-grade=bad] { color: var(--err); }
 .top-actions { flex: none; display: flex; align-items: center; gap: 6px; }
 .estop-btn { min-height: 38px; padding: 0 14px; font-weight: 800; letter-spacing: .5px; color: #fff; background: #dc2626; border: 2px solid #fca5a5; }
 .estop-btn:hover:not(:disabled) { background: #b91c1c; }

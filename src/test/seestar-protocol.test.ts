@@ -133,6 +133,18 @@ describe('Seestar control link', () => {
     assert.ok(Date.now() - t0 >= 380, 'the request was given the floor, not its own 50 ms');
   });
 
+  test('the heartbeat is timed: round trip and loss, graded for the relay when the link is remote', async () => {
+    fake = new FakeSeestar();
+    await fake.listen();
+    const r = link(noKey, { heartbeatMs: 30, remote: true });
+    await until(() => r.health().quality.samples >= 4);
+    const q = r.health().quality;
+    assert.equal(q.path, 'remote');
+    assert.equal(typeof q.rttMs, 'number');
+    assert.equal(q.lossPct, 0);
+    assert.equal(q.grade, 'good');
+  });
+
   test('the link reconnects after the scope drops it, and after silence; a request in flight fails with the reason', async () => {
     fake = new FakeSeestar();
     await fake.listen();

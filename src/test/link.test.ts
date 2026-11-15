@@ -47,6 +47,30 @@ describe('DwarfLink against the fake telescope', () => {
     assert.equal(link.health().state, 'connected');
   });
 
+  test('the keepalive pings are timed: the network round trip and loss, graded for Wi-Fi', async () => {
+    link.start();
+    await link.waitConnected(2000);
+    const t0 = Date.now();
+    while (link.health().quality.samples < 4 && Date.now() - t0 < 3000) await sleep(20);
+    const q = link.health().quality;
+    assert.ok(q.samples >= 4, `${q.samples} keepalives timed`);
+    assert.equal(q.path, 'lan');
+    assert.ok(typeof q.rttMs === 'number' && q.rttMs < 100, `${q.rttMs} ms on the loopback`);
+    assert.equal(q.grade, 'good');
+  });
+
+  test('stop closes the socket with a close frame, so the telescope ends the session', async () => {
+    link.start();
+    await link.waitConnected(2000);
+    const closed = new Promise<number>((resolve) => (fake.onClientClosed = resolve));
+    link.stop();
+    assert.equal(await Promise.race([closed, sleep(1500).then(() => -1)]), 1000);
+  });
+
+  test('the client id is kept across restarts', () => {
+    assert.equal(new DwarfLink('127.0.0.1', 1).clientId, link.clientId);
+  });
+
   test('a negative reply code rejects with DwarfCommandError carrying the code', async () => {
     fake.reply(Cmd.ASTRO_START_GOTO_DSO, { code: -11501 });
     link.start();

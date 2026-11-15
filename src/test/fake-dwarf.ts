@@ -27,6 +27,8 @@ export type Handler = (req: ReceivedRequest, fake: FakeDwarf) => Reply | Promise
 const notifyCmdByName = new Map<string, number>(Object.entries(NOTIFY).map(([cmd, n]) => [n.name, Number(cmd)]));
 
 export class FakeDwarf {
+  /** called with a client's close code: 1000 for a clean close, 1006 when its socket was cut */
+  onClientClosed: ((code: number) => void) | null = null;
   private wss!: WebSocketServer;
   private client: WebSocket | null = null;
   private handlers = new Map<number, Handler>();
@@ -58,7 +60,8 @@ export class FakeDwarf {
         if (this.hung) return;
         void this.handle(ws, new Uint8Array(raw));
       });
-      ws.on('close', () => {
+      ws.on('close', (code: number) => {
+        this.onClientClosed?.(code);
         if (this.client === ws) this.client = null;
       });
     });

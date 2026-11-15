@@ -37,8 +37,27 @@ function connText(t) {
   return 'telescope offline';
 }
 
+const GRADE_TEXT = { good: 'good', fair: 'fair', poor: 'poor', bad: 'bad' };
+const ms = (v) => (v == null ? '–' : v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`);
+
+/** The network link's health from its keepalives: median round trip, jitter and loss, graded. */
+function renderNet(t) {
+  const el = $('#chip-net');
+  const q = t.link?.quality;
+  el.hidden = !t.connected || !q || !q.samples;
+  if (el.hidden) return;
+  el.dataset.grade = q.grade ?? '';
+  $('span', el).textContent = q.grade ? `${ms(q.rttMs)}${q.lossPct >= 5 ? ` · ${q.lossPct}% lost` : ''}` : 'measuring…';
+  el.title = q.grade
+    ? `Link to the telescope (${q.path === 'remote' ? 'ZWO Telescope Network, judged for a relay' : 'Wi-Fi / LAN'}): ${GRADE_TEXT[q.grade]}\n` +
+      `round trip ${ms(q.rttMs)} median (newest ${ms(q.lastRttMs)}), jitter ${ms(q.jitterMs)}\n` +
+      `${q.lossPct}% of the last ${q.samples} keepalives unanswered`
+    : `Link to the telescope: measuring (${q.samples} keepalive${q.samples === 1 ? '' : 's'} so far)`;
+}
+
 function renderChips(t) {
   setConn(!!t.connected, connText(t));
+  renderNet(t);
   $('#chip-conn').title = [t.link?.detail, t.tunnel?.detail, t.tunnel?.supervisor?.lastError].filter(Boolean).join(' · ');
   // the user has to act on these: say so once per episode
   const ls = t.link?.state;

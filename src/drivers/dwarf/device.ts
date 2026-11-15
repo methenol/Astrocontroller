@@ -148,6 +148,7 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
       this.syncLink();
     });
     this.link.on('health', () => this.syncLink());
+    this.link.on('quality', () => this.syncLink());
     // back from a hang (after a power cycle): resync like a fresh connection
     this.link.on('responsive', () => {
       this.syncLink();

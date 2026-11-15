@@ -71,14 +71,19 @@ export function nightStartAt(lon: number, now: Date): number {
   return Math.floor((t - boundary) / DAY) * DAY + boundary;
 }
 
-const live = (s: Sighting, now: Date) => {
+const live = (s: Sighting, now: Date, night?: Date) => {
   const at = Date.parse(s.at);
-  return at <= now.getTime() + 60e3 && now.getTime() - at < KEEP_HOURS * 3600e3 && at >= nightStartAt(s.site.lon, now);
+  const from = Math.max(nightStartAt(s.site.lon, now), night ? nightStartAt(s.site.lon, night) : -Infinity);
+  return at <= now.getTime() + 60e3 && now.getTime() - at < KEEP_HOURS * 3600e3 && at >= from;
 };
 
-/** The sightings still in force at this site. */
-export function sightingsFor(site: { lat: number; lon: number }, now = new Date()): Sighting[] {
-  return loadAll().filter((s) => live(s, now) && distanceKm(s.site, site) <= SAME_SITE_KM);
+/**
+ * The sightings still in force at this site. `night` is a time inside the night being planned when
+ * that is not the one `now` is in: a plan for tonight solved before the morning boundary (06:50,
+ * with last night's verdicts still live by the clock) must not inherit them.
+ */
+export function sightingsFor(site: { lat: number; lon: number }, now = new Date(), night?: Date): Sighting[] {
+  return loadAll().filter((s) => live(s, now, night) && distanceKm(s.site, site) <= SAME_SITE_KM);
 }
 
 /** Remember that the tele was blocked pointing here, now. Expired sightings are dropped as it goes. */

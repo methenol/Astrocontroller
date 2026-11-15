@@ -25,6 +25,7 @@ import { NOMINAL_FOV, seestarFocusSweep } from './focus.js';
 import { frameImage, framePixels, JPEG_SOI } from './frames.js';
 import { SeestarVideoHub } from './hub.js';
 import type { SeestarEvent } from './link.js';
+import type { LinkQuality } from '../link-quality.js';
 import { isStacking, TERMINAL_STATES, type OperationState, type SeestarState } from './model.js';
 import { SeestarFiles, seestarStorage, type SeestarStorage } from './storage.js';
 import { SeestarSurvey } from './survey.js';
@@ -99,12 +100,14 @@ function opWord(o: OperationState | undefined): string {
 }
 
 /** The control link in the UI's terms (its state and a plain-language detail). */
-function linkView(st: SeestarState): { state: string; detail: string; health: SeestarState['link'] } {
+function linkView(st: SeestarState): { state: string; detail: string; health: SeestarState['link']; quality: LinkQuality | null } {
   const l = st.link;
   const where = l ? `${l.host}:${l.port}` : config.seestar.host;
-  if (st.released) return { state: 'released', detail: 'released by the user (Disconnect in the web UI)', health: l };
-  if (st.connected) return { state: 'connected', detail: `connected to the Seestar at ${where}`, health: l };
-  return { state: 'connecting', detail: `connecting to the Seestar at ${where}${l?.lastError ? `: ${l.lastError}` : ''}`, health: l };
+  // the heartbeat's round trip and loss, where the Dwarf has them too (link.quality)
+  const quality = l?.quality ?? null;
+  if (st.released) return { state: 'released', detail: 'released by the user (Disconnect in the web UI)', health: l, quality };
+  if (st.connected) return { state: 'connected', detail: `connected to the Seestar at ${where}`, health: l, quality };
+  return { state: 'connecting', detail: `connecting to the Seestar at ${where}${l?.lastError ? `: ${l.lastError}` : ''}`, health: l, quality };
 }
 
 /** The UI's shooting modes (the Dwarf's names) and the Seestar view modes they are. */

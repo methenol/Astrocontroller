@@ -57,6 +57,9 @@ function create({ agent }: DriverDeps): DriverRuntime {
       if (config.agent.enabled) chargeWatch = watchCharging(dwarf, agent);
     },
     shutdownSteps: () => [
+      // first: the process exits 1.5 s after the signal whatever is still running, and a link left
+      // open holds the telescope's one controller session (it refuses every other client)
+      ['telescope link', () => dwarf.stop()],
       ['transfers', () => void cancelActiveJobs()],
       ['streams', () => hub.shutdown()],
       ['charge watch', () => chargeWatch?.stop()],
@@ -64,7 +67,6 @@ function create({ agent }: DriverDeps): DriverRuntime {
       ['duty', () => duty.dispose()],
       ['travel guard', () => travelGuard.stop()],
       ['stack supervisor', () => stackSupervisor.stop()],
-      ['telescope link', () => dwarf.stop()],
       ['wire log', () => flushWire()],
     ],
     describeTarget: () => `Dwarf 3 at ${config.dwarf.host}`,

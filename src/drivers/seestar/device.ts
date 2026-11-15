@@ -191,7 +191,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     // 2026-11-12). The local-Wi-Fi 15 s silence cut dropped the link mid-stall, every call then
     // failed "not connected" and the survey aborted, while the redial could not get through until
     // the stall ended anyway. A session that is really lost is ended by the tunnel itself.
-    const tunnelLink = connection === 'zwo' ? { silentAfterMs: TUNNEL_SILENT_AFTER_MS, minRequestTimeoutMs: TUNNEL_SILENT_AFTER_MS } : {};
+    const tunnelLink = connection === 'zwo' ? { silentAfterMs: TUNNEL_SILENT_AFTER_MS, minRequestTimeoutMs: TUNNEL_SILENT_AFTER_MS, remote: true } : {};
     this.link = new SeestarLink({ host, port: this.rpcPort, loadKey: () => readKey(cfg.keyPath), connect: o.connect, ...tunnelLink, ...o.link });
     const kickMs = connection === 'zwo' ? TUNNEL_KICK_MS : undefined;
     const streamSilenceMs = connection === 'zwo' ? TUNNEL_STREAM_SILENCE_MS : undefined;
@@ -207,6 +207,10 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     this.link.on('event', (e: SeestarEvent) => this.onEvent(e));
     this.link.on('health', (h) => {
       this.st.link = h;
+      this.changed();
+    });
+    this.link.on('quality', () => {
+      this.st.link = this.link.health();
       this.changed();
     });
     this.link.on('authFailed', (msg: string) => log.error(`the scope refused the handshake: ${msg}`));
