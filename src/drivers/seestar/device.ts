@@ -12,8 +12,14 @@
  * The picture sockets stay open from connect to disconnect; begin_streaming follows the exposing
  * camera. Previews are at bin 2 (a 1080×1920 JPEG per exposure, 1 fps on the tele over the tunnel);
  * a tool that asks for full resolution (withFullRes) sets bin 1 for its frames and bin 2 comes back
- * afterwards. An operation is reserved (busy, stoppable) from the moment it is asked for, through
- * its camera switch: stopWork() cancels one that has not started and stops a running one by its
+ * afterwards. A stack always runs at bin 1 and its bin is never changed while it runs: the subs it
+ * records are the camera's frames at its bin, and the scope's dark library (and its auto master
+ * dark) is full resolution, so a bin-2 stack records half-resolution subs and, once the master dark
+ * changes with the sensor's temperature, rejects every sub as "invalid size" (code 261; 2026-11-17
+ * C 33: 39 subs stacked, all rejected from the sensor at 16.2 °C on). The subs' FITS header
+ * carries the camera bin (XBINNING); preview.raw_bin2 only bins the preview frames sent over the
+ * picture socket. An operation is reserved (busy, stoppable) from the moment it is asked for,
+ * through its camera switch: stopWork() cancels one that has not started and stops a running one by its
  * label, again once the scope shows it running (a stop that lands before that is ignored).
  */
 import fs from 'node:fs';
@@ -47,6 +53,10 @@ const FULL_POLL_MS = 10_000;
 const PREVIEW_BIN = 2;
 const WORK_BIN = 1;
 const PREVIEW_BIN_AFTER_OP_MS = 3_000;
+/** binned frames in a row, while full resolution is wanted, before bin 1 is sent again */
+const REBIN_AFTER = 3;
+/** after the bin changes before a stack: frames of the old bin still in flight drain */
+const STACK_BIN_SETTLE_MS = 2_000;
 /** how long a stop watches for the operation it stopped to turn up running (and stops it again) */
 const STOP_RESEND_WINDOW_MS = 4000;
 const LIVE_EXPOSURE_OPTIONS = [500, 1000, 2000];
@@ -161,6 +171,12 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   /** stopWork() came while the operation was still being prepared: it must not start */
   private pendingCancel = false;
   private fullRes = 0;
+  /** a stack is asked for or runs: the camera stays at bin 1 (see the header) */
+  private stackBin = false;
+  /** startStack / a stacking GoTo in progress: a Stack end event then is the old stack's, not a reason to drop bin 1 */
+  private stackStarting = 0;
+  /** the widest frame seen per camera while full resolution was wanted (the bin-1 width) */
+  private fullWidthSeen: Record<Camera, number> = { tele: 0, wide: 0 };
   private stateTimer: NodeJS.Timeout | null = null;
   private statePending = false;
   private poll: NodeJS.Timeout | null = null;
@@ -289,7 +305,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     writeFileAtomic(this.releasedFile, JSON.stringify({ released: true, at: new Date().toISOString() }));
     if (this.link.usable) {
       try {
-        if (this.fullRes) await this.call('set_camera_bin', PREVIEW_BIN).catch(() => undefined);
+        if (this.fullRes && !isStacking(this.st)) await this.call('set_camera_bin', PREVIEW_BIN).catch(() => undefined);
         if (this.viewRunning() && !isStacking(this.st)) await this.call('iscope_stop_view', undefined, { timeoutMs: STOP_VIEW_ON_RELEASE_MS });
       } catch (e) {
         log.warn(`release: ${errMsg(e)}`);
@@ -378,7 +394,15 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       const cam: Camera | null = route.includes('SecondView') ? 'wide' : route.includes('View') ? 'tele' : null;
       if (cam && cam === this.exposing) this.images[cam].restartStream();
     }
-    if (name === 'Stack' && e.state && TERMINAL_STATES.has(String(e.state)) && isOuter(e)) setTimeout(() => void this.applySelection('stack ended'), 1000);
+    if (name === 'Stack' && e.state && TERMINAL_STATES.has(String(e.state)) && isOuter(e)) {
+      setTimeout(() => {
+        // a stack that ended by itself (not stopStack): previews go back to bin 2, unless a new one is starting
+        if (!this.isStacking() && this.stackStarting === 0) this.stackBin = false;
+        void this.applySelection('stack ended')
+          .then(() => this.applyBin('stack ended'))
+          .catch(() => undefined);
+      }, 1000);
+    }
     this.emit('event', e);
     if (name) this.emit(name, e);
     this.changed();
@@ -695,15 +719,54 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
 
   // ---- bin --------------------------------------------------------------------------------------
 
-  /** bin 2 for previews, bin 1 while a tool wants full resolution. */
-  async applyBin(reason: string): Promise<boolean> {
+  /**
+   * bin 2 for previews, bin 1 while a tool wants full resolution or a stack is wanted; never changed
+   * while a stack runs. `force`: send it even when the scope says it is set (its frames still come
+   * at the other bin).
+   */
+  async applyBin(reason: string, force = false): Promise<boolean> {
     if (!this.link.usable || !this.viewRunning()) return false;
-    const want = this.fullRes > 0 ? WORK_BIN : PREVIEW_BIN;
-    const cur = await this.call('get_camera_bin', undefined, { allowError: true }).catch(() => null);
+    // a bin change mid-stack makes the scope reject every sub after it (invalid size)
+    if (this.isStacking()) return false;
+    return this.setBin(this.fullRes > 0 || this.stackBin ? WORK_BIN : PREVIEW_BIN, reason, force);
+  }
+
+  private async setBin(want: number, reason: string, force = false): Promise<boolean> {
+    const cur = force ? null : await this.call('get_camera_bin', undefined, { allowError: true }).catch(() => null);
     if (cur && typeof cur.result === 'number' && cur.result === want) return false;
     await this.call('set_camera_bin', want);
     log.info(`camera bin ${want} (${reason})`);
     return true;
+  }
+
+  /**
+   * The camera's bin-1 frame width: the tele's chip, or the widest frame seen while full resolution
+   * was wanted (0 = not known yet). A bin-2 frame is half of it.
+   */
+  fullWidth(camera: Camera): number {
+    const chip = camera === 'tele' ? (this.st.device.chipSize?.[0] ?? 0) : 0;
+    return Math.max(chip, this.fullWidthSeen[camera]);
+  }
+
+  /**
+   * The next full-resolution frame of a camera, inside withFullRes. Frames still coming at bin 2
+   * after the switch to bin 1 (exposed before it, or queued in the tunnel) are discarded, and bin 1
+   * is sent again while they keep coming: a "full-resolution" photo or measurement is never made
+   * from a binned frame.
+   */
+  async grabFullRes(camera: Camera, timeoutMs = GRAB_TIMEOUT_MS): Promise<{ image: FloatImage; frame: Frame; binned: number }> {
+    if (this.fullRes === 0) throw new Error(`a full-resolution ${camera} frame was asked for outside withFullRes`);
+    const r = await nextUnbinned({
+      grab: (left) => this.grabImage(camera, 'preview', left),
+      widthOf: (g) => g.image.frameWidth ?? g.image.width,
+      fullWidth: () => this.fullWidth(camera),
+      seen: (w) => (this.fullWidthSeen[camera] = Math.max(this.fullWidthSeen[camera], w)),
+      rebin: () => this.applyBin(`binned ${camera} frames while full resolution is wanted`, true).then(() => undefined),
+      timeoutMs,
+      what: `${camera} frame`,
+    });
+    if (r.binned) log.info(`${camera}: ${r.binned} binned frame(s) discarded before the full-resolution one`);
+    return { ...r.frame, binned: r.binned };
   }
 
   /** Full-resolution frames from this camera for the duration of `run`. */
@@ -810,6 +873,23 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
 
   /** GoTo: slew, plate-solve and centre on the tele (iscope_start_view with a target), then optionally stack. */
   async gotoTarget(g: GotoRequest): Promise<{ goto: OperationResult; stacking: string }> {
+    // the scope's stack_after_goto starts the stack at whatever bin is set: bin 1 before the GoTo
+    this.stackBin = !!g.stack;
+    if (g.stack) this.stackStarting++;
+    try {
+      return await this.gotoAndStack(g);
+    } catch (e) {
+      if (g.stack && !this.isStacking()) {
+        this.stackBin = false;
+        void this.applyBin('the GoTo did not stack').catch(() => undefined);
+      }
+      throw e;
+    } finally {
+      if (g.stack) this.stackStarting--;
+    }
+  }
+
+  private async gotoAndStack(g: GotoRequest): Promise<{ goto: OperationResult; stacking: string }> {
     const label = `GoTo ${g.name}`;
     const r = await this.withTele(label, async () =>
       Seestar.ok(
@@ -820,6 +900,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
           () =>
             this.serial(async () => {
               if (this.viewRunning() && this.exposing !== 'tele') await this.call('iscope_stop_view', undefined, { timeoutMs: VIEW_TIMEOUT_MS }).catch(() => undefined);
+              const stackBinNow = g.stack && this.viewRunning() && !this.isStacking();
+              if (stackBinNow) await this.setBin(WORK_BIN, `${label}, then stacking`).catch((e) => log.warn(`camera bin: ${errMsg(e)}`));
               this.stackTarget = g.name;
               this.pointingChanged = true;
               // the firmware's GoTo takes JNow: J2000 as is lands every target off by the precession since 2000
@@ -829,6 +911,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
               this.st.view.state = 'working';
               this.st.view.mode = 'star';
               this.st.view.target = g.name;
+              // no view ran before the GoTo: the bin is set on the view it started
+              if (g.stack && !stackBinNow) await this.setBin(WORK_BIN, `${label}, then stacking`).catch((e) => log.warn(`camera bin: ${errMsg(e)}`));
               this.syncStreams();
               return res;
             }),
@@ -893,6 +977,22 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
    * target's subs against the old one's, so they all fail.
    */
   async startStack(restart = false): Promise<RpcResponse> {
+    this.stackBin = true;
+    this.stackStarting++;
+    try {
+      return await this.startStackAtWorkBin(restart);
+    } catch (e) {
+      if (!this.isStacking()) {
+        this.stackBin = false;
+        void this.applyBin('the stack did not start').catch(() => undefined);
+      }
+      throw e;
+    } finally {
+      this.stackStarting--;
+    }
+  }
+
+  private async startStackAtWorkBin(restart: boolean): Promise<RpcResponse> {
     if (!this.viewRunning()) await this.ensureLiveView();
     if (this.exposing !== 'tele') await this.serial(() => this.restartView('tele', this.st.view.lpFilter ?? false));
     const name = this.stackTarget ?? this.st.view.target;
@@ -901,6 +1001,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       if (g.code) log.warn(`the stack could not be named ${name}: ${g.error ?? `code ${g.code}`}`);
     }
     const fresh = restart || this.pointingChanged;
+    if (!this.isStacking() && (await this.setBin(WORK_BIN, 'stacking'))) await sleep(STACK_BIN_SETTLE_MS);
     if (fresh && !restart) log.info(`stacking ${name ?? 'the new pointing'} from scratch: the scope moved since the last stack`);
     const r = await this.call('iscope_start_stack', { restart: fresh });
     this.pointingChanged = false;
@@ -913,8 +1014,13 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   async stopStack(): Promise<RpcResponse> {
     const r = await this.call('iscope_stop_view', { stage: 'Stack' }, { timeoutMs: VIEW_TIMEOUT_MS });
     if (this.st.stack.state && !TERMINAL_STATES.has(this.st.stack.state)) this.st.stack.state = 'cancel';
+    this.stackBin = false;
     this.changed();
-    setTimeout(() => void this.applySelection('stack stopped').catch(() => undefined), 1500);
+    setTimeout(() => {
+      void this.applySelection('stack stopped')
+        .then(() => this.applyBin('stack stopped'))
+        .catch(() => undefined);
+    }, 1500);
     return r;
   }
 
@@ -1366,12 +1472,26 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
         // (2026-11-13: an obstruction survey failed after three JPEGs): skip them until the deadline
         const until = Date.now() + timeoutMs;
         let jpegs = 0;
+        let binned = 0;
         while (Date.now() < until) {
           const f = await this.images[camera].grab('preview', until - Date.now());
-          if (f.header.imgType === IMG_TYPE.preview) return f;
-          jpegs++;
+          if (f.header.imgType !== IMG_TYPE.preview) {
+            jpegs++;
+            continue;
+          }
+          // inside withFullRes a raw frame is full resolution too: a bin-2 one still in flight is skipped
+          if (this.fullRes > 0) {
+            const full = this.fullWidth(camera);
+            if (f.header.width) this.fullWidthSeen[camera] = Math.max(this.fullWidthSeen[camera], f.header.width);
+            if (full && f.header.width && f.header.width < full) {
+              if (++binned % REBIN_AFTER === 0) await this.applyBin(`binned raw ${camera} frames while full resolution is wanted`, true).catch(() => undefined);
+              continue;
+            }
+          }
+          if (binned) log.info(`${camera}: ${binned} binned raw frame(s) discarded before the full-resolution one`);
+          return f;
         }
-        throw new Error(`the ${camera} camera kept sending JPEG frames after the switch to RAW (${jpegs} in ${Math.round(timeoutMs / 1000)} s)`);
+        throw new Error(`no full-resolution RAW ${camera} frame in ${Math.round(timeoutMs / 1000)} s (${jpegs} JPEG and ${binned} binned frame(s) skipped after the switch to RAW)`);
       } finally {
         await this.setTransferMode(camera, 'Jpg').catch((e) => log.warn(`could not put the ${camera} camera's live frames back to JPEG: ${errMsg(e)}`));
       }
@@ -1393,3 +1513,43 @@ function pairOf(v: unknown, a: string, b: string): [number, number] | null {
 }
 
 export { OTHER as OTHER_CAMERA };
+
+/**
+ * The next frame at the camera's bin-1 width: frames narrower than it are bin-2 frames still in
+ * flight and are skipped (and bin 1 sent again every REBIN_AFTER of them) until the deadline. With
+ * the width not known yet, the first frame is taken and teaches it.
+ */
+export async function nextUnbinned<F>(o: {
+  grab: (timeoutMs: number) => Promise<F>;
+  widthOf: (f: F) => number;
+  fullWidth: () => number;
+  seen: (width: number) => void;
+  rebin: () => Promise<void>;
+  timeoutMs: number;
+  what: string;
+}): Promise<{ frame: F; binned: number }> {
+  const until = Date.now() + o.timeoutMs;
+  let binned = 0;
+  const none = () => new Error(`no full-resolution ${o.what} in ${Math.round(o.timeoutMs / 1000)} s (${binned} binned frame(s) discarded)`);
+  for (;;) {
+    const left = until - Date.now();
+    if (left <= 0) throw none();
+    let f: F;
+    try {
+      f = await o.grab(left);
+    } catch (e) {
+      // the deadline ran out waiting for the next frame: say what came before it
+      if (binned && Date.now() >= until - 50) throw none();
+      throw e;
+    }
+    const w = o.widthOf(f);
+    const full = o.fullWidth();
+    if (w) o.seen(w);
+    if (full && w && w < full) {
+      binned++;
+      if (binned % REBIN_AFTER === 0) await o.rebin().catch((e) => log.warn(`camera bin: ${errMsg(e)}`));
+      continue;
+    }
+    return { frame: f, binned };
+  }
+}

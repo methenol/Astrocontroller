@@ -531,6 +531,56 @@ describe('Seestar camera selection', () => {
     assert.deepEqual(bins(), [2, 1, 2]);
   });
 
+  test('a stack runs at bin 1 and its bin is not changed while it runs (2026-11-17 C 33: invalid size)', async () => {
+    fake.on('iscope_start_stack', (_p, f) => {
+      f.session.stage = 'Stack';
+      setTimeout(() => f.event({ Event: 'Stack', state: 'working' }), 20);
+      return { result: 0 };
+    });
+    fake.on('set_sequence_setting', () => ({ result: 0 }));
+    assert.equal(fake.bin, 2, 'the preview runs at bin 2');
+    await scope.startStack();
+    const order = fake.calls.filter((c) => c.method === 'set_camera_bin' || c.method === 'iscope_start_stack').map((c) => c.method);
+    assert.deepEqual(order.slice(-2), ['set_camera_bin', 'iscope_start_stack'], 'bin 1 is set before the stack starts');
+    assert.equal(fake.bin, 1);
+    await until(() => scope.isStacking());
+    const before = fake.calls.filter((c) => c.method === 'set_camera_bin').length;
+    await scope.withFullRes('tele', 'a test photo', async () => assert.equal(fake.bin, 1));
+    await scope.applyBin('a test');
+    await wait(300);
+    assert.equal(fake.calls.filter((c) => c.method === 'set_camera_bin').length, before, 'nothing changes the bin mid-stack');
+    assert.equal(fake.bin, 1);
+    const stopView = fake.handlers.get('iscope_stop_view')!;
+    fake.on('iscope_stop_view', (p, f) => {
+      if ((p as { stage?: string } | undefined)?.stage !== 'Stack') return stopView(p, f);
+      fake.session.stage = 'ContinuousExposure';
+      fake.event({ Event: 'Stack', state: 'cancel', lapse_ms: 10, route: [] });
+      return { result: 0 };
+    });
+    await scope.stopStack();
+    await until(() => fake.bin === 2, 5000);
+  });
+
+  test('a full-resolution frame is never a binned one: bin-2 frames still in flight are skipped', async () => {
+    scope.state.device.chipSize = [8, 4];
+    const frameOf = (w: number, h: number) => {
+      const px = Buffer.alloc(w * h * 2, 0x40);
+      return Buffer.concat([encodeHeader({ imgType: IMG_TYPE.preview, length: px.length, width: w, height: h, imageId: 65535 }), px]);
+    };
+    fake.frames.preview = frameOf(4, 2); // bin 2: half the chip's width
+    await assert.rejects(scope.grabFullRes('tele', 1000), /outside withFullRes/);
+    const bin1 = setTimeout(() => (fake.frames.preview = frameOf(8, 4)), 450);
+    try {
+      const g = await scope.withFullRes('tele', 'a test photo', () => scope.grabFullRes('tele', 5000));
+      assert.equal(g.image.frameWidth, 8, 'the frame is at the full width');
+      assert.ok(g.binned >= 1, 'the binned frames before it were skipped');
+    } finally {
+      clearTimeout(bin1);
+    }
+    fake.frames.preview = frameOf(4, 2);
+    await assert.rejects(scope.withFullRes('tele', 'a test photo', () => scope.grabFullRes('tele', 700)), /no full-resolution tele frame.*binned frame/);
+  });
+
   test("the video hub selects the camera in the viewer's main view, not a thumbnail", async () => {
     const { SeestarVideoHub } = await import('../drivers/seestar/hub.js');
     const hub = new SeestarVideoHub(scope, () => '127.0.0.1');

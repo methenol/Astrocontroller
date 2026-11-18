@@ -77,6 +77,32 @@ function localSubs(session: string): string[] {
   }
 }
 
+/** A FITS file's NAXIS1×NAXIS2 from its header ("2160x3840"), or null when unreadable. */
+function fitsDims(file: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(2880 * 4);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString('latin1');
+    const card = (k: string) => {
+      for (let i = 0; i + 80 <= text.length; i += 80) {
+        const line = text.slice(i, i + 80);
+        if (line.startsWith('END ') || line === 'END'.padEnd(80)) break;
+        if (line.slice(0, 8).trim() === k && line[8] === '=') return Number(line.slice(10).split('/')[0]!.trim());
+      }
+      return NaN;
+    };
+    const w = card('NAXIS1');
+    const h = card('NAXIS2');
+    return Number.isFinite(w) && Number.isFinite(h) ? `${w}x${h}` : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 /** Size of a local file, or undefined when it is not there. */
 function sizeOf(file: string): number | undefined {
   try {
@@ -354,10 +380,17 @@ export class ProcessingQueue {
       if (size !== undefined) want.push({ local: path.join(lib, ...rel), remote: posix('library', ...rel), size });
     };
     const cams = new Set<string>();
+    // the subs' sizes: a master of another size (another bin) calibrates none of them
+    const dims = new Set<string>();
+    let dimsKnown = true;
     for (const s of it.sessions) {
-      for (const f of localSubs(s)) add(s, f);
+      const subs = localSubs(s);
+      for (const f of subs) add(s, f);
       add(s, 'shotsInfo.json');
       cams.add(calibrationCamera(s));
+      const d = subs.length ? fitsDims(path.join(lib, s, subs[0]!)) : null;
+      if (d) dims.add(d);
+      else dimsKnown = false;
     }
     for (const kind of CALIBRATION_KINDS) {
       for (const cam of cams) {
@@ -367,7 +400,14 @@ export class ProcessingQueue {
         } catch {
           continue; // no masters of this kind
         }
-        for (const f of files) if (isFitsName(f)) add('CALI_FRAME', kind, cam, f);
+        for (const f of files) {
+          if (!isFitsName(f)) continue;
+          if (dimsKnown && dims.size) {
+            const d = fitsDims(path.join(lib, 'CALI_FRAME', kind, cam, f));
+            if (d && !dims.has(d)) continue;
+          }
+          add('CALI_FRAME', kind, cam, f);
+        }
       }
     }
     return want;

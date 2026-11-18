@@ -4,8 +4,9 @@
  * and the next raw (Bayer) subs of the tele's live view are taken off the picture socket and
  * written as FITS (with the pointing, exposure, gain and filter) into the job's temp folder. The
  * first sub after a change is dropped: it was exposing under the old settings. The subs are taken
- * at the live view's bin 2, the bin the Seestar stacks and takes its darks at. The wheel, gain and
- * live exposure go back afterwards, whatever happens.
+ * at bin 1, the bin every stack runs at (device.ts), so they are the subs the scope will collect and
+ * the full-resolution dark masters match them. The wheel, gain and live exposure go back afterwards,
+ * whatever happens.
  *
  * When the firmware does not hold a live exposure that long (it reads back something else), the
  * point is shot as a short stack instead: its subs are copied off the scope into the temp folder
@@ -72,10 +73,10 @@ export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefin
           return await stacked(o, notes);
         }
         const files: string[] = [];
-        // at the live view's bin 2, not full resolution: the Seestar stacks its subs at bin 2
-        // (1080×1920) and its dark masters are bin 2, so a bin-1 probe has no dark and measures a
-        // sub the scope never collects (2026-11-14 C 34: "MasterDark … is 1080×1920, the sub 2160×3840")
-        await (async () => {
+        // at bin 1, the bin a stack runs at: a probe at another bin measures subs the scope never
+        // collects and has no dark master of its size (2026-11-14 C 34: "MasterDark … is 1080×1920,
+        // the sub 2160×3840" while stacks ran at bin 2; 2026-11-17 the reverse)
+        await scope.withFullRes('tele', 'a quality probe', async () => {
           // a frame that began exposing before the change (its arrival less than one sub after it) is
           // the old settings' — skipped by its time, so no whole sub is thrown away
           const changedAt = Date.now();
@@ -98,6 +99,8 @@ export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefin
                 GAIN: gain,
                 FILTER: o.filter,
                 BAYERPAT: 'GRBG',
+                XBINNING: scope.fullWidth('tele') && width < scope.fullWidth('tele') ? Math.round(scope.fullWidth('tele') / width) : 1,
+                YBINNING: scope.fullWidth('tele') && width < scope.fullWidth('tele') ? Math.round(scope.fullWidth('tele') / width) : 1,
                 ...(st.mount.raHours !== undefined && st.mount.decDeg !== undefined ? { RA: Math.round(st.mount.raHours * 15 * 1e5) / 1e5, DEC: Math.round(st.mount.decDeg * 1e5) / 1e5 } : {}),
                 ...(st.focus.position !== undefined ? { FOCUSPOS: st.focus.position } : {}),
                 OBJECT: o.target,
@@ -106,7 +109,7 @@ export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefin
             files.push(file);
             o.progress(`${o.filter} ${o.subS}s: sub ${files.length}/${o.count}`);
           }
-        })();
+        });
         return { files, how: `${files.length} raw sub(s) off the live view at ${o.subS}s, gain ${gain}`, notes };
       } finally {
         await scope.setExposure({ continuousMs: before.liveMs ?? 1000 }, 'tele').catch((e) => log.warn(`live exposure not put back: ${errMsg(e)}`));

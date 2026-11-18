@@ -136,19 +136,34 @@ export async function analyzeCohort(src: CohortSource, frames: RawFrame[], bytes
       notes.push(`the scope's dark frames could not be listed: ${errMsg(err)}`);
       return [] as DarkFrameRef[];
     });
-    const picked = pickReference(listed, { exposureS: subS, gain: light.gain, tempC: light.tempC });
-    if (picked.length) {
-      refFrames = await Promise.all(
-        picked.map(async (d) => {
-          const hit = src.refCache?.get(d.path);
-          if (hit) return hit;
-          const fr = readRaw(await src.fetchDevice(d.path), path.basename(d.path));
-          src.refCache?.set(d.path, fr);
-          return fr;
-        }),
-      );
-      refFrom = `fetched from the scope: ${picked.map((d) => path.basename(d.path)).join(', ')}`;
-    } else if (listed.length) notes.push(`the scope holds ${listed.length} dark/bias frames but none of ${subS}s${light.gain !== undefined ? ` at gain ${light.gain}` : ''}`);
+    // the scope keeps masters of both bins (a master is made at the bin its stack ran at): one of
+    // another size is no reference for this sub, so the best of the sub's own size is taken
+    const fetchRef = async (d: DarkFrameRef) => {
+      const hit = src.refCache?.get(d.path);
+      if (hit) return hit;
+      const fr = readRaw(await src.fetchDevice(d.path), path.basename(d.path));
+      src.refCache?.set(d.path, fr);
+      return fr;
+    };
+    let candidates = listed;
+    const otherSize: string[] = [];
+    for (;;) {
+      const picked = pickReference(candidates, { exposureS: subS, gain: light.gain, tempC: light.tempC });
+      if (!picked.length) {
+        if (otherSize.length) notes.push(`the scope's ${otherSize.join(', ')} ${otherSize.length > 1 ? 'are' : 'is'} not ${light.width}×${light.height} (another bin): no reference of this sub's size`);
+        else if (listed.length) notes.push(`the scope holds ${listed.length} dark/bias frames but none of ${subS}s${light.gain !== undefined ? ` at gain ${light.gain}` : ''}`);
+        break;
+      }
+      const frames = await Promise.all(picked.map(fetchRef));
+      const wrong = picked.filter((_d, i) => frames[i]!.width !== light.width || frames[i]!.height !== light.height);
+      if (!wrong.length) {
+        refFrames = frames;
+        refFrom = `fetched from the scope: ${picked.map((d) => path.basename(d.path)).join(', ')}`;
+        break;
+      }
+      otherSize.push(...wrong.map((d) => path.basename(d.path)));
+      candidates = candidates.filter((d) => !wrong.includes(d));
+    }
   }
   for (const r of refFrames) if (r.width !== light.width || r.height !== light.height) throw new Error(`${r.name} is ${r.width}×${r.height}, the sub ${light.width}×${light.height}: not a reference for it`);
   const ref = refFrames.length ? referenceNoise(refFrames, channel) : null;

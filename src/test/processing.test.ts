@@ -106,6 +106,26 @@ describe('processing outbox', () => {
     assert.equal(st.downloaded.length, 1);
   });
 
+  test('only the calibration masters of the subs\' size go up: a master of another bin calibrates none of them', async () => {
+    const fitsOf = (w: number, h: number) => {
+      const cards = ['SIMPLE  =                    T', 'BITPIX  =                   16', 'NAXIS   =                    2', `NAXIS1  = ${String(w).padStart(20)}`, `NAXIS2  = ${String(h).padStart(20)}`, 'END'];
+      return Buffer.from(cards.map((c) => c.padEnd(80)).join('').padEnd(2880));
+    };
+    const s = path.join(config.paths.library, S1);
+    for (const f of ['a.fits', 'b.fits']) fs.writeFileSync(path.join(s, f), fitsOf(2160, 3840));
+    const dark = path.join(config.paths.library, 'CALI_FRAME', 'dark', 'cam_0');
+    fs.writeFileSync(path.join(dark, 'd.fits'), fitsOf(2160, 3840));
+    fs.writeFileSync(path.join(dark, 'binned.fits'), fitsOf(1080, 1920));
+    const st = fakeStudio();
+    st.uploads = async () => ({ root: '/u', files: [] });
+    const q = new ProcessingQueue(st, () => dataFile);
+    q.enqueue({ sessions: [S1], target: 'M 31' });
+    await q.settled();
+    const up = [...st.uploaded.keys()];
+    assert.ok(up.includes('library/CALI_FRAME/dark/cam_0/d.fits'), 'the master of the subs\' size');
+    assert.ok(!up.includes('library/CALI_FRAME/dark/cam_0/binned.fits'), 'not the bin-2 one');
+  });
+
   test('the outbox survives a restart, and an interrupted upload resumes', async () => {
     const st = fakeStudio();
     st.health = async () => {

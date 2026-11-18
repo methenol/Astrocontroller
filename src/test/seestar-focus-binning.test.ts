@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { FloatImage } from '../media/images.js';
 import type { Seestar } from '../drivers/seestar/device.js';
 import { seestarFocusSweep } from '../drivers/seestar/focus.js';
+import { nextUnbinned } from '../drivers/seestar/device.js';
 
 /** A linear mono frame with Gaussian stars of one width on a flat, slightly noisy sky. */
 function starField(sigmaPx: number, W: number, H: number): FloatImage {
@@ -38,6 +39,7 @@ function stubScope(o: { binnedFrames: number; chipKnown: boolean }) {
   let pos = 897;
   let left = o.binnedFrames;
   const calls = { applyBin: 0 };
+  let seen = 0;
   const scope = {
     state: {
       mount: { parked: false },
@@ -58,6 +60,19 @@ function stubScope(o: { binnedFrames: number; chipKnown: boolean }) {
         return { image: starField(0.9, FULL_W / 2, FULL_H / 2) };
       }
       return { image: starField(1.4 + 0.25 * Math.abs(pos - TRUE_FOCUS), FULL_W, FULL_H) };
+    },
+    // the device's grabFullRes over this stub's frames (the same discard logic)
+    grabFullRes: async (_c: string, timeoutMs: number) => {
+      const r = await nextUnbinned({
+        grab: () => scope.grabImage(),
+        widthOf: (g) => g.image.frameWidth ?? g.image.width,
+        fullWidth: () => Math.max(o.chipKnown ? FULL_W : 0, seen),
+        seen: (w) => (seen = Math.max(seen, w)),
+        rebin: async () => { calls.applyBin++; },
+        timeoutMs,
+        what: 'tele frame',
+      });
+      return { ...r.frame, binned: r.binned };
     },
   };
   return { scope: scope as unknown as Seestar, calls };

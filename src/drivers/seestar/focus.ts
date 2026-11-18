@@ -20,8 +20,6 @@ const MAX_POINTS = 21;
 const SETTLE_MS = 800;
 const FRAMES_PER_POSITION = 2;
 const GRAB_TIMEOUT_MS = 60_000;
-/** binned frames in a row before bin 1 is asked for again */
-const REBIN_AFTER = 3;
 /** a sample this much coarser than the sweep's finest is another bin, not comparable */
 const COARSER_THAN = 1.2;
 
@@ -46,25 +44,16 @@ export async function measureSeestar(scope: Seestar): Promise<{ sharp: StarSharp
   await scope.ensureLiveView();
   return scope.withCamera('tele', 'a star measurement', () =>
     scope.withFullRes('tele', 'a star measurement', async () => {
-      const fullW = scope.state.device.chipSize?.[0];
       const until = Date.now() + GRAB_TIMEOUT_MS;
       let img: FloatImage | undefined;
-      let taken = 0;
       let binned = 0;
-      while (taken < FRAMES_PER_POSITION) {
+      for (let taken = 0; taken < FRAMES_PER_POSITION; taken++) {
         const left = until - Date.now();
         if (left <= 0) throw new Error(`no full-resolution tele frame in ${GRAB_TIMEOUT_MS / 1000} s (${binned} binned frame(s) discarded)`);
-        const frame = await scope.grabImage('tele', 'preview', left);
-        const w = frame.image.frameWidth ?? frame.image.width;
-        if (fullW && w < fullW) {
-          binned++;
-          if (binned % REBIN_AFTER === 0) await scope.applyBin('binned frames during a star measurement').catch((e) => log.warn(`camera bin: ${errMsg(e)}`));
-          continue;
-        }
-        img = frame.image;
-        taken++;
+        const g = await scope.grabFullRes('tele', left);
+        binned += g.binned;
+        img = g.image;
       }
-      if (binned) log.info(`star measurement: ${binned} binned frame(s) discarded before the full-resolution one`);
       const fovH = (scope.state.fov ?? NOMINAL_FOV).h;
       return { sharp: starSharpness(img!, { arcsecPerPx: (fovH * 3600) / (img!.frameWidth ?? img!.width) }), img: img! };
     }),

@@ -86,7 +86,7 @@ export class SeestarCapture {
     await this.scope.ensureLiveView();
     return this.scope.withCamera(camera, `a ${camera} photo`, () =>
       this.scope.withFullRes(camera, `a ${camera} photo`, async () => {
-        const f = raw ? await this.scope.grabRaw(camera) : (await this.scope.grabImage(camera, 'preview', FRAME_TIMEOUT_MS)).frame;
+        const f = raw ? await this.scope.grabRaw(camera) : (await this.scope.grabFullRes(camera, FRAME_TIMEOUT_MS)).frame;
         const shot: Shot = f.payload.subarray(0, 2).equals(JPEG_SOI) ? { jpeg: f.payload } : { jpeg: await toJpeg(autoStretch(await frameImage(f, camera))), raw: f };
         this.show(camera, shot.jpeg);
         return shot;
