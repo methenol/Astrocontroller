@@ -270,6 +270,7 @@ describe('Seestar picture socket', () => {
     const payload = Buffer.alloc(4 * 2 * 6, 0x10);
     fake.frames.stacked = Buffer.concat([frame(IMG_TYPE.ack, Buffer.alloc(0)), frame(IMG_TYPE.rawStack, payload, 4, 2, 42)]);
     const s = new SeestarImageLink('127.0.0.1', fake.imagePort, 'tele');
+    s.setWatched(true); // a viewer watches this camera
     try {
       await assert.rejects(s.grab('stacked', 200), /picture socket is not connected/);
       s.open();
@@ -292,6 +293,7 @@ describe('Seestar picture socket', () => {
     const payload = Buffer.alloc(4 * 2 * 2, 0x20);
     fake.frames.widePreview = frame(IMG_TYPE.preview, payload, 4, 2, 65535);
     const s = new SeestarImageLink('127.0.0.1', fake.wideImagePort, 'wide');
+    s.setWatched(true); // a viewer watches this camera
     try {
       s.startStream(); // asked before the socket is up: remembered
       s.open();
@@ -324,6 +326,7 @@ describe('Seestar picture socket', () => {
     const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(30, 0x11)]);
     fake.frames.preview = frame(IMG_TYPE.jpegStack, jpeg, 0, 0, 24761);
     const s = new SeestarImageLink('127.0.0.1', fake.imagePort, 'tele');
+    s.setWatched(true); // a viewer watches this camera
     try {
       s.open();
       s.startStream();
@@ -352,6 +355,7 @@ describe('Seestar picture socket', () => {
     fake.frames.stacked = undefined; // a stack with no frame yet answers with nothing at all
     fake.frames.preview = frame(IMG_TYPE.preview, Buffer.alloc(16, 0x20), 4, 2, 65535);
     const s = new SeestarImageLink('127.0.0.1', fake.imagePort, 'tele');
+    s.setWatched(true); // a viewer watches this camera
     try {
       s.open();
       s.startStream();

@@ -464,6 +464,67 @@ describe('night journal: the recorder', () => {
     assert.ok(st.altStart !== undefined && st.moonIllumPct !== undefined);
   });
 
+  test('a restart during a stack carries on with the open session: one session, the scope\'s frames counted once (2026-11-18 C 20)', () => {
+    const d = dir();
+    const probe = new FakeProbe();
+    let t = t0;
+    const first = new JournalRecorder({ journal: new Journal({ dir: d }), probe, site: () => SITE, now: () => t, settleMs: 0 });
+    const j1 = (first as unknown as { d: { journal: Journal } }).d.journal;
+    first.observe();
+    probe.set((x) => (x.goto = { state: 'running', target: 'M 31' }));
+    first.observe();
+    t += 60e3;
+    probe.set((x) => (x.goto = { state: 'complete', target: 'M 31' }));
+    first.observe();
+    t += 5e3;
+    probe.set((x) => (x.stack = { running: true, target: 'M 31', stacked: 0, rejected: 0, subS: 30 }));
+    first.observe();
+    t += 1500e3;
+    probe.set((x) => (x.stack = { ...x.stack, stacked: 50 }));
+    first.observe();
+    j1.flush();
+    // the process restarts twice while the same stack runs on
+    for (const count of [61, 74]) {
+      t += 400e3;
+      probe.snap.stack = { ...probe.snap.stack, stacked: count };
+      const again = new JournalRecorder({ journal: new Journal({ dir: d }), probe, site: () => SITE, now: () => t, settleMs: 0 });
+      again.start();
+      again.stop();
+    }
+    const s = new Journal({ dir: d }).night(night).sessions;
+    assert.equal(s.length, 1, 'no session per restart');
+    assert.equal(s[0].status, 'active');
+    assert.equal(s[0].stats.stacked, 74);
+    assert.equal(s[0].stats.integrationS, 74 * 30);
+    assert.equal(s[0].marks.filter((m) => m.kind === 'stack-start').length, 1);
+  });
+
+  test('a second stack in the same visit adds to the session: the scope counts it from zero', () => {
+    const journal = new Journal({ dir: dir() });
+    const probe = new FakeProbe();
+    let t = t0;
+    const rec = new JournalRecorder({ journal, probe, site: () => SITE, now: () => t, settleMs: 0 });
+    rec.observe();
+    const step = (sec: number, f: (x: ScopeSnapshot) => void) => {
+      t += sec * 1000;
+      probe.set(f);
+      rec.observe();
+    };
+    step(1, (x) => (x.goto = { state: 'running', target: 'C 20' }));
+    step(60, (x) => (x.goto = { state: 'complete', target: 'C 20' }));
+    step(5, (x) => (x.stack = { running: true, target: 'C 20', stacked: 0, rejected: 0, subS: 30 }));
+    step(2500, (x) => (x.stack = { ...x.stack, stacked: 82 }));
+    step(10, (x) => (x.stack = { ...x.stack, running: false }));
+    step(600, (x) => (x.stack = { running: true, target: 'C 20', stacked: 0, rejected: 0, subS: 30 }));
+    step(600, (x) => (x.stack = { ...x.stack, stacked: 20, rejected: 1 }));
+    const s = journal.night(night).sessions;
+    assert.equal(s.length, 1);
+    assert.equal(s[0].stats.stacked, 102);
+    assert.equal(s[0].stats.rejected, 1);
+    assert.equal(s[0].stats.integrationS, 102 * 30);
+    assert.deepEqual(s[0].stats.priorStacks, { stacked: 82, rejected: 0, integrationS: 82 * 30 });
+  });
+
   describe('the Dwarf probe, on what the telescope really sends (wire log, 2026-11-08, C 34)', () => {
     const rig = () => {
       const st: Record<string, any> = { connected: true, released: false, goto: { state: 'idle' }, tracking: { state: 'idle' }, autofocus: { state: 'idle' }, stacking: { tele: { state: 'idle' } } };

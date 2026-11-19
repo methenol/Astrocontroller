@@ -73,8 +73,13 @@ export interface SessionStats {
   gain?: number;
   filter?: string;
   camera?: string;
-  /** stacked frames × sub length (or the integration the scope reports) */
+  /** stacked frames × sub length (or the integration the scope reports), over all the session's stacks */
   integrationS?: number;
+  /**
+   * The session's earlier stacks (ended before the one running now), summed: the session's frames
+   * and integration are these plus the running stack's own, which the scope counts from zero.
+   */
+  priorStacks?: { stacked: number; rejected: number; integrationS: number };
   /** integration per minute of stacking wall time, percent */
   efficiencyPct?: number;
   altStart?: number;

@@ -151,6 +151,8 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   readonly tunnel: ZwoTunnel | null;
   private readonly st: SeestarState;
   private readonly releasedFile: string;
+  /** the viewer's pause of the live stream, kept across restarts (a restart must not resume it) */
+  private readonly pausedFile: string;
   private readonly rpcPort: number;
   /** the camera the user or a tool wants exposing; the scope is kept on it */
   private wanted: Camera = 'tele';
@@ -201,6 +203,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     this.rpcPort = o.ports?.rpc ?? cfg.rpcPort;
     this.st = initialState(connection);
     this.releasedFile = path.join(o.dataDir ?? config.paths.data, 'released.json');
+    this.pausedFile = path.join(o.dataDir ?? config.paths.data, 'stream-paused.json');
     // Over the ZWO tunnel the control channel stalls for a minute or two now and then (when a
     // camera's picture stream starts, e.g. the obstruction survey's switch to the wide) and then
     // recovers by itself with the session intact (seestar-portfwd: "answers again after 78 s",
@@ -240,6 +243,14 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       this.st.released = !!saved.released;
     } catch {
       /* never released */
+    }
+    try {
+      if ((JSON.parse(fs.readFileSync(this.pausedFile, 'utf8')) as { paused?: boolean }).paused) {
+        this.images.tele.setPaused(true);
+        this.images.wide.setPaused(true);
+      }
+    } catch {
+      /* never paused */
     }
   }
 
@@ -488,6 +499,11 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
     log.info(`live stream ${on ? 'paused' : 'resumed'} from the web UI`);
     this.images.tele.setPaused(on);
     this.images.wide.setPaused(on);
+    try {
+      writeFileAtomic(this.pausedFile, JSON.stringify({ paused: on, at: new Date().toISOString() }));
+    } catch (e) {
+      log.warn(`the stream pause could not be saved: ${errMsg(e)}`);
+    }
     this.changed();
   }
 
@@ -502,7 +518,7 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
       const why = this.borrowed ? ` for ${this.operation ?? 'a tool'}` : this.isStacking() ? ' (stacking)' : '';
       return `${exposing ?? 'the other'} camera is selected${why}${this.wanted === camera ? '; switching back when it is free' : ' — make this the main view to select it'}`;
     }
-    if (this.streamPaused) return 'live stream paused (press play to resume)';
+    // the viewer's pause is not a reason here: the agent and its tools get their frames whatever it is
     const stage = this.viewOf(camera).stage;
     if (stage && stage !== 'ContinuousExposure' && stage !== 'Stack') return `${this.operation ?? stage} in progress (the picture is the last frame)`;
     const sock = this.images[camera];
@@ -687,7 +703,13 @@ export class Seestar extends SafeEmitter implements TelescopeDevice {
   async ensureLiveView(): Promise<string | null> {
     return this.serial(async () => {
       if (!this.link.usable) throw new Error('the Seestar is not connected');
-      if (this.viewRunning()) return null;
+      if (this.viewRunning() || this.isStacking()) return null;
+      // the state may not be read yet (just connected, or a restart of this process): starting a view
+      // on it stops whatever the scope runs, a stack included (2026-11-18 C 20: cancelled at 82 subs
+      // 5 s after a restart reconnected). The scope is asked first; without its answer nothing starts.
+      await this.refreshState();
+      if (!this.appStateFresh) throw new Error('no live view: the scope did not report its state');
+      if (this.viewRunning() || this.isStacking()) return null;
       if (this.operation) throw new Error(`no live view: ${this.operation} is running`);
       await this.restartView(this.borrowed ?? this.wanted, false);
       return 'started the live view';

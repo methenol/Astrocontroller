@@ -64,6 +64,7 @@ export interface ImageLinkStatus {
   note: string | null;
   /** the viewer paused the live stream (to save bandwidth); preview grabs still get their frames */
   paused: boolean;
+  watched: boolean;
 }
 
 /** Does a frame of this type answer a grab of this kind? */
@@ -99,6 +100,12 @@ export class SeestarImageLink extends SafeEmitter {
    * preview grab (an agent's or a tool's) resumes it until PAUSED_GRAB_LINGER_MS after the last one.
    */
   private paused = false;
+  /**
+   * Someone is watching this camera's live picture (a viewer of its video source). Unwatched, the
+   * stream runs only for a grab, as when paused: over the tunnel a full-resolution frame per sub is
+   * ~3 MB, more than half the link (2026-11-18), and nobody was looking at it.
+   */
+  private watched = false;
   private linger: NodeJS.Timeout | null = null;
   private redial: NodeJS.Timeout | null = null;
   private redialMs = FIRST_REDIAL_MS;
@@ -138,7 +145,7 @@ export class SeestarImageLink extends SafeEmitter {
   }
 
   status(): ImageLinkStatus {
-    return { camera: this.camera, connected: this.isConnected, streaming: this.isStreaming, liveFrames: this.liveFrames, lastFrameAt: this.last?.at ?? null, note: this._note, paused: this.paused };
+    return { camera: this.camera, connected: this.isConnected, streaming: this.isStreaming, liveFrames: this.liveFrames, lastFrameAt: this.last?.at ?? null, note: this._note, paused: this.paused, watched: this.watched };
   }
 
   open(): void {
@@ -183,6 +190,19 @@ export class SeestarImageLink extends SafeEmitter {
     this.changed();
   }
 
+  /** A viewer started (or stopped) watching this camera's live picture. */
+  setWatched(on: boolean): void {
+    if (on === this.watched) return;
+    this.watched = on;
+    this.apply();
+    this.changed();
+  }
+
+  /** The stream runs for a viewer (unless paused) or for a grab waiting on a frame. */
+  private get live(): boolean {
+    return (this.watched && !this.paused) || this.previewWanted;
+  }
+
   private get previewWanted(): boolean {
     return this.waiters.some((w) => w.id === null);
   }
@@ -190,7 +210,7 @@ export class SeestarImageLink extends SafeEmitter {
   /** Start or stop the stream to match `wantStream`, the pause and the grabs waiting for a frame. */
   private apply(): void {
     if (!this.isConnected) return;
-    if (this.wantStream && (!this.paused || this.previewWanted)) {
+    if (this.wantStream && this.live) {
       if (this.linger) clearTimeout(this.linger);
       this.linger = null;
       if (this.isStreaming) return;
@@ -207,7 +227,7 @@ export class SeestarImageLink extends SafeEmitter {
     }
     this.linger ??= setTimeout(() => {
       this.linger = null;
-      if (this.isConnected && this.isStreaming && this.paused && !this.previewWanted) this.halt();
+      if (this.isConnected && this.isStreaming && !this.live) this.halt();
     }, PAUSED_GRAB_LINGER_MS);
   }
 
@@ -228,7 +248,7 @@ export class SeestarImageLink extends SafeEmitter {
   restartStream(): void {
     this.wantStream = true;
     if (!this.isConnected) return;
-    if (this.paused && !this.previewWanted) {
+    if (!this.live) {
       this.apply();
       return;
     }

@@ -333,6 +333,9 @@ describe('Seestar camera selection', () => {
     fake.frames.widePreview = previewFrame();
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seestar-cam-'));
     scope = new Seestar({ host: '127.0.0.1', connection: 'local', ports: fake.ports, tunnel: null, dataDir: dir, link: { backoffMinMs: 50 } });
+    // a viewer watching both cameras (the web UI's live view): the sockets stream for it
+    scope.images.tele.setWatched(true);
+    scope.images.wide.setWatched(true);
     scope.start();
     await until(() => scope.state.connected && scope.state.view.state === 'working' && fake.bin === 2);
     await until(() => fake.streams.tele, 2000);
@@ -579,6 +582,32 @@ describe('Seestar camera selection', () => {
     }
     fake.frames.preview = frameOf(4, 2);
     await assert.rejects(scope.withFullRes('tele', 'a test photo', () => scope.grabFullRes('tele', 700)), /no full-resolution tele frame.*binned frame/);
+  });
+
+  test('the picture stream runs for a viewer, not for nobody; the viewer\'s pause never keeps a tool from its frame', async () => {
+    scope.images.tele.setWatched(false);
+    scope.images.wide.setWatched(false);
+    await until(() => !fake.streams.tele, 25_000);
+    assert.equal(fake.streams.tele, false, 'nobody watches: no frames over the link');
+    // a tool's grab streams for its frame
+    const g = await scope.grabImage('tele', 'preview', 5000);
+    assert.ok(g.frame.payload.length > 0);
+    // a viewer who paused: still no stream for the viewer, and a tool still gets its frame the same way
+    scope.images.tele.setWatched(true);
+    scope.setStreamPaused(true);
+    assert.equal(scope.liveNote('tele'), null, 'the pause is not a reason the agent sees');
+    const p = await scope.grabImage('tele', 'preview', 5000);
+    assert.ok(p.frame.payload.length > 0);
+    scope.setStreamPaused(false);
+    await until(() => fake.streams.tele, 2000);
+  });
+
+  test('the viewer\'s pause survives a restart', async () => {
+    scope.setStreamPaused(true);
+    const again = new Seestar({ host: '127.0.0.1', connection: 'local', ports: fake.ports, tunnel: null, dataDir: dir, link: { backoffMinMs: 50 } });
+    assert.equal(again.streamPaused, true);
+    scope.setStreamPaused(false);
+    assert.equal(new Seestar({ host: '127.0.0.1', connection: 'local', ports: fake.ports, tunnel: null, dataDir: dir, link: { backoffMinMs: 50 } }).streamPaused, false);
   });
 
   test("the video hub selects the camera in the viewer's main view, not a thumbnail", async () => {

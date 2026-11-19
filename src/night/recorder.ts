@@ -96,10 +96,41 @@ export class JournalRecorder {
     const night = this.nightNow();
     const closed = this.d.journal.closeStale(night && night === this.darkNight(this.now()) ? night : null);
     if (closed) log.info(`journal: closed ${closed} session(s) left open by a night that ended while the server was down`);
+    this.resume(night && night === this.darkNight(this.now()) ? night : null);
     this.d.probe.on('state', this.onState);
     this.timer = setInterval(() => this.tick(), TICK_MS);
     this.timer.unref?.();
     this.observe();
+  }
+
+  /**
+   * After a restart: carry on with the night's open session instead of opening another for the same
+   * visit (2026-11-18: every restart during the C 20 stack opened a new C 20 session that took the
+   * scope's running count as its own, so the night counted the same frames three times). Only the
+   * newest open session is the one under way; any older one still open is closed.
+   */
+  private resume(night: string | null): void {
+    if (!night) return;
+    const open = this.d.journal.night(night).sessions.filter((x) => x.status === 'active');
+    const last = open[open.length - 1];
+    if (!last) return;
+    for (const x of open.slice(0, -1)) {
+      const at = Math.max(x.startedAt, ...x.marks.map((m) => m.at), ...x.samples.map((y) => y.at));
+      this.d.journal.closeSession(night, x, x.marks.some((m) => m.kind === 'stack-start') ? 'done' : 'aborted', `superseded by the ${last.target} session`, at);
+    }
+    this.current = { night, s: last };
+    if (this.openStack(last)) this.current.stackAt = [...last.marks].reverse().find((m) => m.kind === 'stack-start')?.at;
+    log.info(`journal: carrying on with the open ${last.target} session`);
+  }
+
+  /** The session's last stack started and has not ended (it was running when the recorder last saw it). */
+  private openStack(s: JournalSession): boolean {
+    for (let i = s.marks.length - 1; i >= 0; i--) {
+      const k = s.marks[i]!.kind;
+      if (k === 'stack-end') return false;
+      if (k === 'stack-start') return true;
+    }
+    return false;
   }
 
   stop(): void {
@@ -224,13 +255,18 @@ export class JournalRecorder {
       const target = cur.stack.target ?? this.current?.s.target ?? cur.goto.target ?? 'unknown target';
       if (!this.current || this.current.s.status !== 'active' || norm(this.current.s.target) !== norm(target)) this.open(night, target, t);
       const c = this.current!;
-      c.stackAt = t;
-      c.idleSince = undefined;
-      c.baseRejected = cur.stack.rejected ?? 0;
-      Object.assign(c.s.stats, { subS: cur.stack.subS ?? c.s.stats.subS, gain: cur.stack.gain ?? c.s.stats.gain, filter: cur.stack.filter ?? c.s.stats.filter, camera: cur.stack.camera ?? c.s.stats.camera });
-      if (c.s.stats.altStart === undefined) this.position(c.s, t, 'start');
-      this.mark({ at: t, kind: 'stack-start', text: `stacking${cur.stack.subS ? ` ${cur.stack.subS} s subs` : ''}${cur.stack.filter ? `, ${cur.stack.filter}` : ''}${prev === null ? ' (already running when the recorder started)' : ''}` });
-      void this.skyAt(c.s, t);
+      const st = c.s.stats;
+      const own = (st.stacked ?? 0) - (st.priorStacks?.stacked ?? 0);
+      // the recorder (re)started on a stack the session already holds open: the same stack, carried on
+      // (unless the scope's count went back, a new stack begun while the recorder was not watching)
+      if (prev === null && this.openStack(c.s) && (cur.stack.stacked ?? 0) >= own) {
+        c.stackAt ??= t;
+        c.idleSince = undefined;
+        c.baseRejected = cur.stack.rejected ?? 0;
+        this.stackStats(c.s, cur, t);
+      } else {
+        this.beginStack(c, cur, prev, t);
+      }
     }
     if (cur.stack.running && this.current) {
       const c = this.current;
@@ -260,17 +296,35 @@ export class JournalRecorder {
     }
   }
 
+  /** A stack starts in the session: an earlier one's frames and integration are kept as the session's prior stacks. */
+  private beginStack(c: NonNullable<JournalRecorder['current']>, cur: ScopeSnapshot, prev: ScopeSnapshot | null, t: number): void {
+    const st = c.s.stats;
+    if (st.stacked) st.priorStacks = { stacked: st.stacked, rejected: st.rejected ?? 0, integrationS: st.integrationS ?? 0 };
+    c.stackAt = t;
+    c.idleSince = undefined;
+    c.baseRejected = cur.stack.rejected ?? 0;
+    Object.assign(st, { subS: cur.stack.subS ?? st.subS, gain: cur.stack.gain ?? st.gain, filter: cur.stack.filter ?? st.filter, camera: cur.stack.camera ?? st.camera });
+    if (st.altStart === undefined) this.position(c.s, t, 'start');
+    this.mark({ at: t, kind: 'stack-start', text: `stacking${cur.stack.subS ? ` ${cur.stack.subS} s subs` : ''}${cur.stack.filter ? `, ${cur.stack.filter}` : ''}${prev === null ? ' (already running when the recorder started)' : ''}` });
+    void this.skyAt(c.s, t);
+  }
+
   private stackStats(s: JournalSession, snap: ScopeSnapshot, t: number): void {
     const st = s.stats;
-    const stacked = snap.stack.stacked ?? st.stacked ?? 0;
-    const rejected = snap.stack.rejected ?? st.rejected ?? 0;
+    const prior = st.priorStacks ?? { stacked: 0, rejected: 0, integrationS: 0 };
+    // the running stack's own counts (the scope's, from zero), then the session's: the prior stacks' plus these
+    const ownStacked = snap.stack.stacked ?? (st.stacked ?? prior.stacked) - prior.stacked;
+    const ownRejected = snap.stack.rejected ?? (st.rejected ?? prior.rejected) - prior.rejected;
+    const stacked = prior.stacked + ownStacked;
+    const rejected = prior.rejected + ownRejected;
     st.stacked = stacked;
     st.rejected = rejected;
     st.framesTaken = stacked + rejected;
     st.rejectionPct = st.framesTaken ? Math.round((rejected / st.framesTaken) * 1000) / 10 : 0;
     // the Dwarf only says its sub length in the progress of the first frames, after the stack has started
     st.subS = snap.stack.subS ?? st.subS;
-    st.integrationS = snap.stack.integrationS ?? (st.subS ? Math.round(stacked * st.subS) : st.integrationS);
+    const ownIntegration = snap.stack.integrationS ?? (st.subS ? Math.round(ownStacked * st.subS) : undefined);
+    if (ownIntegration !== undefined) st.integrationS = prior.integrationS + ownIntegration;
     const firstStack = s.marks.find((m) => m.kind === 'stack-start')?.at;
     if (firstStack) st.stackS = Math.round((t - firstStack) / 1000);
     if (st.integrationS && st.stackS) st.efficiencyPct = Math.min(100, Math.round((st.integrationS / st.stackS) * 100));

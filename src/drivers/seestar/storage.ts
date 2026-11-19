@@ -19,6 +19,7 @@
  * The dark master of its sub length (darklibrary/<exp>s/MasterDark_….fit) goes to
  * CALI_FRAME/dark/seestar_<cam_0|cam_1>. Album paths are /SEESTAR/<storage path>.
  */
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../../config.js';
@@ -36,6 +37,13 @@ const STALL_MS = 60_000;
 export const FILE_ATTEMPTS = 3;
 const RETRY_MS = 2000;
 const HEADER_BYTES = 2880 * 3;
+/**
+ * Files on the scope that never change once written (a sub, a dark master: their names carry their
+ * time): read once over the link and kept here, so the quality tools that read the same newest subs
+ * and the same master one after another (or at once) pull each across the tunnel only once.
+ */
+const IMMUTABLE = /^(MyWorks\/[^/]+_sub\/Light_[^/]+|darklibrary\/[^/]+\/Master(Dark|Bias)_[^/]+)\.fits?$/i;
+const FILE_CACHE_MAX_BYTES = 2 * 1024 ** 3;
 const ROOT = 'MyWorks';
 const DARKS = 'darklibrary';
 const ALBUM_PREFIX = '/SEESTAR/';
@@ -75,6 +83,22 @@ function localSize(p: string): number | undefined {
   }
 }
 
+/** Drop the least recently used files of a cache folder until it holds at most `max` bytes. */
+async function trimCache(dir: string, max: number): Promise<void> {
+  const entries = await Promise.all(
+    (await fs.promises.readdir(dir)).filter((n) => !n.endsWith('.part')).map(async (n) => {
+      const st = await fs.promises.stat(path.join(dir, n));
+      return { file: path.join(dir, n), size: st.size, used: st.mtimeMs };
+    }),
+  );
+  let total = entries.reduce((a, e) => a + e.size, 0);
+  for (const e of entries.sort((a, b) => a.used - b.used)) {
+    if (total <= max) break;
+    await fs.promises.rm(e.file, { force: true });
+    total -= e.size;
+  }
+}
+
 function anySignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
   const t = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, t]) : t;
@@ -107,6 +131,8 @@ export class SeestarFiles {
   private queue: Promise<unknown> = Promise.resolve();
   /** the second route stopped answering (a tunnel without its fourth session): downloads use the first */
   private altDown = false;
+  /** reads of an immutable file under way: a second asker waits for the same transfer */
+  private reading = new Map<string, Promise<Buffer>>();
 
   constructor(
     private readonly scope: Pick<Seestar, 'call'>,
@@ -168,21 +194,91 @@ export class SeestarFiles {
   }
 
   async read(rel: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer> {
-    const res = await fetch(this.url(rel), { headers: { Range: `bytes=0-${maxBytes - 1}` }, signal: anySignal(signal, HTTP_TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${rel}`);
-    const buf = Buffer.from(await res.arrayBuffer());
+    const buf = await this.body(rel, maxBytes, { Range: `bytes=0-${maxBytes - 1}` }, signal, false);
     return buf.length > maxBytes ? buf.subarray(0, maxBytes) : buf;
   }
 
   async readAll(rel: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer> {
-    const res = await fetch(this.url(rel), { signal: anySignal(signal, HTTP_TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${rel}`);
-    const len = Number(res.headers.get('content-length'));
-    if (Number.isFinite(len) && len > maxBytes) {
-      await res.body?.cancel();
-      throw new Error(`${rel} is ${Math.round(len / 1e6)} MB, over the ${Math.round(maxBytes / 1e6)} MB this reads`);
+    return this.body(rel, maxBytes, {}, signal, true);
+  }
+
+  /** readAll, from the local copy when the file is immutable and was read before (or is being read now). */
+  async readOnce(rel: string, maxBytes: number): Promise<Buffer> {
+    const key = rel.replace(/^\/+/, '');
+    if (!IMMUTABLE.test(key)) return this.readAll(rel, maxBytes);
+    const file = path.join(config.paths.data, 'cache', 'seestar-files', `${createHash('sha1').update(key).digest('hex')}${path.extname(key)}`);
+    try {
+      const buf = await fs.promises.readFile(file);
+      if (buf.length <= maxBytes) {
+        void fs.promises.utimes(file, new Date(), new Date()).catch(() => undefined);
+        return buf;
+      }
+    } catch {
+      // not read before
     }
-    return Buffer.from(await res.arrayBuffer());
+    const running = this.reading.get(key);
+    if (running) return running;
+    const p = (async () => {
+      // the library's downloader: a connection the tunnel drops mid-file is resumed from where it
+      // stopped (Range on <file>.part) and retried, the size checked, rather than the read failing
+      const { size } = await this.download(rel, file, () => undefined);
+      if (size > maxBytes) throw new Error(`${rel} is ${Math.round(size / 1e6)} MB, over the ${Math.round(maxBytes / 1e6)} MB this reads`);
+      const buf = await fs.promises.readFile(file);
+      await trimCache(path.dirname(file), FILE_CACHE_MAX_BYTES).catch((e) => log.warn(`file cache: ${errMsg(e)}`));
+      return buf;
+    })();
+    this.reading.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this.reading.delete(key);
+    }
+  }
+
+  /**
+   * A file's bytes, given up only when the transfer stalls (no bytes for STALL_MS; the answer's
+   * headers within HTTP_TIMEOUT_MS), not on a deadline for the whole body: over the ZWO tunnel a
+   * full-resolution sub (16 MB) takes far longer than any fixed limit a 4 MB one fitted in.
+   */
+  private async body(rel: string, maxBytes: number, headers: Record<string, string>, signal: AbortSignal | undefined, refuseOver: boolean): Promise<Buffer> {
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort(signal?.reason);
+    if (signal?.aborted) throw signal.reason ?? new Error('aborted');
+    signal?.addEventListener('abort', onAbort, { once: true });
+    let stall = setTimeout(() => ctl.abort(new Error(`${rel}: the Seestar did not answer in ${HTTP_TIMEOUT_MS / 1000} s`)), HTTP_TIMEOUT_MS);
+    try {
+      const res = await fetch(this.url(rel), { headers, signal: ctl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${rel}`);
+      const len = Number(res.headers.get('content-length'));
+      if (refuseOver && Number.isFinite(len) && len > maxBytes) {
+        await res.body?.cancel();
+        throw new Error(`${rel} is ${Math.round(len / 1e6)} MB, over the ${Math.round(maxBytes / 1e6)} MB this reads`);
+      }
+      if (!res.body) return Buffer.alloc(0);
+      const parts: Buffer[] = [];
+      let got = 0;
+      const rearm = () => {
+        clearTimeout(stall);
+        stall = setTimeout(() => ctl.abort(new Error(`${rel}: the transfer stalled (no data for ${STALL_MS / 1000} s after ${Math.round(got / 1e5) / 10} MB)`)), STALL_MS);
+      };
+      rearm();
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        rearm();
+        parts.push(Buffer.from(chunk));
+        got += chunk.length;
+        if (got > maxBytes + (refuseOver ? 0 : 65536)) {
+          if (refuseOver) throw new Error(`${rel} is over the ${Math.round(maxBytes / 1e6)} MB this reads`);
+          break;
+        }
+      }
+      return Buffer.concat(parts);
+    } catch (err) {
+      if (ctl.signal.aborted && ctl.signal.reason instanceof Error) throw ctl.signal.reason;
+      throw err;
+    } finally {
+      clearTimeout(stall);
+      signal?.removeEventListener('abort', onAbort);
+    }
   }
 
   /** delete_image answers 0 for a missing path too: the outcome is checked over HTTP. */
@@ -671,7 +767,7 @@ export function seestarStorage(files: SeestarFiles): SeestarStorage {
           return false;
         }
       },
-      fetch: (p, maxBytes) => files.readAll(storagePath(p), maxBytes),
+      fetch: (p, maxBytes) => files.readOnce(storagePath(p), maxBytes),
       async delete(items) {
         const out = [];
         for (const it of items) {

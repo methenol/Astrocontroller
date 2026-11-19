@@ -59,10 +59,13 @@ export class SeestarCameraSource extends Source {
   }
 
   protected startSource(): void {
+    // the picture socket streams only while someone watches (or a tool grabs a frame)
+    this.scope.images[this.camera].setWatched(true);
     this.refresh();
   }
 
   protected stopSource(): void {
+    this.scope.images[this.camera].setWatched(false);
     this.stopRtsp();
   }
 
@@ -98,7 +101,7 @@ export class SeestarCameraSource extends Source {
   refresh(): void {
     const st = this.scope.state;
     const rtspMode = this.camera === 'tele' && st.connected && !st.released && RTSP_MODES.has(st.view.mode ?? '') && this.scope.viewRunning();
-    this.note = rtspMode ? (this.rtsp ? (this.rtspFrameAt ? null : `connecting to the ${st.view.mode} video…`) : `${st.view.mode} video starting…`) : this.scope.liveNote(this.camera);
+    this.note = rtspMode ? (this.rtsp ? (this.rtspFrameAt ? null : `connecting to the ${st.view.mode} video…`) : `${st.view.mode} video starting…`) : (this.scope.liveNote(this.camera) ?? (this.scope.streamPaused ? 'live stream paused (press play to resume)' : null));
     if (rtspMode && this.running) this.startRtsp();
     else this.stopRtsp();
   }
@@ -217,6 +220,11 @@ export class SeestarStackSource extends Source {
     const st = this.scope.state;
     if (this.busy || !st.connected || st.released) return;
     if (!this.scope.isStacking() && !st.stack.stacked) return;
+    // paused: no stacked image over the link either (a bin-1 stack is tens of MB)
+    if (this.scope.streamPaused) {
+      this.note = 'live stream paused (press play to resume)';
+      return;
+    }
     this.busy = true;
     try {
       const { image } = await this.scope.grabImage('tele', 'stacked', STACK_GRAB_TIMEOUT_MS);
@@ -241,7 +249,6 @@ export class SeestarVideoHub implements VideoHub {
   private tick: NodeJS.Timeout | null = null;
   private liveViewAskedAt = 0;
   private selectTimer: NodeJS.Timeout | null = null;
-  private stackHeld = false;
   private readonly onState = () => this.follow();
 
   constructor(
@@ -292,11 +299,6 @@ export class SeestarVideoHub implements VideoHub {
     if (fromTick) {
       this.tele.watchRtsp();
       this.wide.watchRtsp();
-    }
-    const stacking = this.scope.isStacking() && st.connected && !st.released;
-    if (stacking !== this.stackHeld) {
-      this.stackHeld = stacking;
-      this.stack.hold(stacking);
     }
     const watched = this.tele.wanted || this.wide.wanted;
     if (watched && st.connected && !st.released && !this.scope.viewRunning() && !this.scope.busy && Date.now() - this.liveViewAskedAt > LIVE_VIEW_RETRY_MS) {
