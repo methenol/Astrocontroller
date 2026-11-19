@@ -19,6 +19,7 @@ import { queryCatalog, type CatalogQuery } from '../astro/catalog-search.js';
 import { chooseGlass } from '../astro/planner.js';
 import { classifyFilter } from '../astro/detect.js';
 import { targetKey, restSettings } from '../astro/rest.js';
+import { generalGoalMin } from '../astro/acquisition/snr-goal.js';
 import type { Horizon } from '../astro/horizon.js';
 import { planWindow, nightKey } from './clock.js';
 import { loadProgram, type PlanSettings, type ProgramTarget } from './program.js';
@@ -258,7 +259,7 @@ export async function buildCalendar(o: CalendarOptions) {
   const { site, settings, progress, filters } = o;
   const c = cacheFor(site, settings, tz, o.horizon, now);
   const nights = await c.nights;
-  const generalGoalMin = restSettings().integrationTargetMin;
+  const general = restSettings();
   const program = loadProgram();
   const programOf = new Map<string, ProgramTarget>(program.map((t) => [targetKey(t.name), t]));
   const catalogOpts = { teleFovWidthArcmin: o.teleFovWidthArcmin };
@@ -291,7 +292,9 @@ export async function buildCalendar(o: CalendarOptions) {
       c.hours.set(hoursKey, hours);
     }
     const got = progress.get(key);
-    const goalMin = entry ? entry.goalMin : generalGoalMin;
+    // outside the program: the general goal, as minutes or as this target's minutes for the owner's SNR
+    const goalMin = entry ? entry.goalMin : generalGoalMin(site, input.name, { raHours: input.raHours, decDeg: input.decDeg });
+    const goalSnr = entry ? (entry.goalMode === 'snr' ? (entry.snrGoal ?? null) : null) : general.goalMode === 'snr' ? general.snrTarget : null;
     const collectedMin = got?.totalMin ?? 0;
     const summary = summarizeWindows(hours.up, hours.clear, { minBlockH: settings.minBlockMin / 60, goalMin, collectedMin, efficiency: o.efficiency });
     return {
@@ -312,6 +315,8 @@ export async function buildCalendar(o: CalendarOptions) {
       priority: entry?.priority ?? null,
       goalMin,
       goalSource: entry ? 'program' : 'general',
+      /** the SNR the goal stands for, when it was given as one */
+      goalSnr,
       collectedMin,
       collectedNights: got?.nights ?? 0,
       altitudeNow: Math.round(sky.altAz(site, input.raHours, input.decDeg, new Date(now)).altitude),

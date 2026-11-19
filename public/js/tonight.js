@@ -5,6 +5,7 @@ import { on } from './bus.js';
 import { draft } from './chat.js';
 import { temp, delta, speedN, speedUnit, precip, precipUnit } from './units.js';
 import { loadHorizon, onHorizonChange } from './horizon.js';
+import { setGoalDefaults, snrHelpHtml, snrLevel } from './goal.js';
 
 const DARK_SUN_ALT = -18;
 const SKY_OK = 60;
@@ -122,22 +123,40 @@ async function loadRestSettings() {
     const r = await api('rest/settings');
     // a field being edited keeps what the user is typing
     if (document.activeElement !== $('#rest-goal')) $('#rest-goal').value = r.integrationTargetMin;
+    if (document.activeElement !== $('#rest-snr')) $('#rest-snr').value = r.snrTarget;
     if (document.activeElement !== $('#rest-days')) $('#rest-days').value = r.restDays;
+    $('#rest-mode').value = r.goalMode ?? 'time';
+    showRestMode();
+    setGoalDefaults(r);
   } catch (e) {
     toast(`Target rest: ${e.message}`, true);
   }
 }
 
+/** The general goal shows its minutes or its SNR, as its mode says. */
+function showRestMode() {
+  const snr = $('#rest-mode').value === 'snr';
+  $('#rest-goal').hidden = snr;
+  $('#rest-snr').hidden = !snr;
+  $('#rest-unit').textContent = snr ? '' : 'min';
+}
+$('#rest-help').innerHTML = snrHelpHtml();
+
 async function saveRestSettings(e) {
   const goal = Number($('#rest-goal').value);
+  const snr = Number($('#rest-snr').value);
   const days = Number($('#rest-days').value);
-  if (!Number.isFinite(goal) || goal < 0 || !Number.isInteger(days) || days < 1) {
-    toast('Integration goal must be 0 or more minutes and the rest a whole number of days (1 or more)', true);
+  if (!Number.isFinite(goal) || goal < 0 || !(snr >= 1 && snr <= 500) || !Number.isInteger(days) || days < 1) {
+    toast('Integration goal must be 0 or more minutes (or an SNR from 1 to 500) and the rest a whole number of days (1 or more)', true);
     return loadRestSettings();
   }
-  const r = await apiToast('rest/settings', e.target.id === 'rest-goal' ? { integrationTargetMin: goal } : { restDays: days });
+  const id = e.target.id;
+  const patch = id === 'rest-mode' ? { goalMode: e.target.value } : id === 'rest-goal' ? { integrationTargetMin: goal } : id === 'rest-snr' ? { snrTarget: snr } : { restDays: days };
+  if (id === 'rest-mode') showRestMode();
+  const r = await apiToast('rest/settings', patch);
   if (r) {
-    toast(e.target.id === 'rest-goal' ? `Integration goal: ${r.integrationTargetMin} min` : `Rest: ${r.restDays} days`);
+    setGoalDefaults(r);
+    toast(id === 'rest-days' ? `Rest: ${r.restDays} days` : r.goalMode === 'snr' ? `Integration goal: SNR ${r.snrTarget} (${snrLevel(r.snrTarget)}), worked out per target` : `Integration goal: ${r.integrationTargetMin} min`);
     loadPlan();
   }
 }
@@ -152,6 +171,8 @@ export function loadTonight() {
 onHorizonChange(loadPlan);
 $('#sel-plan-type').onchange = loadPlan;
 $('#sel-plan-fov').onchange = loadPlan;
+$('#rest-mode').onchange = saveRestSettings;
+$('#rest-snr').onchange = saveRestSettings;
 $('#rest-goal').onchange = saveRestSettings;
 $('#rest-days').onchange = saveRestSettings;
 $('#plan').addEventListener('click', (e) => {

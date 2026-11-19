@@ -1005,3 +1005,17 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
 @media (max-width: 520px) {
   .cal-top { grid-template-columns: 50px minmax(0, 1fr) auto; gap: 8px; }
 }
+
+/* a goal as hours or as a signal-to-noise ratio (goal.js) */
+.goal-ctl { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+.goal-ctl select { min-height: 34px; font-size: 13px; padding: 0 4px; }
+.goal-ctl .goal-unit:empty { display: none; }
+.np-prog-table .goal-ctl input[type=number] { width: 4.2em; }
+.snr-help { position: relative; display: inline-block; }
+.snr-help > summary { list-style: none; cursor: help; color: var(--accent); font-size: 14px; line-height: 1; padding: 4px; user-select: none; }
+.snr-help > summary::-webkit-details-marker { display: none; }
+.snr-help-pop { position: absolute; z-index: 30; top: calc(100% + 4px); right: 0; width: min(320px, calc(100vw - 32px)); padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0, 0, 0, .5); font-size: 12px; white-space: normal; }
+.snr-help-pop table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+.snr-help-pop th, .snr-help-pop td { text-align: left; padding: 3px 6px 3px 0; border-bottom: 1px solid var(--line); }
+.snr-help-pop th { color: var(--muted); font-weight: 600; }
+.snr-help-pop p { margin: 0; }

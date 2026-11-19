@@ -10,6 +10,7 @@ import { on } from './bus.js';
 import { state, isPanelActive } from './state.js';
 import { draft } from './chat.js';
 import { imagingRequest } from './tonight.js';
+import { goalControlHtml, goalText, readGoal, setGoalDefaults, goalDefaults, snrHelpHtml, snrLevel, wireGoalControls } from './goal.js';
 
 const SLOT_MS = 10 * 60e3;
 const RESIZE_MS = 150;
@@ -322,7 +323,19 @@ function progressBar(t) {
   const goal = Math.max(1, t.goalMin);
   const done = Math.min(100, (t.collectedMin / goal) * 100);
   const tonight = Math.min(100 - done, ((t.tonight?.plannedMin ?? 0) / goal) * 100);
-  return `<div class="np-prog" title="${esc(dur(t.collectedMin))} collected${t.journalOnlyMin ? ` (${dur(t.journalOnlyMin)} not transferred yet)` : ''} of ${esc(dur(t.goalMin))}; tonight's plan adds ~${esc(dur(t.tonight?.plannedMin ?? 0))}"><div class="done" style="width:${done}%"></div><div class="tonight" style="width:${tonight}%"></div></div>`;
+  return `<div class="np-prog" title="${esc(dur(t.collectedMin))} collected${t.journalOnlyMin ? ` (${dur(t.journalOnlyMin)} not transferred yet)` : ''} of ${esc(dur(t.goalMin))}${t.goalMode === 'snr' ? ` (the estimate for SNR ${t.snrGoal})` : ''}; tonight's plan adds ~${esc(dur(t.tonight?.plannedMin ?? 0))}"><div class="done" style="width:${done}%"></div><div class="tonight" style="width:${tonight}%"></div></div>`;
+}
+
+/** Under the goal: what an SNR goal works out to on this rig, or what an hours goal reaches. */
+function goalNote(t) {
+  if (t.goalMode === 'snr') return `<small title="${esc(t.snr?.basis ?? 'no estimate for this target yet: the minutes it had stand')}">${esc(snrLevel(t.snrGoal))} · ≈ ${esc(dur(t.goalMin))}${t.snr ? '' : ' (not estimated)'}</small>`;
+  return t.snr ? `<small title="${esc(t.snr.basis)}">≈ SNR ${esc(Math.round(t.snr.atGoal))} at the goal (${esc(snrLevel(t.snr.atGoal))})</small>` : '';
+}
+
+/** The SNR the collected integration reaches (the planner's estimate; the stack says what it really is). */
+function snrLine(t) {
+  if (!t.snr || !t.collectedMin) return '';
+  return `<small title="${esc(t.snr.basis)}">≈ SNR ${esc(t.snr.collected)}${t.goalMode === 'snr' ? ` of ${esc(t.snrGoal)}` : ''} so far</small>`;
 }
 
 function renderProgram() {
@@ -331,7 +344,7 @@ function renderProgram() {
   const got = program.reduce((a, t) => a + Math.min(t.collectedMin, t.goalMin), 0);
   $('#np-program-sum').textContent = program.length ? `${program.length} targets · ${hours(got)} of ${hours(sum)} collected` : '';
   if (!program.length) {
-    el.innerHTML = '<p class="muted small">No targets yet. Add what you want collected and for how long: the plan works them into the nights that suit them best, and fills the rest of the night from the catalog.</p>';
+    el.innerHTML = '<p class="muted small">No targets yet. Add what you want collected and for how long (hours, or the signal-to-noise ratio you want): the plan works them into the nights that suit them best, and fills the rest of the night from the catalog.</p>';
     return;
   }
   el.innerHTML = `<table class="plan-table np-prog-table"><tr><th>Target</th><th>Priority</th><th>Goal</th><th>Progress</th><th>Tonight</th><th></th></tr>${program
@@ -343,8 +356,8 @@ function renderProgram() {
       return `<tr class="${t.enabled ? '' : 'gated'}" data-id="${esc(t.id)}">
         <td><b>${esc(t.displayName)}</b><small>${esc(t.gotoName !== t.displayName ? t.gotoName : t.name)}${t.filter && t.filter !== 'auto' ? ` · ${esc(t.filter)}` : ''}${t.minAltitude ? ` · ≥${esc(t.minAltitude)}°` : ''}</small>${t.notes ? `<small>${esc(t.notes)}</small>` : ''}</td>
         <td data-label="Priority"><select data-field="priority" aria-label="Priority">${[5, 4, 3, 2, 1].map((p) => `<option value="${p}" ${p === t.priority ? 'selected' : ''}>${p} ${PRIORITIES[p]}</option>`).join('')}</select></td>
-        <td data-label="Goal"><input type="number" data-field="goalH" min="0" step="0.5" value="${esc(Math.round((t.goalMin / 60) * 10) / 10)}" inputmode="decimal" aria-label="Goal in hours"> h</td>
-        <td data-label="Progress">${progressBar(t)}<small>${esc(dur(t.collectedMin))} of ${esc(dur(t.goalMin))}${t.nights ? ` · ${esc(t.nights)} night${t.nights === 1 ? '' : 's'}` : ''}</small>${seasonLine ? `<small>${esc(seasonLine)}</small>` : ''}</td>
+        <td data-label="Goal">${goalControlHtml({ mode: t.goalMode, hours: t.goalMin / 60, snr: t.snrGoal ?? (t.snr ? Math.round(t.snr.atGoal) : undefined), label: false, minHours: 0, perSqrtMin: t.snr?.perSqrtMin })}${goalNote(t)}</td>
+        <td data-label="Progress">${progressBar(t)}<small>${esc(dur(t.collectedMin))} of ${esc(dur(t.goalMin))}${t.nights ? ` · ${esc(t.nights)} night${t.nights === 1 ? '' : 's'}` : ''}</small>${snrLine(t)}${seasonLine ? `<small>${esc(seasonLine)}</small>` : ''}</td>
         <td data-label="Tonight"><span class="badge ${cls}">${esc(word)}</span><small>${esc(o?.reason ?? '')}</small></td>
         <td><button class="ghost" data-edit="${esc(t.id)}" title="Filter, minimum altitude, notes, keep collecting">Edit</button><button class="ghost" data-toggle="${esc(t.id)}">${t.enabled ? 'Pause' : 'Resume'}</button><button class="ghost" data-remove="${esc(t.id)}" aria-label="Remove ${esc(t.displayName)}">✕</button></td></tr>`;
     })
@@ -538,7 +551,7 @@ async function loadSuggestions() {
             <td data-label="In tonight's plan">${inPlan}<small>max ${esc(Math.round(r.maxAltitude))}°</small></td>
             <td data-label="Sky">${r.sky != null ? `<b class="sky ${skyCls(r.sky)}">${esc(r.sky)}/100</b><small>while usable</small>` : '<small>no forecast</small>'}</td>
             <td data-label="Fit / filter / subs"><small>${esc(r.framing ?? (r.fillPercent != null ? `${r.fillPercent}% of the frame` : ''))}</small><small>${esc(r.capture?.filter ?? r.filter)}</small>${subs ? `<small title="${esc(r.exposureAdvice ?? '')}">${esc(subs)}</small>` : ''}</td>
-            <td><button class="ghost" data-add="${esc(r.gotoName)}" data-goal="${esc(r.suggestedGoalMin)}" title="Add to the program with a goal of ${esc(dur(r.suggestedGoalMin))} (edit it after)">Add ${esc(hours(r.suggestedGoalMin))}</button><button class="ghost" data-sky="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}">Sky</button><button class="ghost" data-research="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}" title="Ask the agent to research it: what it is, its discovery and history, reference images, when it is up tonight and through the year, and how to collect it with this telescope">Research</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Never</button></td></tr>`;
+            <td>${r.suggestedSnr ? `<button class="ghost" data-add="${esc(r.gotoName)}" data-snr="${esc(r.suggestedSnr)}" title="Add to the program with a goal of SNR ${esc(r.suggestedSnr)} (${esc(snrLevel(r.suggestedSnr))}), about ${esc(dur(r.suggestedGoalMin))} on this rig (edit it after)">Add SNR ${esc(r.suggestedSnr)} (~${esc(hours(r.suggestedGoalMin))})</button>` : `<button class="ghost" data-add="${esc(r.gotoName)}" data-goal="${esc(r.suggestedGoalMin)}" title="Add to the program with a goal of ${esc(dur(r.suggestedGoalMin))} (edit it after)">Add ${esc(hours(r.suggestedGoalMin))}</button>`}<button class="ghost" data-sky="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}">Sky</button><button class="ghost" data-research="${esc(r.gotoName)}" data-display="${esc(r.displayName)}" data-ra="${esc(r.raHours)}" data-dec="${esc(r.decDeg)}" title="Ask the agent to research it: what it is, its discovery and history, reference images, when it is up tonight and through the year, and how to collect it with this telescope">Research</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="snooze" title="Hold it back like a recent capture; it fades back in over the coming weeks">Snooze</button><button class="ghost" data-rest="${esc(r.gotoName)}" data-role="done" title="Never suggest it again (until lifted)">Never</button></td></tr>`;
           })
           .join('')}</table>${resting}`
       : `<p class="muted small">Nothing up tonight matches this filter.</p>${resting}`;
@@ -568,7 +581,14 @@ async function loadMemory() {
     const r = await api('rest');
     const s = r.settings ?? (await api('rest/settings'));
     if (document.activeElement !== $('#np-rest-goal')) $('#np-rest-goal').value = s.integrationTargetMin;
+    if (document.activeElement !== $('#np-rest-snr')) $('#np-rest-snr').value = s.snrTarget;
     if (document.activeElement !== $('#np-rest-days')) $('#np-rest-days').value = s.restDays;
+    $('#np-rest-mode').value = s.goalMode ?? 'time';
+    showRestMode();
+    // new program targets start in the general goal's mode
+    const before = goalDefaults();
+    setGoalDefaults(s);
+    if (before.mode !== goalDefaults().mode || !$('#np-add [data-goal-ctl]')) renderAddGoal();
     const held = r.held ?? [];
     $('#np-memory').innerHTML = held.length
       ? `<p class="muted small">Your own say: ${held.map((h) => `<b>${esc(h.displayName)}</b> ${h.role === 'done' ? "(don't suggest again)" : `(snoozed${h.state?.until ? ` until ${esc(h.state.until)}` : ''})`} <button class="ghost np-mini" data-rest="${esc(h.gotoName)}" data-role="none">lift</button>`).join(' · ')}</p>`
@@ -578,21 +598,44 @@ async function loadMemory() {
   }
 }
 
+/** The general goal shows its minutes or its SNR, as its mode says. */
+function showRestMode() {
+  const snr = $('#np-rest-mode').value === 'snr';
+  $('#np-rest-goal').hidden = snr;
+  $('#np-rest-snr').hidden = !snr;
+  $('#np-rest-unit').textContent = snr ? '' : 'min';
+}
+
+function renderAddGoal() {
+  const d = goalDefaults();
+  $('#np-add-goal-ctl').innerHTML = goalControlHtml({ id: 'np-add-goal', mode: d.mode, hours: 3, snr: d.snr });
+}
+renderAddGoal();
+$('#np-rest-help').innerHTML = snrHelpHtml();
+
 async function saveRest(e) {
   const goal = Number($('#np-rest-goal').value);
+  const snr = Number($('#np-rest-snr').value);
   const days = Number($('#np-rest-days').value);
-  if (!Number.isFinite(goal) || goal < 0 || !Number.isInteger(days) || days < 1) {
-    toast('Integration goal must be 0 or more minutes and the rest a whole number of days (1 or more)', true);
+  if (!Number.isFinite(goal) || goal < 0 || !(snr >= 1 && snr <= 500) || !Number.isInteger(days) || days < 1) {
+    toast('Integration goal must be 0 or more minutes (or an SNR from 1 to 500) and the rest a whole number of days (1 or more)', true);
     return loadMemory();
   }
-  const r = await apiToast('rest/settings', e.target.id === 'np-rest-goal' ? { integrationTargetMin: goal } : { restDays: days });
+  const id = e.target.id;
+  const patch = id === 'np-rest-mode' ? { goalMode: e.target.value } : id === 'np-rest-goal' ? { integrationTargetMin: goal } : id === 'np-rest-snr' ? { snrTarget: snr } : { restDays: days };
+  if (id === 'np-rest-mode') showRestMode();
+  const r = await apiToast('rest/settings', patch);
   if (r) {
-    toast(e.target.id === 'np-rest-goal' ? `Integration goal: ${r.integrationTargetMin} min` : `Rest: ${r.restDays} days`);
+    setGoalDefaults(r);
+    if (id === 'np-rest-mode') renderAddGoal();
+    toast(id === 'np-rest-days' ? `Rest: ${r.restDays} days` : r.goalMode === 'snr' ? `Integration goal: SNR ${r.snrTarget} (${snrLevel(r.snrTarget)}), worked out per target` : `Integration goal: ${r.integrationTargetMin} min`);
     loadSuggestions();
     reloadSoon();
   }
 }
+$('#np-rest-mode').onchange = saveRest;
 $('#np-rest-goal').onchange = saveRest;
+$('#np-rest-snr').onchange = saveRest;
 $('#np-rest-days').onchange = saveRest;
 
 // ---------------------------------------------------------------- adding targets
@@ -615,10 +658,11 @@ $('#np-add').onsubmit = async (e) => {
   e.preventDefault();
   const name = $('#np-add-name').value.trim();
   if (!name) return;
-  const goalH = Number($('#np-add-goal').value);
-  const r = await apiToast('plan/program', { name, goalMin: Math.round((Number.isFinite(goalH) ? goalH : 3) * 60), priority: Number($('#np-add-pri').value) });
+  const goal = readGoal($('#np-add'));
+  if (!goal) return toast('The goal is a number of hours, or an SNR from 1 to 500', true);
+  const r = await apiToast('plan/program', { name, ...goal, priority: Number($('#np-add-pri').value) });
   if (r) {
-    toast(`${r.displayName}: ${dur(r.goalMin)} wanted, priority ${r.priority}`);
+    toast(`${r.displayName}: ${goalText(r)} wanted, priority ${r.priority}`);
     $('#np-add-name').value = '';
     loadProgram();
     setTimeout(() => loadPlan(), 6000);
@@ -800,9 +844,9 @@ $('#panel-plan').addEventListener('click', async (e) => {
       reloadSoon();
     }
   } else if (d.add) {
-    const r = await busy(b, () => apiToast('plan/program', d.goal ? { name: d.add, goalMin: Number(d.goal) } : { name: d.add }));
+    const r = await busy(b, () => apiToast('plan/program', d.snr ? { name: d.add, goalMode: 'snr', snrGoal: Number(d.snr) } : d.goal ? { name: d.add, goalMode: 'time', goalMin: Number(d.goal) } : { name: d.add }));
     if (r) {
-      toast(`${r.displayName} added: ${dur(r.goalMin)}, priority ${r.priority}`);
+      toast(`${r.displayName} added: ${goalText(r)}, priority ${r.priority}`);
       loadProgram();
       loadSuggestions();
       setTimeout(() => loadPlan(), 6000);
@@ -855,13 +899,22 @@ $('#np-program').addEventListener('change', async (e) => {
   if (!el) return;
   const id = el.closest('tr')?.dataset.id;
   if (!id) return;
-  const body = el.dataset.field === 'priority' ? { priority: Number(el.value) } : { goalMin: Math.round(Number(el.value) * 60) };
-  if (el.dataset.field === 'goalH' && !(Number(el.value) >= 0)) return toast('The goal is a number of hours', true);
-  if (await apiToast(`plan/program/${seg(id)}`, body)) {
+  if (await apiToast(`plan/program/${seg(id)}`, { priority: Number(el.value) })) {
     toast('Saved: the plan is solved again');
     loadProgram();
   }
 });
+// the goal: hours or an SNR, saved as soon as it changes
+wireGoalControls($('#np-program'), async (ctl, goal) => {
+  const id = ctl.closest('tr')?.dataset.id;
+  if (!id) return;
+  const r = await apiToast(`plan/program/${seg(id)}`, goal);
+  if (r) {
+    toast(`${r.displayName}: ${goalText(r)} — the plan is solved again`);
+    loadProgram();
+  }
+});
+wireGoalControls($('#np-add'));
 
 $('#np-settings').addEventListener('change', (e) => {
   const el = e.target.closest('[data-set]');

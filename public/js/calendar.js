@@ -10,6 +10,7 @@ import { draft } from './chat.js';
 import { imagingRequest } from './tonight.js';
 import { altitudeChart, GROUPS } from './database.js';
 import { programFormHtml, wireProgramForms } from './program-add.js';
+import { snrLevel } from './goal.js';
 
 const STORE_KEY = 'cal-filters';
 const FIELDS = ['scope', 'type', 'catalog', 'con', 'sort', 'maxmag', 'minsize', 'maxsize', 'minfov', 'named', 'q'];
@@ -249,8 +250,8 @@ function sheetHtml(t) {
   const low = t.altitudeNow < GOTO_MIN_ALT;
   const pos = `data-ra="${esc(t.raHours)}" data-dec="${esc(t.decDeg)}" data-display="${esc(t.displayName)}"`;
   const left = t.verdict === 'done' ? 'Goal reached' : t.verdict === 'no-goal' ? `No goal set; about ${hours(t.expectedTotalH)} h expected` : `Needs ${hours(t.needH)} h; about ${hours(t.expectedOptimalH)} h expected in optimal nights, ${hours(t.expectedTotalH)} h overall`;
-  const entry = t.inProgram ? { goalMin: t.goalMin, priority: t.priority, collectedMin: t.collectedMin, enabled: t.enabled } : null;
-  const goal = t.goalMin > 0 ? `${t.goalSource === 'program' ? 'program goal' : 'general goal'}` : 'no goal set';
+  const entry = t.inProgram ? { goalMin: t.goalMin, goalMode: t.goalSnr != null ? 'snr' : 'time', snrGoal: t.goalSnr ?? undefined, priority: t.priority, collectedMin: t.collectedMin, enabled: t.enabled } : null;
+  const goal = t.goalMin > 0 ? `${t.goalSource === 'program' ? 'program goal' : 'general goal'}${t.goalSnr != null ? ` SNR ${t.goalSnr} (${snrLevel(t.goalSnr)})` : ''}` : 'no goal set';
   return `<div class="row-head"><h3>${esc(t.displayName)}</h3>${verdictBadge(t)}<span class="spacer"></span><button type="button" class="ghost" data-cal-close aria-label="Close details">Close</button></div>
     <span class="muted small">${esc(facts)}${aliases ? `<br>${esc(aliases)}` : ''}</span>
     <div>${progressBar(t)}<span class="small">${esc(collectedText(t))} · ${goal}${t.collectedNights ? ` · ${plural(t.collectedNights)}` : ''}</span></div>

@@ -1,6 +1,6 @@
 /**
- * "Add to program" from anywhere a target is shown (the Database, Stellarium): a compact goal +
- * priority form. A catalog object is added by its name, so the program keeps the catalog's position
+ * "Add to program" from anywhere a target is shown (the Database, Stellarium): a compact goal
+ * (hours, or a target SNR the plan turns into hours) + priority form. A catalog object is added by its name, so the program keeps the catalog's position
  * and designations; anything the catalog does not know (a star picked on the sky, a frame composed
  * off-centre) is added as a custom target at the position given. Adding a target that is already in
  * the program updates its goal and priority instead (the server's own rule).
@@ -8,6 +8,10 @@
 import { esc, toast } from './dom.js';
 import { api } from './api.js';
 import { emit } from './bus.js';
+import { goalControlHtml, goalDefaults, goalText, readGoal, setGoalDefaults, wireGoalControls } from './goal.js';
+
+// a new target's goal starts in the general goal's mode (hours or SNR)
+api('rest/settings').then(setGoalDefaults).catch(() => {});
 
 const DEFAULT_GOAL_H = 3;
 const DEFAULT_PRIORITY = 3;
@@ -32,13 +36,15 @@ export async function findInProgram(...names) {
 export function programFormHtml(entry, { disabled = '', compact = false } = {}) {
   const goalH = entry ? +(entry.goalMin / 60).toFixed(1) : DEFAULT_GOAL_H;
   const pri = entry?.priority ?? DEFAULT_PRIORITY;
+  const d = goalDefaults();
+  const goal = goalControlHtml({ mode: entry ? entry.goalMode : d.mode, hours: goalH, snr: entry?.snrGoal ?? (entry?.snr ? Math.round(entry.snr.atGoal) : d.snr), perSqrtMin: entry?.snr?.perSqrtMin });
   const status = entry
-    ? `<span class="muted small prog-add-status">In the program: ${esc(hours(entry.goalMin))} goal, priority ${esc(entry.priority)}${entry.collectedMin ? `, ${esc(hours(entry.collectedMin))} collected` : ''}${entry.enabled === false ? ' (paused)' : ''}</span>`
+    ? `<span class="muted small prog-add-status">In the program: ${esc(goalText(entry))} goal, priority ${esc(entry.priority)}${entry.collectedMin ? `, ${esc(hours(entry.collectedMin))} collected` : ''}${entry.enabled === false ? ' (paused)' : ''}</span>`
     : '';
   return `<form class="prog-add${compact ? ' compact' : ''}" data-prog-add autocomplete="off">
     ${status}
     <span class="prog-add-row">
-      <label>goal <input name="goal" type="number" min="0.5" step="0.5" value="${esc(goalH)}" inputmode="decimal" aria-label="Goal in hours"> h</label>
+      ${goal}
       <label>priority <select name="priority" aria-label="Priority">${PRIORITIES.map(([v, l]) => `<option value="${v}"${v === pri ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
       <button type="submit"${disabled ? ` disabled title="${esc(disabled)}"` : ''}>${entry ? 'Update program' : 'Add to program'}</button>
     </span>
@@ -49,9 +55,10 @@ export function programFormHtml(entry, { disabled = '', compact = false } = {}) 
  * Add (or update) a target. `t`: { name, display, raHours, decDeg, custom } where custom means the
  * position is the point (a composed frame), not the catalog object's.
  */
-export async function addToProgram(t, goalH, priority) {
-  const goalMin = Math.round((Number.isFinite(goalH) && goalH > 0 ? goalH : DEFAULT_GOAL_H) * 60);
-  const base = { goalMin, priority: Number(priority) || DEFAULT_PRIORITY };
+export async function addToProgram(t, goal, priority) {
+  // goal: { goalMode, goalMin } or { goalMode, snrGoal } (goal.js readGoal), or hours as a number
+  const g = typeof goal === 'number' || goal == null ? { goalMode: 'time', goalMin: Math.round((Number.isFinite(goal) && goal > 0 ? goal : DEFAULT_GOAL_H) * 60) } : goal;
+  const base = { ...g, priority: Number(priority) || DEFAULT_PRIORITY };
   const hasPos = Number.isFinite(t.raHours) && Number.isFinite(t.decDeg);
   const pos = hasPos ? { raHours: ((t.raHours % 24) + 24) % 24, decDeg: Math.max(-90, Math.min(90, t.decDeg)) } : {};
   const name = (t.name || t.display || '').trim();
@@ -79,6 +86,7 @@ const customName = ({ raHours, decDeg }) => `Custom ${raHours.toFixed(2)}h ${dec
  * `done(entry)` runs after a successful add (to re-render the status line).
  */
 export function wireProgramForms(container, target, done) {
+  wireGoalControls(container);
   container.addEventListener('submit', async (e) => {
     const form = e.target.closest('[data-prog-add]');
     if (!form) return;
@@ -89,8 +97,10 @@ export function wireProgramForms(container, target, done) {
     btn.disabled = true;
     btn.classList.add('busy');
     try {
-      const r = await addToProgram(t, Number(form.elements.goal.value), form.elements.priority.value);
-      toast(`${r.displayName}: ${hours(r.goalMin)} wanted, priority ${r.priority} — in the program`);
+      const goal = readGoal(form);
+      if (!goal) throw new Error('the goal is a number of hours, or an SNR from 1 to 500');
+      const r = await addToProgram(t, goal, form.elements.priority.value);
+      toast(`${r.displayName}: ${goalText(r)} wanted, priority ${r.priority} — in the program`);
       done?.(r);
     } catch (err) {
       toast(`Add to program: ${err.message}`, true);

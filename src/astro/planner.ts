@@ -24,6 +24,7 @@ import { nightWindow, moonState, separationDeg, fmtTime, localDate, bodyAlt, typ
 import { appealScore, conditionsPenalty, detectFor, emissionOf, moonlitKeep, sqmFor, classifyFilter, type BandClass, type Bucket, type Detectability, type Emission } from './detect.js';
 import { subPlan, type Rig } from './exposure.js';
 import { captureRecords, loadRest, restPenalty, restState, type RestRecord } from './rest.js';
+import { generalGoalMin } from './acquisition/snr-goal.js';
 import type { HourConditions } from './weather.js';
 import type { Horizon } from './horizon.js';
 import { clearsAt } from './sightings.js';
@@ -526,7 +527,7 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
   const weights = { ...W, integration: Math.max(0, W.integration - quickShift), detect: W.detect + quickShift };
 
   const today = opts.today ?? localDate(now, opts.timezone);
-  const restRecords: RestRecord[] = opts.applyRest === false ? [] : (opts.restRecords ?? [...captureRecords(today), ...loadRest()]);
+  const restRecords: RestRecord[] = opts.applyRest === false ? [] : (opts.restRecords ?? [...captureRecords(today, (name) => generalGoalMin(site, name)), ...loadRest()]);
 
   const scored: Array<{ t: PlannedTarget; size: number; quality: number; code: string; constellation: string }> = [];
   for (const o of candidates) {

@@ -6,6 +6,10 @@
  * A program target is a goal, not a booking: the solver works it into whichever nights and hours
  * suit it best, and stops scheduling it once the integration collected (library + journal,
  * night/progress.ts) reaches the goal, unless the owner asked to keep collecting.
+ *
+ * The goal is given as hours, or as a signal-to-noise ratio: then `goalMin` is the integration this
+ * rig needs for that SNR (acquisition/snr-goal.ts), worked out again by the plan service whenever
+ * the rig or the sky estimate changes, and everything downstream keeps counting minutes.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,6 +19,7 @@ import { errMsg, logger } from '../log.js';
 import { writeFileAtomic } from '../util/fs.js';
 import { findObject, displayName, gotoLabel } from '../astro/catalog.js';
 import { restSettings } from '../astro/rest.js';
+import { SNR_GOAL_MAX, SNR_GOAL_MIN, type GoalMode } from '../astro/acquisition/snr-goal.js';
 
 const log = logger('program');
 
@@ -30,8 +35,12 @@ export interface ProgramTarget {
   gotoName: string;
   raHours: number;
   decDeg: number;
-  /** total integration wanted, minutes (summed over nights) */
+  /** total integration wanted, minutes (summed over nights); in 'snr' mode, the estimate for snrGoal */
   goalMin: number;
+  /** how the owner gave the goal: hours (goalMin) or a signal-to-noise ratio (snrGoal); absent = 'time' */
+  goalMode?: GoalMode;
+  /** the SNR wanted, in 'snr' mode (kept when switched back to hours, for the next switch) */
+  snrGoal?: number;
   /** 1 low … 5 top */
   priority: number;
   /** false: kept in the list, never scheduled */
@@ -158,6 +167,9 @@ export const ProgramTargetInput = z.object({
   raHours: z.number().min(0).lt(24).optional(),
   decDeg: z.number().min(-90).max(90).optional(),
   goalMin: z.number().min(0).max(100_000).optional(),
+  /** 'time': goalMin is the goal; 'snr': snrGoal is, and goalMin is worked out from it */
+  goalMode: z.enum(['time', 'snr']).optional(),
+  snrGoal: z.number().min(SNR_GOAL_MIN).max(SNR_GOAL_MAX).optional(),
   priority: z.number().int().min(1).max(5).optional(),
   enabled: z.boolean().optional(),
   keepCollecting: z.boolean().optional(),
@@ -195,7 +207,7 @@ const isTarget = (t: unknown): t is ProgramTarget => {
 export function loadProgram(): ProgramTarget[] {
   const raw = readJson(programFile());
   const list = Array.isArray((raw as { targets?: unknown })?.targets) ? (raw as { targets: unknown[] }).targets : [];
-  return list.filter(isTarget).map((t) => ({ ...t, keepCollecting: t.keepCollecting ?? false, enabled: t.enabled ?? true, filter: t.filter ?? 'auto', notes: t.notes ?? '' }));
+  return list.filter(isTarget).map((t) => ({ ...t, goalMode: t.goalMode === 'snr' && Number.isFinite(t.snrGoal) ? 'snr' : 'time', keepCollecting: t.keepCollecting ?? false, enabled: t.enabled ?? true, filter: t.filter ?? 'auto', notes: t.notes ?? '' }));
 }
 
 function saveProgram(targets: ProgramTarget[]): void {
@@ -237,6 +249,14 @@ export function findProgramTarget(ref: string, targets = loadProgram()): Program
   return targets.find((t) => t.name.toLowerCase() === key || t.gotoName.toLowerCase() === ref.trim().toLowerCase() || t.displayName.toLowerCase() === ref.trim().toLowerCase());
 }
 
+/**
+ * The goal mode a change asks for: the one named, else the one its figure implies (an SNR, or
+ * hours), else what the target had (`current`).
+ */
+function modeOf(input: Partial<ProgramTargetInput>, current: GoalMode): GoalMode {
+  return input.goalMode ?? (input.snrGoal !== undefined ? 'snr' : input.goalMin !== undefined ? 'time' : current);
+}
+
 /** Add a target (resolved through the catalog, or a custom position), or update it when it is already in the program. */
 export function addTarget(input: ProgramTargetInput, today: string): ProgramTarget {
   const targets = loadProgram();
@@ -244,6 +264,9 @@ export function addTarget(input: ProgramTargetInput, today: string): ProgramTarg
   if (existing) return updateTarget(existing.id, input);
   const o = findObject(input.name);
   if (!o && (input.raHours === undefined || input.decDeg === undefined)) throw new Error(`"${input.name}" is not in the catalog: give its J2000 position (raHours, decDeg) to add it as a custom target`);
+  // without a goal of its own: the general goal (Tonight / Plan), as hours or as an SNR
+  const general = restSettings();
+  const goalMode = modeOf(input, general.goalMode);
   const t: ProgramTarget = {
     id: newId(),
     name: o ? o.id : input.name.trim(),
@@ -251,8 +274,10 @@ export function addTarget(input: ProgramTargetInput, today: string): ProgramTarg
     gotoName: o ? gotoLabel(o) : input.name.trim(),
     raHours: input.raHours ?? o!.raHours,
     decDeg: input.decDeg ?? o!.decDeg,
-    // without a goal of its own: the integration goal of the target rest (Tonight / Plan), else three hours
-    goalMin: input.goalMin ?? (restSettings().integrationTargetMin || DEFAULT_GOAL_MIN),
+    // in 'snr' mode a placeholder until the plan service works the minutes out (settleGoal)
+    goalMin: input.goalMin ?? (general.integrationTargetMin || DEFAULT_GOAL_MIN),
+    goalMode,
+    snrGoal: input.snrGoal ?? (goalMode === 'snr' ? general.snrTarget : undefined),
     priority: input.priority ?? DEFAULT_PRIORITY,
     enabled: input.enabled ?? true,
     keepCollecting: input.keepCollecting ?? false,
@@ -265,7 +290,7 @@ export function addTarget(input: ProgramTargetInput, today: string): ProgramTarg
     roiCrop: input.roiCrop,
   };
   saveProgram([...targets, t]);
-  log.info(`program: added ${t.displayName} (${t.goalMin} min, priority ${t.priority})`);
+  log.info(`program: added ${t.displayName} (${t.goalMode === 'snr' ? `SNR ${t.snrGoal}` : `${t.goalMin} min`}, priority ${t.priority})`);
   return t;
 }
 
@@ -273,9 +298,12 @@ export function updateTarget(ref: string, patch: Partial<ProgramTargetInput>): P
   const targets = loadProgram();
   const t = findProgramTarget(ref, targets);
   if (!t) throw new Error(`"${ref}" is not in the program`);
+  const goalMode = modeOf(patch, t.goalMode ?? 'time');
   const next: ProgramTarget = {
     ...t,
     goalMin: patch.goalMin ?? t.goalMin,
+    goalMode,
+    snrGoal: patch.snrGoal ?? t.snrGoal ?? (goalMode === 'snr' ? restSettings().snrTarget : undefined),
     priority: patch.priority ?? t.priority,
     enabled: patch.enabled ?? t.enabled,
     keepCollecting: patch.keepCollecting ?? t.keepCollecting,
@@ -287,6 +315,19 @@ export function updateTarget(ref: string, patch: Partial<ProgramTargetInput>): P
     roiCrop: patch.roiCrop ?? t.roiCrop,
   };
   saveProgram(targets.map((x) => (x.id === t.id ? next : x)));
+  return next;
+}
+
+/**
+ * The minutes an SNR goal works out to on this rig (the plan service's estimate). Only an SNR-mode
+ * target is touched, and only its goalMin: the owner's own say stays as they gave it.
+ */
+export function setEstimatedGoal(id: string, goalMin: number): ProgramTarget | undefined {
+  const targets = loadProgram();
+  const t = targets.find((x) => x.id === id);
+  if (!t || t.goalMode !== 'snr' || !Number.isFinite(goalMin) || goalMin === t.goalMin) return t;
+  const next = { ...t, goalMin };
+  saveProgram(targets.map((x) => (x.id === id ? next : x)));
   return next;
 }
 

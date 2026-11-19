@@ -8,6 +8,7 @@ import { config } from '../../config.js';
 import * as sky from '../../astro/sky.js';
 import type { NightServices } from '../../night/index.js';
 import { addTarget, loadSettings, removeTarget, saveSettings, updateTarget, PlanSettingsSchema } from '../../night/program.js';
+import { SNR_GOAL_MAX, SNR_GOAL_MIN, snrChartText } from '../../astro/acquisition/snr-goal.js';
 import { hm, dur } from '../../night/clock.js';
 import type { Block } from '../../night/solver.js';
 import type { PlannedNight } from '../../night/service.js';
@@ -143,14 +144,21 @@ export function registerNightTools(tool: ToolFn, night: NightServices): void {
 
   tool(
     'plan_program',
-    "The owner's program: the targets they want collected and the integration they want on each, which the night plan works into the nights that suit them. Change it only on the owner's request. list: each target with its goal, priority, what is collected so far (library + journal) and tonight's outlook. add: a target (catalog name, or a custom position with ra_hours/dec_deg) with goal_hours and priority (1 low … 5 top, default 3). update / remove: by name. suggest: targets worth adding for tonight's window (types, min_fov_percent, max_magnitude), with a goal suggestion — for when the owner asks what to add. settings: show the plan settings, or change them with settings={…} (window, minAltitude, minBlockMin, weatherMinScore, moon rules, fillers…).",
+    "The owner's program: the targets they want collected and the integration they want on each, which the night plan works into the nights that suit them. Change it only on the owner's request. list: each target with its goal, priority, what is collected so far (library + journal) and tonight's outlook. add: a target (catalog name, or a custom position with ra_hours/dec_deg) with goal_hours — or goal_snr, a signal-to-noise ratio the plan turns into this rig's hours for that target — and priority (1 low … 5 top, default 3). update / remove: by name. suggest: targets worth adding for tonight's window (types, min_fov_percent, max_magnitude), with a goal suggestion — for when the owner asks what to add. settings: show the plan settings, or change them with settings={…} (window, minAltitude, minBlockMin, weatherMinScore, moon rules, fillers…).",
     {
       action: z.enum(['list', 'add', 'update', 'remove', 'settings', 'suggest']),
       types: z.array(z.string()).optional().describe('suggest: galaxy, emission, nebula, planetary, cluster, globular, open_cluster, supernova_remnant, reflection, dark, galaxy_cluster'),
       min_fov_percent: z.number().min(0).max(100).optional().describe('suggest: at least this percent of the tele frame width'),
       max_magnitude: z.number().optional().describe('suggest'),
       name: z.string().optional(),
-      goal_hours: z.number().min(0).max(1000).optional(),
+      goal_hours: z.number().min(0).max(1000).optional().describe('the goal as integration hours (sets goal_mode=time)'),
+      goal_snr: z
+        .number()
+        .min(SNR_GOAL_MIN)
+        .max(SNR_GOAL_MAX)
+        .optional()
+        .describe(`the goal as a target SNR (sets goal_mode=snr): the plan works out the hours this rig needs. ${snrChartText().replace(/\n/g, '; ')}`),
+      goal_mode: z.enum(['time', 'snr']).optional().describe('switch between the hours goal and the SNR goal without changing either figure'),
       priority: z.number().int().min(1).max(5).optional(),
       enabled: z.boolean().optional(),
       keep_collecting: z.boolean().optional(),
@@ -168,6 +176,8 @@ export function registerNightTools(tool: ToolFn, night: NightServices): void {
       const today = sky.localDate(new Date(), config.observer.timezone);
       const patch = {
         goalMin: a.goal_hours !== undefined ? Math.round(a.goal_hours * 60) : undefined,
+        snrGoal: a.goal_snr,
+        goalMode: a.goal_mode,
         priority: a.priority,
         enabled: a.enabled,
         keepCollecting: a.keep_collecting,
@@ -185,13 +195,13 @@ export function registerNightTools(tool: ToolFn, night: NightServices): void {
           return text(await plan.suggestions({ types: a.types, minFovPercent: a.min_fov_percent, maxMagnitude: a.max_magnitude, limit: 15 }));
         case 'add': {
           if (!a.name) throw new Error('add needs name');
-          const t = addTarget({ name: a.name, raHours: a.ra_hours, decDeg: a.dec_deg, ...patch }, today);
+          const t = await plan.settleGoal(addTarget({ name: a.name, raHours: a.ra_hours, decDeg: a.dec_deg, ...patch }, today));
           plan.changed('the program changed');
           return text({ added: t, note: 'the plan is solved again in a few seconds (night_plan action=show)' });
         }
         case 'update': {
           if (!a.name) throw new Error('update needs name');
-          const t = updateTarget(a.name, patch);
+          const t = await plan.settleGoal(updateTarget(a.name, patch));
           plan.changed('the program changed');
           return text({ updated: t });
         }

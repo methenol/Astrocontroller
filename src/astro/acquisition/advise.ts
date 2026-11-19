@@ -186,6 +186,8 @@ export interface Recommendation {
     collectedMin: number;
     snrSoFar: number;
     hoursTo: { detect: number; good: number; deep: number };
+    /** SNR per Bayer cell after one minute of integration (exposure); SNR grows as its square root */
+    snrPerSqrtMin: number;
     suggestedGoalMin: number;
     note: string;
   };
@@ -516,6 +518,7 @@ export function advise(input: AdviseInput): Recommendation {
       collectedMin,
       snrSoFar: r1(snrFor(collectedMin * 60 + tonightExpS)),
       hoursTo: { detect: r1(wallH(SNR_TIERS.detect)), good: r1(wallH(SNR_TIERS.good)), deep: r1(wallH(SNR_TIERS.deep)) },
+      snrPerSqrtMin: snrFor(60),
       suggestedGoalMin,
       note: `SNR per Bayer cell at the target's mean surface brightness after the night's ${Math.round(tonightExpS / 60)} min${clear < 0.99 ? ` (${Math.round(clear * 100)}% clear)` : ''}; ${SNR_TIERS.good} is a clean picture, ${SNR_TIERS.deep} a deep one. Hours are wall-clock at this sub's cadence and keep rate.`,
     },

@@ -152,7 +152,7 @@ export function nightRoutes({ night, duty, scope }: WebContext): Router {
   api.post(
     '/plan/program',
     route(async (req) => {
-      const t = addTarget(body(req, ProgramTargetInput), today());
+      const t = await need().plan.settleGoal(addTarget(body(req, ProgramTargetInput), today()));
       need().plan.changed('the program changed');
       return t;
     }),
@@ -168,7 +168,7 @@ export function nightRoutes({ night, duty, scope }: WebContext): Router {
   api.post(
     '/plan/program/:id',
     route(async (req) => {
-      const t = updateTarget(String(req.params.id), body(req, ProgramTargetInput.partial()));
+      const t = await need().plan.settleGoal(updateTarget(String(req.params.id), body(req, ProgramTargetInput.partial())));
       need().plan.changed('the program changed');
       return t;
     }),

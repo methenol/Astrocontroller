@@ -48,9 +48,16 @@ export interface RestSettings {
   integrationTargetMin: number;
   /** days a target that met its integration goal is rested, at full strength, before it is suggested again */
   restDays: number;
+  /**
+   * how the general goal is given: 'time' is integrationTargetMin; 'snr' is snrTarget, turned into
+   * each target's own minutes on this rig (acquisition/snr-goal.ts)
+   */
+  goalMode: 'time' | 'snr';
+  /** the SNR wanted in 'snr' mode */
+  snrTarget: number;
 }
 
-export const REST_DEFAULTS: RestSettings = { integrationTargetMin: 0, restDays: 14 };
+export const REST_DEFAULTS: RestSettings = { integrationTargetMin: 0, restDays: 14, goalMode: 'time', snrTarget: 10 };
 
 const restFile = () => path.join(config.paths.data, 'rest.json');
 const settingsFile = () => path.join(config.paths.data, 'rest-settings.json');
@@ -69,6 +76,8 @@ export function restSettings(): RestSettings {
   settingsCache = {
     integrationTargetMin: num(raw.integrationTargetMin, 0, REST_DEFAULTS.integrationTargetMin),
     restDays: Math.round(num(raw.restDays, 1, REST_DEFAULTS.restDays)),
+    goalMode: raw.goalMode === 'snr' ? 'snr' : 'time',
+    snrTarget: num(raw.snrTarget, 1, REST_DEFAULTS.snrTarget),
   };
   return settingsCache;
 }
@@ -153,9 +162,17 @@ function decay(r: RestRole, days: number): number {
 /**
  * Library captures as rest records: the folder name is the target, the stamp is the date. A
  * target's sessions are added up per camera, oldest first, and only the session that reaches the
- * integration goal (and every later one) rests it: a short first night leaves it on the list.
+ * integration goal (and every later one) rests it: a short first night leaves it on the list. The
+ * goal is one figure, or each target's own (an SNR goal is different minutes for every target).
  */
-export function captureRecords(today: string, goalMin = restSettings().integrationTargetMin): RestRecord[] {
+export function captureRecords(today: string, goal: number | ((name: string) => number) = restSettings().integrationTargetMin): RestRecord[] {
+  const goals = new Map<string, number>();
+  const goalOf = (name: string) => {
+    if (typeof goal === 'number') return goal;
+    let g = goals.get(name);
+    if (g === undefined) goals.set(name, (g = goal(name)));
+    return g;
+  };
   const out: RestRecord[] = [];
   const sums = new Map<string, number>();
   const caps = captureLog()
@@ -167,7 +184,7 @@ export function captureRecords(today: string, goalMin = restSettings().integrati
     const id = `${name}|${c.camera}`;
     const total = (sums.get(id) ?? 0) + c.integrationS;
     sums.set(id, total);
-    if (total >= goalMin * 60) out.push({ name, date: c.date, role: 'shot' });
+    if (total >= goalOf(name) * 60) out.push({ name, date: c.date, role: 'shot' });
   }
   return out;
 }

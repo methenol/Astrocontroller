@@ -21,6 +21,9 @@ const RestBody = z.object({ name: z.string().min(1), role: z.enum(['snooze', 'do
 const RestSettingsBody = z.object({
   integrationTargetMin: z.number().min(0).max(100_000).optional(),
   restDays: z.number().int().min(1).max(3650).optional(),
+  /** the general goal as minutes, or as an SNR each target's minutes are worked out from */
+  goalMode: z.enum(['time', 'snr']).optional(),
+  snrTarget: z.number().min(1).max(500).optional(),
 });
 
 export function skyRoutes({ scope, night }: WebContext): Router {

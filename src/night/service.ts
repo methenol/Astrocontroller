@@ -34,7 +34,8 @@ import { horizonFor, type Horizon } from '../astro/horizon.js';
 import { recordBlocked, clearsAt } from '../astro/sightings.js';
 import { targetKey, loadRest, restSettings, restState } from '../astro/rest.js';
 import type { HourConditions } from '../astro/weather.js';
-import { addTarget, loadProgram, loadSettings, type PlanSettings, type ProgramTarget } from './program.js';
+import { addTarget, loadProgram, loadSettings, setEstimatedGoal, type PlanSettings, type ProgramTarget } from './program.js';
+import { generalGoalMin, goalForSnr, noteRigFacts, snrAfter, snrLevel, snrRate } from '../astro/acquisition/snr-goal.js';
 import { planWindow, nightKey, journalNight, hm, dur, type PlanWindow } from './clock.js';
 import { buildCalendar, type CalendarOptions } from './calendar.js';
 import { solveNight, alternatesAt, rankCandidates, quadrantOf, SLOT_MIN, type Block, type BlockTarget, type Candidate, type Hold, type Quadrant, type Solved, type Alternate, type SolveInput, type TargetAdvice } from './solver.js';
@@ -175,6 +176,18 @@ const newId = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().to
 
 /** The night-plan duty's objective, in this driver's words (procedure.ts). */
 export { planObjective } from './procedure.js';
+
+/** A program target's SNR on this rig: the rate, what is collected reaches, and what the goal reaches (acquisition/snr-goal.ts). */
+export interface ProgramSnr {
+  /** SNR after one minute of integration */
+  perSqrtMin: number;
+  collected: number;
+  atGoal: number;
+  /** the owner's chart level of the goal (Acceptable … Ultra-deep) */
+  level: string;
+  filter: string;
+  basis: string;
+}
 
 export class PlanService extends SafeEmitter {
   private lastFacts: Awaited<ReturnType<PlanService['facts']>> = null;
@@ -388,10 +401,13 @@ export class PlanService extends SafeEmitter {
     const progress = programProgress(this.d.journal);
     const userRests = loadRest().filter((x) => x.role === 'snoozed' || x.role === 'done');
     const inProgram = new Set(loadProgram().map((t) => targetKey(t.name)));
-    const restGoal = restSettings().integrationTargetMin;
+    // the general goal, as minutes or as each target's minutes for the owner's SNR
+    const restGoalOf = (name: string, pos?: { raHours: number; decDeg: number }) => generalGoalMin(site, name, pos);
     const started = new Set<string>();
     for (const [key, c] of progress) {
-      if (inProgram.has(key) || c.totalMin < FILLER_STARTED_MIN || (restGoal && c.totalMin >= restGoal)) continue;
+      if (inProgram.has(key) || c.totalMin < FILLER_STARTED_MIN) continue;
+      const restGoal = restGoalOf(key);
+      if (restGoal && c.totalMin >= restGoal) continue;
       if (!restState(key, w.night, userRests)) started.add(key);
     }
     const p = this.catalogPlan(site, w, settings, conditions, { limit: FILLER_POOL, filter, started });
@@ -407,7 +423,7 @@ export class PlanService extends SafeEmitter {
       const o = findObject(r.name);
       const f = String(r.suggestedFilter ?? '').split(' (')[0];
       const got = progress.get(key)?.totalMin ?? 0;
-      const goal = restGoal || goalFor(o?.type, r.detectBucket);
+      const goal = restGoalOf(r.name, { raHours: r.raHours, decDeg: r.decDeg }) || goalFor(o?.type, r.detectBucket);
       candidates.push({
         key,
         name: r.name,
@@ -474,8 +490,9 @@ export class PlanService extends SafeEmitter {
     const plan = await this.plan().catch(() => null);
     const blocksOf = (key: string) => (plan?.blocks ?? []).filter((b) => b.target?.key === key && !b.past);
     const fov = this.d.fovArcmin();
-    const goalDefault = restSettings().integrationTargetMin;
+    const general = restSettings();
     const facts = await this.facts();
+    noteRigFacts(facts);
     const end = plan?.window.end ?? w.end.getTime();
     const settingsFor = (c: Candidate, k: { bestFrom: number | null; bestUntil: number | null }) => {
       if (!facts) return null;
@@ -528,7 +545,9 @@ export class PlanService extends SafeEmitter {
         sky: k.sky,
         planValue: k.value,
         notUsable: k.why,
-        suggestedGoalMin: goalDefault || acq?.integration.suggestedGoalMin || goalFor(findObject(r.name)?.type, r.detectBucket),
+        suggestedGoalMin: generalGoalMin(site, r.name, { raHours: r.raHours, decDeg: r.decDeg }) || acq?.integration.suggestedGoalMin || goalFor(findObject(r.name)?.type, r.detectBucket),
+        /** in SNR mode, the general SNR this target is suggested at (the minutes above are its estimate) */
+        suggestedSnr: general.goalMode === 'snr' ? general.snrTarget : null,
         /** the acquisition planner: settings for its best hours tonight, and the hours to a clean picture */
         capture: acq ? { filter: acq.settings.filter, gain: acq.settings.gain, subS: acq.settings.subS, frames: acq.settings.frames, hoursToGood: acq.integration.hoursTo.good, backgroundPct: acq.overexposure.backgroundPct, swamp: acq.subLength.swamp, swampWanted: acq.subLength.wanted, efficiencyPct: acq.subLength.efficiencyPct } : null,
       };
@@ -622,6 +641,38 @@ export class PlanService extends SafeEmitter {
     return ensureProject(t, { field, mount: eqMode === true ? 'eq' : eqMode === false ? 'altaz' : 'unknown', eqMode, native, settings }, today);
   }
 
+  /**
+   * Each SNR-goal program target's minutes, worked out again for this rig and sky (acquisition/
+   * snr-goal.ts) and saved when they changed, so every reader of the program counts the same goal.
+   * A target the planner cannot rate keeps the minutes it had.
+   */
+  private settleGoals(site: sky.Site): number {
+    let changed = 0;
+    for (const t of loadProgram()) {
+      if (t.goalMode !== 'snr' || t.snrGoal === undefined) continue;
+      const g = goalForSnr(site, t, t.snrGoal, t.filter);
+      if (g && g.goalMin !== t.goalMin) {
+        setEstimatedGoal(t.id, g.goalMin);
+        changed++;
+      }
+    }
+    return changed;
+  }
+
+  /** A program target just added or changed: its SNR goal in minutes now, not at the next solve. */
+  async settleGoal(t: ProgramTarget): Promise<ProgramTarget> {
+    if (t.goalMode !== 'snr' || t.snrGoal === undefined) return t;
+    let site: sky.Site;
+    try {
+      site = this.site();
+    } catch {
+      return t;
+    }
+    noteRigFacts(this.lastFacts ?? (await this.facts()));
+    const g = goalForSnr(site, t, t.snrGoal, t.filter);
+    return (g && setEstimatedGoal(t.id, g.goalMin)) || t;
+  }
+
   private programCandidate(t: ProgramTarget, key: string, got: number, glassFilters: string[], moonIllum: number, measured?: string): Candidate {
     const o = findObject(t.name);
     let filter = t.filter && t.filter !== 'auto' ? t.filter : measured;
@@ -681,6 +732,8 @@ export class PlanService extends SafeEmitter {
     const tc = Date.now();
     // the rig's facts: mosaics, and the quality engine's measured settings for the program's targets
     this.lastFacts = await this.facts();
+    noteRigFacts(this.lastFacts);
+    this.settleGoals(site);
     const { list, excluded } = this.candidates(site, w, settings, conditions);
     const buildMs = Date.now() - tc;
     const horizon = settings.useHorizon ? horizonFor(site) : undefined;
@@ -1110,7 +1163,7 @@ export class PlanService extends SafeEmitter {
   }
 
   /** The program with what each target has collected and what tonight's plan gives it. */
-  async programView(): Promise<Array<ProgramTarget & { key: string; collectedMin: number; journalOnlyMin: number; nights: number; lastNight: string | null; tonight: PlannedNight['outlook'][number] | null }>> {
+  async programView(): Promise<Array<ProgramTarget & { key: string; collectedMin: number; journalOnlyMin: number; nights: number; lastNight: string | null; tonight: PlannedNight['outlook'][number] | null; snr: ProgramSnr | null }>> {
     const progress = programProgress(this.d.journal);
     let plan: PlannedNight | null = null;
     try {
@@ -1120,13 +1173,28 @@ export class PlanService extends SafeEmitter {
     }
     const settings = loadSettings();
     const field = this.d.fovArcmin();
+    let site: sky.Site | null = null;
+    try {
+      site = this.site();
+      noteRigFacts(this.lastFacts ?? (await this.facts()));
+      this.settleGoals(site);
+    } catch {
+      /* no site: no SNR estimates, the saved minutes stand */
+    }
     return loadProgram().map((target) => {
       const key = targetKey(target.name);
       const c = progress.get(key);
       const project = isMosaicOn(target, settings) ? existingProject(key, field) : undefined;
       const mp = project ? mosaicProgress(project, progress) : null;
       const t = mp ? { ...target, goalMin: mp.goalS / 60 } : target;
-      return { ...t, key, collectedMin: mp ? Math.round(mp.acceptedS / 60) : (c?.totalMin ?? 0), journalOnlyMin: c?.journalOnlyMin ?? 0, nights: c?.nights ?? 0, lastNight: c?.lastNight ?? null, tonight: plan?.outlook.find((x) => x.key === key) ?? null };
+      const collectedMin = mp ? Math.round(mp.acceptedS / 60) : (c?.totalMin ?? 0);
+      // the SNR the integration reaches: per panel for a mosaic (each panel is its own stack)
+      const panels = mp && project ? Math.max(1, project.panels.length) : 1;
+      const rate = site ? snrRate(site, target, target.filter) : null;
+      const snr: ProgramSnr | null = rate
+        ? { perSqrtMin: Math.round(rate.snrPerSqrtMin * 1000) / 1000, collected: snrAfter(rate, collectedMin / panels), atGoal: snrAfter(rate, t.goalMin / panels), level: snrLevel(target.goalMode === 'snr' && target.snrGoal !== undefined ? target.snrGoal : snrAfter(rate, t.goalMin / panels)), filter: rate.filter, basis: rate.basis }
+        : null;
+      return { ...t, key, collectedMin, journalOnlyMin: c?.journalOnlyMin ?? 0, nights: c?.nights ?? 0, lastNight: c?.lastNight ?? null, tonight: plan?.outlook.find((x) => x.key === key) ?? null, snr };
     });
   }
 

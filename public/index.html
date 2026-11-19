@@ -322,7 +322,7 @@
       <div class="card" id="rest-settings">
         <div class="row-head"><h3>Target rest</h3></div>
         <div class="duty-form-row">
-          <label title="Total integration (per camera, summed over library sessions) a target needs before it is rested; 0 = any capture rests it">Integration goal <input type="number" id="rest-goal" min="0" step="5" inputmode="numeric"> min</label>
+          <span class="goal-ctl"><label title="Total integration (per camera, summed over library sessions) a target needs before it is rested, and the goal of a filler being collected; 0 = any capture rests it. As an SNR, each target gets the minutes this rig needs for it.">Integration goal <select id="rest-mode" aria-label="Integration goal as minutes or as a signal-to-noise ratio"><option value="time">minutes</option><option value="snr">SNR</option></select> <input type="number" id="rest-goal" min="0" step="5" inputmode="numeric" aria-label="Integration goal in minutes"><input type="number" id="rest-snr" min="1" max="500" step="1" list="snr-presets" inputmode="decimal" aria-label="Target signal-to-noise ratio" hidden> <span id="rest-unit">min</span></label><span id="rest-help"></span></span>
           <label title="How long a target that reached its integration goal is held back from the plan">Rest for <input type="number" id="rest-days" min="1" step="1" inputmode="numeric"> days</label>
         </div>
       </div>
@@ -380,11 +380,11 @@
       </div>
       <div class="card" id="np-detail" hidden></div>
       <div class="card" id="np-program-card">
-        <div class="row-head"><h3>Program</h3><span class="muted small">what you want collected, and for how long</span><span class="spacer"></span><span class="muted small" id="np-program-sum"></span></div>
+        <div class="row-head"><h3>Program</h3><span class="muted small">what you want collected, and for how long or how clean (SNR)</span><span class="spacer"></span><span class="muted small" id="np-program-sum"></span></div>
         <form id="np-add" class="duty-form-row np-add" autocomplete="off">
           <input id="np-add-name" list="np-add-list" placeholder="Add a target: M 31, NGC 7000, Sh2-155…" aria-label="Target to add" enterkeyhint="done">
           <datalist id="np-add-list"></datalist>
-          <label>goal <input id="np-add-goal" type="number" min="0.5" step="0.5" value="3" inputmode="decimal" aria-label="Goal in hours"> h</label>
+          <span id="np-add-goal-ctl"></span>
           <label>priority <select id="np-add-pri" aria-label="Priority"><option value="5">5 top</option><option value="4">4 high</option><option value="3" selected>3 normal</option><option value="2">2 below normal</option><option value="1">1 low</option></select></label>
           <button class="primary" type="submit">Add</button>
         </form>
@@ -415,7 +415,7 @@
       <div class="card" id="np-memory-card">
         <div class="row-head"><h3>Target memory</h3><span class="muted small">shared with the Tonight tab</span></div>
         <div class="duty-form-row">
-          <label title="Total integration (per camera, summed over library sessions) a target needs before a capture rests it; 0 = any capture rests it. New program targets start with this goal.">Integration goal <input type="number" id="np-rest-goal" min="0" step="5" inputmode="numeric"> min</label>
+          <span class="goal-ctl"><label title="Total integration (per camera, summed over library sessions) a target needs before a capture rests it, and the goal of a filler being collected; 0 = any capture rests it. As an SNR, each target gets the minutes this rig needs for it. New program targets start with this goal.">Integration goal <select id="np-rest-mode" aria-label="Integration goal as minutes or as a signal-to-noise ratio"><option value="time">minutes</option><option value="snr">SNR</option></select> <input type="number" id="np-rest-goal" min="0" step="5" inputmode="numeric" aria-label="Integration goal in minutes"><input type="number" id="np-rest-snr" min="1" max="500" step="1" list="snr-presets" inputmode="decimal" aria-label="Target signal-to-noise ratio" hidden> <span id="np-rest-unit">min</span></label><span id="np-rest-help"></span></span>
           <label title="How long a target that reached its integration goal is held back (fillers and suggestions; a program target collecting past its goal rests this long too)">Rest for <input type="number" id="np-rest-days" min="1" step="1" inputmode="numeric"> days</label>
         </div>
         <div id="np-memory" class="np-memory"></div>
