@@ -64,7 +64,9 @@ const blockLine = (b: Block) =>
           : undefined,
         alternates: b.alternates.map((a) => `${a.gotoName} (${a.quadrant}, alt ${a.alt}°, ${a.source}, usable ${dur(a.usableMin)})`),
       }
-    : { id: b.id, time: `${hm(b.start)}–${hm(b.end)}`, kind: b.kind, reason: b.reason, past: b.past || undefined };
+    : b.kind === 'calibration' && b.calibration
+      ? { id: b.id, time: `${hm(b.start)}–${hm(b.end)}`, kind: b.kind, field: b.calibration.field.gotoName, alt: `${Math.round(b.calibration.field.altDeg)}°`, minutes: b.calibration.minutes, sky: b.sky, clouds: b.clouds?.advisory, reason: b.reason, steps: 'focus_offsets (the focus-offsets skill): GoTo the field, focus, then focus_offsets action=calibrate', past: b.past || undefined }
+      : { id: b.id, time: `${hm(b.start)}–${hm(b.end)}`, kind: b.kind, reason: b.reason, past: b.past || undefined };
 
 function planText(p: PlannedNight) {
   return {

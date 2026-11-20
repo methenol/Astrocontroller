@@ -185,8 +185,8 @@ function renderTimeline() {
     const a = x(b.start);
     const w = Math.max(1, x(b.end) - a);
     const cls = `np-block ${b.kind}${b.past ? ' past' : ''}${b.id === selected ? ' sel' : ''}${b.target?.source === 'filler' ? ' filler' : ''}${b.pinned ? ' pinned' : ''}`;
-    const fill = b.kind === 'target' ? colour(b.target.key, b.target.source) : b.kind === 'weather' ? 'url(#np-hatch)' : '#111827';
-    const label = b.kind === 'target' ? b.target.displayName : b.kind === 'weather' ? 'cloud' : '';
+    const fill = b.kind === 'target' ? colour(b.target.key, b.target.source) : b.kind === 'weather' ? 'url(#np-hatch)' : b.kind === 'calibration' ? '#0e7490' : '#111827';
+    const label = b.kind === 'target' ? b.target.displayName : b.kind === 'weather' ? 'cloud' : b.kind === 'calibration' ? 'focus cal' : '';
     const title = b.kind === 'target' ? `${b.target.displayName} ${hm(b.start)}–${hm(b.end)}${b.pinned ? ' (pinned)' : ''}: ~${b.expectedMin} min${b.clouds ? ` (clouds forecast ${b.clouds.sky}/100: advisory, check the sky)` : ''}` : `${hm(b.start)}–${hm(b.end)}: ${b.reason}`;
     // the forecast's cloudy slots shaded grey over the block: the target stays planned in case the sky is better than forecast
     const shade = b.kind === 'target' && b.clouds
@@ -248,7 +248,7 @@ function renderDetail() {
   }
   el.hidden = false;
   if (b.kind !== 'target') {
-    el.innerHTML = `<div class="row-head"><h3>${esc(hm(b.start))}–${esc(hm(b.end))}: ${b.kind === 'weather' ? 'weather' : 'nothing usable'}</h3><span class="spacer"></span><button class="ghost" data-close>Close</button></div><p class="small">${esc(b.reason)}</p>`;
+    el.innerHTML = `<div class="row-head"><h3>${esc(hm(b.start))}–${esc(hm(b.end))}: ${b.kind === 'weather' ? 'weather' : b.kind === 'calibration' ? `focus calibration${b.calibration ? ` on ${esc(b.calibration.field.displayName)}` : ''}` : 'nothing usable'}</h3><span class="spacer"></span><button class="ghost" data-close>Close</button></div><p class="small">${esc(b.reason)}</p>`;
     return;
   }
   const t = b.target;
@@ -422,6 +422,7 @@ const SETTINGS = [
   ['Rig', [
     ['overheadMin', 'switch overhead', 'number', { min: 0, max: 60, step: 0.5, unit: 'min', nullable: true, title: 'empty = learned from the journal' }],
     ['efficiency', 'stacking efficiency', 'number', { min: 0.1, max: 1, step: 0.05, nullable: true, title: 'share of stacking time that becomes integration; empty = learned from the journal' }],
+    ['focusCalibration', 'focus calibration', 'checkbox', { title: "measure the filter focus offsets in the night's first clear, steady stretch until they are settled (then every filter change keeps focus equivalent)" }],
   ]],
   ['Sky', [
     ['useForecast', 'use the forecast', 'checkbox', {}],

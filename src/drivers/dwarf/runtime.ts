@@ -22,9 +22,12 @@ import type { DriverDeps, DriverRuntime, TelescopeDriver } from '../types.js';
 import { createNight, withNightPlan, type NightServices } from '../../night/index.js';
 import { dwarfProbe } from './journal.js';
 import { dwarfFacts } from './acquisition.js';
+import { installDwarfFilterFocus } from './focus-offsets.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const dwarf = new Dwarf();
+  // every tele filter change keeps the focus equivalent by the measured offsets (focus_offsets)
+  installDwarfFilterFocus(dwarf);
   const hub = new StreamHub(dwarf);
   const dutyScope = dwarfDuty(dwarf);
   let night: NightServices | null = null;

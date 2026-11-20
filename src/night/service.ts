@@ -43,6 +43,8 @@ import { collected, learn, type Learned } from './progress.js';
 import { qualityFor, targetInfo, type FactsSource, type LiveFacts } from '../astro/acquisition/index.js';
 import { pointsDurationS } from '../astro/acquisition/quality.js';
 import { qualityJob } from '../astro/acquisition/probe.js';
+import { calibrationJob } from '../astro/focus-offsets/index.js';
+import { calibrationInput, calibrationNeed } from './calibration.js';
 import type { Journal, JournalSession } from './journal.js';
 
 const log = logger('plan');
@@ -91,7 +93,7 @@ export interface PlannedNight extends Solved {
   horizon: string | null;
   forecast: { fetchedAt: string | null; stale: boolean } | null;
   holds: Hold[];
-  totals: { programMin: number; fillerMin: number; gapMin: number; weatherMin: number };
+  totals: { programMin: number; fillerMin: number; gapMin: number; weatherMin: number; calibrationMin?: number };
 }
 
 interface NightFile {
@@ -759,6 +761,8 @@ export class PlanService extends SafeEmitter {
       history: f.plan?.blocks ?? [],
       idPrefix: `${w.night}-${Date.now().toString(36)}-`,
       timezone: config.observer.timezone,
+      // the filter focus offsets, while this device's are not settled: once a night, in its first clear, steady stretch
+      calibration: settings.focusCalibration ? calibrationInput(site, calibrationNeed(this.lastFacts, w.night, learned.overheadMin, this.now())) : null,
     };
     return { input, w, settings, f, learned, horizonSummary: horizon?.summary ?? null, buildMs };
   }
@@ -818,7 +822,7 @@ export class PlanService extends SafeEmitter {
       horizon: horizonSummary,
       forecast: stamp,
       holds: f.holds,
-      totals: { programMin: Math.round(sumBy('target', 'program')), fillerMin: Math.round(sumBy('target', 'filler')), gapMin: Math.round(sumBy('gap')), weatherMin: Math.round(sumBy('weather')) },
+      totals: { programMin: Math.round(sumBy('target', 'program')), fillerMin: Math.round(sumBy('target', 'filler')), gapMin: Math.round(sumBy('gap')), weatherMin: Math.round(sumBy('weather')), calibrationMin: Math.round(sumBy('calibration')) },
     };
     const sequence = (p: PlannedNight | null) => (p?.blocks ?? []).filter((b) => b.kind === 'target' && b.end > this.now()).map((b) => b.target!.key).join(',');
     const changedSequence = sequence(f.plan) !== sequence(plan);
@@ -836,11 +840,13 @@ export class PlanService extends SafeEmitter {
   /** The agent is told when the plan's current block changes target (a duty event), once per block. */
   private followBlock(plan: PlannedNight): void {
     const v = this.viewOf(plan, this.now());
-    const id = v.block?.target ? `${v.block.target.key}@${v.block.start}` : null;
+    const id = v.block?.target ? `${v.block.target.key}@${v.block.start}` : v.block?.kind === 'calibration' ? `calibration@${v.block.start}` : null;
     if (id === this.lastBlockId) return;
     const prev = this.lastBlockId;
     this.lastBlockId = id;
-    if (prev === null || v.phase !== 'night' || !v.block?.target) return;
+    if (v.phase !== 'night' || (!v.block?.target && v.block?.kind !== 'calibration')) return;
+    // the calibration's turn wakes the agent even at the night's first block: it is not a target it would go to by itself
+    if (prev === null && v.block?.kind !== 'calibration') return;
     this.d.notify?.(`the night plan moved on: ${v.instruction}`);
   }
 
@@ -1059,12 +1065,19 @@ export class PlanService extends SafeEmitter {
       const first = blocks.find((b) => b.kind === 'target' && !b.past && b.end > at);
       instruction = `The plan starts at ${hm(plan.window.start)} with ${first?.target ? `${first.target.displayName} (${hm(first.start)}–${hm(first.end)})` : 'no target'}. Nothing is stacked before then; get ready (connect, open the arm).`;
     } else if (phase === 'after') instruction = "The plan's night has ended.";
-    else if (!block || block.kind !== 'target') {
+    else if (block?.kind === 'calibration' && block.calibration) {
+      const c = block.calibration;
+      const j = calibrationJob();
+      const then = next?.target ? `; then ${next.target.displayName} at ${hm(next.start)}` : '';
+      if (j?.status === 'running') instruction = `Focus calibration running on ${j.field ?? c.field.displayName} (${j.done}/${j.planned} sweeps${j.current ? `, now ${j.current}` : ''}): wait for it (focus_offsets action=status); no stack, GoTo or focus meanwhile${then}.`;
+      else instruction = `Focus calibration now (${hm(block.start)}–${hm(block.end)}, ${dur(minutesLeft ?? 0)} left): the filter focus offsets of this telescope, measured on ${c.field.displayName} near the zenith (alt ${Math.round(c.field.altDeg)}°) — ${driverSteps().calibrate(c.field.gotoName)}${then}.`;
+    } else if (!block || block.kind !== 'target') {
       // 'weather' blocks come only from plans solved before the forecast floor became advisory
       const why = block?.kind === 'weather' ? 'the forecast is below the floor' : 'no target is usable';
       instruction = `${why} until ${block ? hm(block.end) : '?'}${next?.target ? `; then ${next.target.displayName} at ${hm(next.start)}` : ''}. Check the sky (sky_check) and, if part of it is clear, night_plan action=alternates.`;
     } else if (onPlan) {
-      instruction = `On plan: ${block.target!.displayName} until ${hm(block.end)} (${dur(minutesLeft ?? 0)} left)${next?.target ? `; next ${next.target.displayName} at ${hm(next.start)}` : ''}.`;
+      const cal = blocks.find((b) => b.kind === 'calibration' && b.start >= block.end && (!next || b.start <= next.start));
+      instruction = `On plan: ${block.target!.displayName} until ${hm(block.end)} (${dur(minutesLeft ?? 0)} left)${cal ? `; then the focus calibration at ${hm(cal.start)}` : ''}${next?.target ? `; next ${next.target.displayName} at ${hm(next.start)}` : ''}.`;
     } else if (scopeOn) {
       instruction = `The scope is on ${scopeOn} but the plan says ${block.target!.displayName} since ${hm(block.start)} (until ${hm(block.end)}): ${driverSteps().stop}, then ${go(block)}. If ${block.target!.displayName} is clouded: night_plan action=obscured target=${block.target!.gotoName} cause=cloud; blocked by something on the ground: cause=obstruction.`;
     } else {
@@ -1093,6 +1106,11 @@ export class PlanService extends SafeEmitter {
       if (job?.status === 'running') lines.push(`- collection quality: measuring ${job.targetName} (${job.done}/${job.planned} cohorts${job.current ? `, now ${job.current}` : ''}): do not stack until acquisition_quality action=status says done`);
       else if (job && job.target === v.block.target.key && job.endedAt && at - job.endedAt < 30 * 60e3 && job.status === 'done' && job.answer?.settings) lines.push(`- collection quality: ${job.targetName} measured — collect with ${job.apply ?? JSON.stringify(job.answer.settings)}`);
       else if (q) lines.push(`- collection quality (${v.block.target.displayName}): ${q.line}`);
+    }
+    if (v.phase === 'night' && v.block?.kind === 'calibration') {
+      const j = calibrationJob();
+      if (j?.status === 'running') lines.push(`- focus calibration: ${j.done}/${j.planned} sweeps (~${j.aboutMin} min in all)${j.log.length ? `; last: ${j.log[j.log.length - 1].slice(9)}` : ''}`);
+      else if (v.block.calibration) lines.push(`- focus calibration: ${v.block.calibration.why}`);
     }
     const alts = v.block?.alternates ?? [];
     if (v.phase === 'night' && alts.length) lines.push(`- plan alternates now: ${alts.slice(0, 3).map((a) => `${a.gotoName} (${a.quadrant}, alt ${a.alt}°)`).join(', ')}`);

@@ -21,6 +21,8 @@ import { registerResearchTools } from './tools/research.js';
 import { registerStellariumTools } from './tools/stellarium.js';
 import { registerSystemTools } from './tools/system.js';
 import { dwarfDarkFrames, dwarfFacts, dwarfSessionSubs } from '../drivers/dwarf/acquisition.js';
+import { dwarfCalibrationDriver } from '../drivers/dwarf/focus-offsets.js';
+import { registerFocusOffsetTools } from './tools/focus-offsets.js';
 
 export { toolEvents, type ToolContext } from './tools/common.js';
 
@@ -55,4 +57,5 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   registerStellariumTools(tool);
   registerResearchTools(tool, { fov: () => ctx.dwarf.state.fov.tele ?? DEFAULT_TELE_FOV, site: () => ctx.dwarf.requireLocation() });
   registerAcquisitionTools(tool, { site: () => ctx.dwarf.requireLocation(), facts: dwarfFacts(ctx.dwarf), night: ctx.night, sessionSubs: dwarfSessionSubs, darkFrames: dwarfDarkFrames, probe: dwarfProbeDriver(ctx.dwarf) });
+  registerFocusOffsetTools(tool, { calibration: dwarfCalibrationDriver(ctx.dwarf, ctx.hub), night: ctx.night });
 }

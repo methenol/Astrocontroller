@@ -36,7 +36,13 @@ export interface DriverSteps {
   blockedBy: string;
   /** the duty's end */
   end: string;
+  /** the focus-calibration block's procedure on its field */
+  calibrate: (field: string) => string;
 }
+
+/** What every calibration ends with, for both drivers. */
+const CAL_TAIL = (field: string) =>
+  `focus_offsets action=calibrate field=${field} (bracketed sweeps through every filter, in the background); poll focus_offsets action=status until done — no stack, GoTo or focus meanwhile; the plan then moves on by itself. Clouded or blocked: focus_offsets action=skip reason=<why> (collection goes on without it; the planner tries another night)`;
 
 const DWARF: DriverSteps = {
   target: (n, o) => `run P2 on it: goto_target name=${n} one_click=true, tele_visibility, autofocus mode=astro, star_sharpness, star_focus, star_sharpness, ${measureStep(o)}live_stacking action=start${o?.subS ? ` exposure=${o.subS}` : ''}${o?.gain !== undefined && !o.gainFixed ? ` gain=${o.gain}` : ''}${o?.filter ? ` filter=${o.filter}` : ''} (every step, in order)`,
@@ -44,6 +50,7 @@ const DWARF: DriverSteps = {
   refocus: 'live_stacking action=stop, then P2 steps 4–8 (autofocus mode=astro, star_sharpness, star_focus, star_sharpness, live_stacking action=start)',
   blockedBy: 'tele_visibility says BLOCKED, or the owner says so',
   end: 'live_stacking action=stop, park (move_motors pitch_deg=2.5), and transfer the night\'s sessions that are not in the library yet',
+  calibrate: (f) => `live_stacking action=stop if a stack runs, then goto_target name=${f} one_click=true, tele_visibility, autofocus mode=astro, star_focus, then ${CAL_TAIL(f)}`,
 };
 
 const SEESTAR: DriverSteps = {
@@ -55,6 +62,7 @@ const SEESTAR: DriverSteps = {
   refocus: 'stop_stacking, autofocus, star_focus, start_stacking (the same stack continues)',
   blockedBy: 'tele_visibility says BLOCKED, the frame shows an obstruction, or the owner says so',
   end: "stop_stacking, park, and transfer the night's sessions that are not in the library yet",
+  calibrate: (f) => `stop_stacking if a stack runs, then goto_target name=${f} lp_filter=false, autofocus, star_focus, then ${CAL_TAIL(f)}`,
 };
 
 export const driverSteps = (driver: string = config.telescope.driver): DriverSteps => (driver === 'seestar' ? SEESTAR : DWARF);
@@ -68,6 +76,7 @@ export function planObjective(driver: string = config.telescope.driver): string 
     `2. When the plan moves to the next block, ${d.stop} and move to its target the same way. Follow the plan rather than choosing targets yourself; night_plan action=now says what to do at any time. The target you are working is locked to the end of its block: forecast updates and re-solves plan around it.`,
     `3. If the target is blocked (${d.blockedBy}) or clouded, tell the plan: night_plan action=obscured target=<name> cause=obstruction|cloud, then go to the target it gives. night_plan action=alternates lists other parts of the sky; a cloud bank in one direction: night_plan action=sky_hold quadrant=N|E|S|W minutes=<n>.`,
     "4. Collection quality is the planner's to drive: it decides, per target, whether the settings must be measured (never measured, not settled, stale after a few weeks, or measured under a very different sky) and which test cohorts to shoot, and puts the measure step into the target procedure above when it is due. Run it where it stands — after the focus, before the stack — wait for it (acquisition_quality action=status), and collect with the settings it returns. When the procedure has no measure step, the block's settings are already the measured ones (or the planner's stand-in). You may also re-measure a target yourself (acquisition_quality action=measure refresh=true) or submit more data (action=submit session=latest) whenever the sky, the Moon, the altitude or the subs give a reason: the engine re-solves from all of it.",
+    "4b. A focus-calibration block (the planner schedules one in the night's first clear, steady stretch until this telescope's filter focus offsets are settled): its sample line gives the field near the zenith and the steps — run them; nothing is stacked in it. Once the offsets are known, every filter change moves the focuser by them on its own (the tool's answer says so), so a focus found through one filter stays the best through another.",
     '5. Record what matters for the owner in the journal (journal action=note): why a target was left, focus or tracking trouble, a change of settings and the measurement behind it.',
     `6. At the end of the duty: ${d.end}.`,
   ].join('\n');

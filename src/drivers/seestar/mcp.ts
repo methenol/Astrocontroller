@@ -29,6 +29,8 @@ import { registerNightTools } from '../../mcp/tools/night.js';
 import { registerMosaicTools } from '../../mcp/tools/mosaic.js';
 import { registerAcquisitionTools } from '../../mcp/tools/acquisition.js';
 import { seestarProbeDriver } from './probe.js';
+import { seestarCalibrationDriver } from './focus-offsets.js';
+import { registerFocusOffsetTools } from '../../mcp/tools/focus-offsets.js';
 import { pickDevice } from '../../astro/acquisition/devices.js';
 import { seestarFacts } from './acquisition.js';
 import type { McpSpec } from '../types.js';
@@ -110,6 +112,7 @@ export function seestarMcpSpec(scope: Seestar, duty?: DutyLoop, media?: SeestarM
       registerStellariumTools(tool);
       registerResearchTools(tool, { fov: () => scope.state.fov ?? NOMINAL_FOV, site: () => scope.requireLocation() });
       registerAcquisitionTools(tool, { site: () => scope.requireLocation(), facts: seestarFacts(scope), night, sessionSubs: media ? (folder) => media.storage.sessionSubs(folder) : undefined, darkFrames: media ? () => media.storage.darkFrames() : undefined, probe: seestarProbeDriver(scope, media, () => pickDevice({ driver: 'seestar', model: scope.state.device.model, focalLengthMm: scope.state.device.focalLengthMm, chip: scope.state.device.chipSize }).spec.gain.default) });
+      registerFocusOffsetTools(tool, { calibration: seestarCalibrationDriver(scope), night });
     },
   };
 }

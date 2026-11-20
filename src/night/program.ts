@@ -124,6 +124,8 @@ export const PlanSettingsSchema = z.object({
   roiCropMaxFillPct: z.number().min(1).max(95),
   /** how far outside the target's own share of the frame the crop goes, to leave room for reframing */
   roiCropMarginPct: z.number().min(0).max(200),
+  /** schedule a focus-calibration block (the filter focus offsets) in the first clear, steady stretch until they are settled */
+  focusCalibration: z.boolean(),
 });
 export type PlanSettings = z.infer<typeof PlanSettingsSchema>;
 
@@ -159,6 +161,7 @@ export const PLAN_DEFAULTS: PlanSettings = {
   roiCropEnabled: false,
   roiCropMaxFillPct: 25,
   roiCropMarginPct: 20,
+  focusCalibration: true,
 };
 
 export const ProgramTargetInput = z.object({

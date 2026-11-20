@@ -30,6 +30,7 @@ import { readRaw, type RawFrame } from './measure.js';
 import { skyBrightness, zenithFromMeasured } from './skyglow.js';
 import { framesFor, moonIllum, type ProbePoint, type QualityAnswer } from './quality.js';
 import { zenithSky, type QualityResult } from './index.js';
+import { calibrating } from '../focus-offsets/calibrate.js';
 
 const log = logger('quality');
 
@@ -132,6 +133,7 @@ const tmpRoot = () => path.join(config.paths.data, 'tmp', 'quality');
 /** Start shooting a target's test cohorts in the background; throws when one is already running or the scope is busy. */
 export function startQualityJob(r: QualityRun): QualityJob {
   if (job) throw new Error(`a quality measurement of ${job.targetName} is already running (${job.done}/${job.planned} points): acquisition_quality action=status, or action=cancel`);
+  if (calibrating()) throw new Error('a focus calibration is running (focus_offsets action=status): test cohorts are shot after it, on the target');
   const busy = r.driver.busy();
   if (busy) throw new Error(`cannot shoot test cohorts now: ${busy}`);
   const first = r.points ?? r.solve().answer.points;

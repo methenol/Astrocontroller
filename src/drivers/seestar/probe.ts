@@ -21,10 +21,10 @@ import { bayerFits } from './capture.js';
 import { framePixels, IMG_TYPE } from './frames.js';
 import type { Seestar } from './device.js';
 import type { SeestarMedia } from './web.js';
+import { seestarWheel, setSeestarFilter, slotOf } from './filters.js';
 
 const log = logger('seestar.probe');
 
-const WHEEL_SETTLE_MS = 2_500;
 /** a stacked probe's subs are waited for this long beyond their exposures */
 const STACK_SLACK_MS = 120_000;
 const POLL_MS = 2_000;
@@ -32,14 +32,7 @@ const FILE_MAX_BYTES = 64 * 1024 * 1024;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefined, stackGain: () => number): ProbeDriver {
-  const wheel = async () => {
-    const [pos, names] = await Promise.all([scope.raw('get_wheel_position'), scope.raw('get_wheel_slot_name')]);
-    return { position: typeof pos.result === 'number' ? pos.result : null, slots: Array.isArray(names.result) ? (names.result as unknown[]).map(String) : [] };
-  };
-  const slotOf = (slots: string[], filter: string) => {
-    const want = filter.toLowerCase().replace(/[^a-z]/g, '');
-    return slots.findIndex((n) => n.toLowerCase().replace(/[^a-z]/g, '') === want || (want.startsWith('lp') && /^lp/i.test(n)) || (/ircut|uvir|none/.test(want) && /ir/i.test(n)));
-  };
+  const wheel = () => seestarWheel(scope);
 
   return {
     busy() {
@@ -59,9 +52,10 @@ export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefin
         if (before.wheel?.slots.length) {
           const i = slotOf(before.wheel.slots, o.filter);
           if (i < 0) throw new Error(`no filter ${o.filter} in the wheel (${before.wheel.slots.join(', ')})`);
+          // settled, and the focus carried over by the measured filter offset (filters.ts)
           if (before.wheel.position !== i) {
-            await scope.raw('set_wheel_position', [i]);
-            await sleep(WHEEL_SETTLE_MS);
+            const c = await setSeestarFilter(scope, before.wheel.slots[i]);
+            if (c.focus) notes.push(c.focus);
           }
         }
         await scope.ensureLiveView();
@@ -114,7 +108,8 @@ export function seestarProbeDriver(scope: Seestar, media: SeestarMedia | undefin
       } finally {
         await scope.setExposure({ continuousMs: before.liveMs ?? 1000 }, 'tele').catch((e) => log.warn(`live exposure not put back: ${errMsg(e)}`));
         if (before.gain !== undefined) await scope.setGain(before.gain).catch((e) => log.warn(`gain not put back: ${errMsg(e)}`));
-        if (before.wheel?.position !== null && before.wheel?.position !== undefined) await scope.raw('set_wheel_position', [before.wheel.position]).catch((e) => log.warn(`filter wheel not put back: ${errMsg(e)}`));
+        const back = before.wheel?.position;
+        if (back !== null && back !== undefined && before.wheel?.slots[back] !== undefined) await setSeestarFilter(scope, before.wheel.slots[back]).catch((e) => log.warn(`filter wheel not put back: ${errMsg(e)}`));
       }
     },
   };

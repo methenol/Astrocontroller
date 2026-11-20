@@ -29,7 +29,7 @@ import { DwarfLink, type LinkTiming, type Notification, type RequestOptions } fr
 import { protoTypeByName } from './protocol.js';
 import { StackTracker, type CameraName, type StackHealth, type StackingInfo } from './stacking.js';
 import { AstroControl } from './controller/astro.js';
-import { CameraControl, type ShootingTech } from './controller/camera.js';
+import { CameraControl, FILTER_NAMES, type ShootingTech } from './controller/camera.js';
 import { busyWith, isTracking, request, type Core, type Location } from './controller/core.js';
 import { Darks, type DarkRequest } from './controller/darks.js';
 import { DeviceExtrasControl } from './controller/extras.js';
@@ -49,6 +49,7 @@ export type { TelescopeState, FocusTune, DarkCaptureState, HorizonSurvey, PolarA
 export type { PolarError } from './controller/astro.js';
 export { AstroServiceHungError } from './controller/follow.js';
 export { BURST_MAX } from './controller/camera.js';
+import type { FilterFollower } from '../../astro/focus-offsets/follow.js';
 export { FOCUS_MAX, FILTERS, WB_SCENES, camId, round, timezoneOffsetHours } from './controller/util.js';
 
 const log = logger('dwarf');
@@ -466,6 +467,17 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
 
   cameraSettings(camera: CameraName, modeId?: number) {
     return this.camera.cameraSettings(camera, modeId);
+  }
+
+  /** Install what keeps the focus equivalent through a tele filter change (astro/focus-offsets). */
+  setFilterFollower(f: FilterFollower | null): void {
+    this.camera.filterFollower = f;
+  }
+
+  /** The tele's filter now, as the device specs name it (VIS, Astro, Duo-Band). */
+  async currentFilterName(): Promise<string | null> {
+    const i = await this.camera.currentFilterIndex();
+    return FILTER_NAMES[i] ?? null;
   }
 
   setSetting(camera: CameraName, setting: string, value: string | number | boolean, modeId?: number): Promise<string> {

@@ -15,6 +15,7 @@ import type { Seestar } from './device.js';
 import { measureSeestar } from './focus.js';
 import { seestarImage } from './mcp-media.js';
 import type { SeestarMedia } from './web.js';
+import { setSeestarFilter } from './filters.js';
 
 /** tele_visibility: what counts as stars in view (the Dwarf's thresholds) */
 const VISIBLE_MIN_STARS = 20;
@@ -307,11 +308,9 @@ export function registerSeestarParityTools(tool: ToolFn, scope: Seestar, media: 
       if (setting === 'live_exposure') return text(await scope.setExposure({ continuousMs: sec(value) * 1000 }, cam));
       if (setting === 'gain') return text(await scope.setGain(Number(value)));
       if (setting === 'filter') {
-        const w = await wheel();
-        const i = w.slots.findIndex((n) => n.toLowerCase() === String(value).toLowerCase().replace(/[^a-z]/g, '') || n.toLowerCase() === String(value).toLowerCase());
-        if (i < 0) throw new Error(`no filter ${value}: the wheel has ${w.slots.join(', ')}`);
-        await scope.raw('set_wheel_position', [i]);
-        return text({ filter: w.slots[i], wheelPosition: i });
+        // settled, and the focuser moved by the measured offset between the two filters (focus_offsets)
+        const c = await setSeestarFilter(scope, String(value));
+        return text({ filter: c.filter, wheelPosition: c.wheelPosition, ...(c.changed ? {} : { note: 'already in' }), ...(c.focus ? { focus: c.focus } : {}) });
       }
       let v: unknown = value;
       if (typeof value === 'string' && /^[[{]/.test(value.trim())) v = JSON.parse(value);

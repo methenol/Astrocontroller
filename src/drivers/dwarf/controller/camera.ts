@@ -15,6 +15,7 @@ import { busyWith, request, sendConfirmed, type Core } from './core.js';
 import { markPhotoStuck, photoInFlight, stuckPhotoMessage } from './photo-watch.js';
 import { finishEndedSession, GO_LIVE_MS } from './session-finish.js';
 import type { SystemControl } from './system.js';
+import type { FilterFollower } from '../../../astro/focus-offsets/follow.js';
 import { camId, describeParam, exposureLabelSeconds, FILTERS, matchExposure, nearest, resolveFilter, sleep, snake, WB_SCENES } from './util.js';
 
 const log = logger('dwarf');
@@ -64,8 +65,17 @@ export type ShootingTech = 'single_photo' | 'stacking' | 'burst' | 'video' | 'ti
 
 const packId = (def: http.ParamDef) => Long.fromString(String(def.paramId), false);
 
+/** The tele filters by index, as the device specs and the focus offsets name them (FILTERS has the long labels). */
+export const FILTER_NAMES = ['VIS', 'Astro', 'Duo-Band'];
+/** after the filter wheel moves, before anything shoots through it or the focuser is read */
+export const FILTER_SETTLE_MS = 2_000;
+
 export class CameraControl {
   private lastLiveViewWake = 0;
+  /** keeps the focus equivalent through a tele filter change (astro/focus-offsets), when installed */
+  filterFollower: FilterFollower | null = null;
+  /** a setting made in another shooting mode, inside its switch there and back: not the live filter */
+  private inOtherMode = false;
   private readonly imagingGain: Partial<Record<CameraName, { from: number; to: number }>> = {};
 
   constructor(
@@ -296,9 +306,11 @@ export class CameraControl {
       // So go to that mode, set it there, and come back.
       const target = await this.setShootingMode(modeId);
       let result: string;
+      this.inOtherMode = true;
       try {
         result = await this.setSetting(camera, setting, value);
       } finally {
+        this.inOtherMode = false;
         await this.setShootingMode(current);
       }
       return `${result} (in ${target.name} mode; back in ${this.state.shootingMode?.name ?? 'the previous'} mode)`;
@@ -340,8 +352,27 @@ export class CameraControl {
       const def = defs.filterType;
       if (!def) throw new Error(`the filter is not selectable in mode ${mode} on the ${camera} camera`);
       const idx = resolveFilter(value);
-      await request(this.core, Cmd.PARAM_SET_GENERAL_INT_PARAM, { paramId: packId(def), value: idx });
-      return `${camera} filter → ${FILTERS[idx]}`;
+      const set = async () => {
+        await request(this.core, Cmd.PARAM_SET_GENERAL_INT_PARAM, { paramId: packId(def), value: idx });
+        // the notification of the new value can lag the reply: read back the old filter, a second change
+        // would shift the focus twice. What was set is what is in.
+        const prev = this.core.params.get(String(def.paramId));
+        this.core.params.set(String(def.paramId), { ...prev, value: idx, ts: Date.now() });
+      };
+      // the tele's live filter changing: settled, and the focuser moved by the measured offset between the two
+      const before = camera === 'tele' && !this.inOtherMode ? await this.currentFilterIndex().catch(() => null) : null;
+      if (before === null || before === idx || !FILTER_NAMES[before] || !FILTER_NAMES[idx]) {
+        await set();
+        if (before !== null && before !== idx) await sleep(FILTER_SETTLE_MS);
+        return `${camera} filter → ${FILTERS[idx]}`;
+      }
+      if (!this.filterFollower) {
+        await set();
+        await sleep(FILTER_SETTLE_MS);
+        return `${camera} filter → ${FILTERS[idx]}`;
+      }
+      const r = await this.filterFollower(FILTER_NAMES[before], FILTER_NAMES[idx], set);
+      return `${camera} filter → ${FILTERS[idx]}${r.line ? `; ${r.line}` : ''}`;
     }
     return this.setGeneric(camera, setting, key, value, mode, schema);
   }

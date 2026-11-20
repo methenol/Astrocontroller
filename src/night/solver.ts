@@ -92,6 +92,9 @@ const OWN_QUADRANT_AZ_CLEAR = 15;
 const ALTERNATES = 4;
 /** an hour the forecast puts below the floor keeps this share of its merit (advisory: still planned, fillers and all) */
 const CLOUDY_MERIT = 0.25;
+/** a focus calibration wants seeing at least this steady (7Timer); failing any, at most this bad */
+const CAL_SEEING_GOOD = SEEING_GOOD;
+const CAL_SEEING_OK = SEEING_BAD - 1;
 
 export type Quadrant = 'N' | 'E' | 'S' | 'W';
 export const quadrantOf = (az: number): Quadrant => {
@@ -238,9 +241,31 @@ export interface BlockTarget {
   mosaic?: Candidate['mosaic'];
 }
 
+/** The star field a focus calibration is measured on: rich, bright, near the zenith. */
+export interface CalibrationField {
+  name: string;
+  displayName: string;
+  gotoName: string;
+  raHours: number;
+  decDeg: number;
+  /** its altitude at the block's start */
+  altDeg: number;
+}
+
+/** What the plan's focus-calibration block is for. */
+export interface BlockCalibration {
+  field: CalibrationField;
+  minutes: number;
+  /** why it was put here (the first clear, steady stretch; or running now) */
+  why: string;
+  seeingIdx?: number;
+  running?: boolean;
+}
+
 export interface Block {
   id: string;
-  kind: 'target' | 'gap' | 'weather';
+  /** calibration: the filter focus offsets measured on a field near the zenith (no integration) */
+  kind: 'target' | 'gap' | 'weather' | 'calibration';
   start: number;
   end: number;
   target?: BlockTarget;
@@ -262,6 +287,8 @@ export interface Block {
   clouds?: { cloudyMin: number; sky: number | null; floor: number; advisory: string };
   reason: string;
   alternates: Alternate[];
+  /** a calibration block: the field and why it is here */
+  calibration?: BlockCalibration;
 }
 
 export interface TargetOutlook {
@@ -324,6 +351,12 @@ export interface SolveInput {
   idPrefix?: string;
   /** the observer's zone, for the times in the reasons */
   timezone?: string;
+  /**
+   * A focus calibration the device still needs (the filter focus offsets): a block of `minutes` in
+   * the night's first stretch that is clear and steady, on the field `fieldAt` gives for its start.
+   * `running`: it is under way now, placed from `from` for the minutes it has left, whatever the sky.
+   */
+  calibration?: { minutes: number; running?: boolean; fieldAt: (t: number) => CalibrationField | null } | null;
 }
 
 export interface Solved {
@@ -665,6 +698,42 @@ export function solveNight(input: SolveInput): Solved {
   const lock = running && input.lock?.key === running.c.key ? input.lock : null;
   const lockedAt = (i: number) => !!lock && allSlots[i].t < lock.until;
 
+  // the focus calibration: the first stretch of its length that is clear and steady, outside the pins
+  // and the lock; steady seeing first, then any that is not bad. A clouded night has none.
+  const cal = placeCalibration();
+  const calAt = (i: number) => !!cal && i >= cal.a && i < cal.b;
+  function placeCalibration(): { a: number; b: number; field: CalibrationField; seeingIdx?: number; why: string; running?: boolean } | null {
+    const c = input.calibration;
+    if (!c || c.minutes <= 0 || firstIdx >= n) return null;
+    const len = Math.max(1, Math.ceil(c.minutes / SLOT_MIN));
+    const fieldOf = (a: number) => c.fieldAt(Math.max(allSlots[a].t, from));
+    if (c.running) {
+      const f = fieldOf(firstIdx);
+      return f ? { a: firstIdx, b: Math.min(n, firstIdx + len), field: f, running: true, why: 'under way' } : null;
+    }
+    const seeing = (a: number, b: number) => {
+      const xs = allSlots.slice(a, b).map((x) => x.seeingIdx).filter((x): x is number => x !== undefined);
+      return xs.length ? Math.max(...xs) : undefined;
+    };
+    for (const limit of [CAL_SEEING_GOOD, CAL_SEEING_OK]) {
+      for (let a = firstIdx; a + len <= n; a++) {
+        let ok = true;
+        for (let j = a; j < a + len && ok; j++) ok = !allSlots[j].cloudy && !pinnedAt(j) && !lockedAt(j) && (allSlots[j].seeingIdx === undefined || allSlots[j].seeingIdx! <= limit);
+        if (!ok) continue;
+        const f = fieldOf(a);
+        if (!f) continue;
+        const see = seeing(a, a + len);
+        const sky = allSlots.slice(a, a + len).map((x) => x.sky).filter((x): x is number => x !== null);
+        const why = see === undefined && !sky.length
+          ? "no forecast: the night's first slot"
+          : `the night's first ${limit === CAL_SEEING_GOOD ? 'clear, steady' : 'clear'} stretch${see !== undefined ? ` (seeing ${see}/8${limit === CAL_SEEING_GOOD ? '' : `: none steadier than ${CAL_SEEING_GOOD} tonight`})` : ''}${sky.length ? `, sky ${Math.min(...sky)}/100 or better` : ''}`;
+        return { a, b: a + len, field: f, seeingIdx: see, why };
+      }
+    }
+    notes.push('focus calibration due, but no clear stretch of its length tonight: collection goes on without it');
+    return null;
+  }
+
   // Where each goal's time belongs: walking the night forward alone would take a target the moment it
   // clears, low in the sky, when what it needs fits in its best hours. The program first, then the
   // fillers in progress, most valued first: each gets the contiguous stretch of its need with the most
@@ -673,6 +742,7 @@ export function solveNight(input: SolveInput): Solved {
   const opensAt = new Map<Curve, number>();
   const taken = new Uint8Array(n);
   for (const p of pins) taken.fill(1, p.startIdx, p.endIdx);
+  if (cal) taken.fill(1, cal.a, cal.b);
   // what the lock holds is not there for the other targets' windows
   for (let i = firstIdx; running && i < n && lockedAt(i) && usable(running, i) && !pinnedAt(i); i++) taken[i] = 1;
   const programFirst = (cv: Curve) => (cv.c.source === 'program' ? 0 : 1);
@@ -743,6 +813,10 @@ export function solveNight(input: SolveInput): Solved {
   const switchCost = (cv: Curve, i: number) => (i === firstIdx && cv.c.key === currentKey ? 0 : input.overheadMin);
 
   for (let i = firstIdx; i < n; i++) {
+    if (calAt(i)) {
+      close();
+      continue;
+    }
     const pin = pinnedAt(i);
     if (pin) {
       if (st.cur !== pin) {
@@ -791,7 +865,8 @@ export function solveNight(input: SolveInput): Solved {
       let sum = 0;
       let ok = true;
       for (let j = i; j < i + look; j++) {
-        if (!usable(cv, j)) {
+        // the calibration cuts the stretch: a new block that ran into it would pay its switch for a few minutes
+        if (!usable(cv, j) || calAt(j)) {
           if (!goesOn) ok = false;
           break;
         }
@@ -924,12 +999,34 @@ export function solveNight(input: SolveInput): Solved {
       advisory: `clouds forecast (${sky}/100, below the ${settings.weatherMinScore}/100 floor) for ${whole ? 'the whole block' : `${cloudyMin} min of it`}: advisory — check the sky (sky_check) before and during it; if ${target} is obscured, night_plan action=obscured cause=cloud for an alternate (or night_plan action=alternates for a clear part of the sky); capture settings favour shorter subs so a passing cloud costs less`,
     };
   };
-  for (const r of runs.sort((a, b) => a.startIdx - b.startIdx)) {
-    if (r.startIdx > cursor) pushGap(cursor, r.startIdx);
-    blocks.push(blockOf(r, `${prefix}${blocks.length}`));
-    cursor = r.endIdx;
+  const segments: Array<{ a: number; b: number; run: Run | null }> = [...runs.map((r) => ({ a: r.startIdx, b: r.endIdx, run: r })), ...(cal ? [{ a: cal.a, b: cal.b, run: null }] : [])].sort((x, y) => x.a - y.a);
+  for (const sg of segments) {
+    if (sg.a > cursor) pushGap(cursor, sg.a);
+    blocks.push(sg.run ? blockOf(sg.run, `${prefix}${blocks.length}`) : calibrationBlock(`${prefix}${blocks.length}`));
+    cursor = sg.b;
   }
   if (cursor < n) pushGap(cursor, n);
+
+  function calibrationBlock(id: string): Block {
+    const c = cal!;
+    const minutes = Math.round((Math.min(allSlots[c.b - 1].t + SLOT_MS, input.end.getTime()) - Math.max(allSlots[c.a].t, from)) / 60e3);
+    const clouds = cloudsOf(c.a, c.b, c.field.displayName);
+    return {
+      id,
+      kind: 'calibration',
+      start: Math.max(allSlots[c.a].t, from),
+      end: Math.min(allSlots[c.b - 1].t + SLOT_MS, input.end.getTime()),
+      overheadMin: 0,
+      expectedMin: 0,
+      alt: { start: Math.round(c.field.altDeg), end: Math.round(c.field.altDeg), max: Math.round(c.field.altDeg) },
+      sky: meanSky(c.a, c.b),
+      merit: 0,
+      clouds,
+      reason: `focus calibration on ${c.field.displayName} (alt ${Math.round(c.field.altDeg)}°, near the zenith): the filter focus offsets, measured once per device — ${c.why}`,
+      alternates: [],
+      calibration: { field: c.field, minutes, why: c.why, seeingIdx: c.seeingIdx, running: c.running || undefined },
+    };
+  }
 
   function blockOf(r: Run, id: string): Block {
     const { cv } = r;

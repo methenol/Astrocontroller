@@ -23,9 +23,12 @@ import { seestarProbe } from './journal.js';
 import { createNight, withNightPlan, type NightServices } from '../../night/index.js';
 import { NOMINAL_FOV } from './focus.js';
 import { seestarFacts } from './acquisition.js';
+import { installSeestarFilterFocus } from './focus-offsets.js';
 
 function create({ agent }: DriverDeps): DriverRuntime {
   const scope = new Seestar();
+  // every wheel change keeps the focus equivalent by the measured offsets (focus_offsets)
+  installSeestarFilterFocus(scope);
   // the night plan's lines go into every duty sample; the night needs the duty (its journal and events), so it is bound late
   let night: NightServices | null = null;
   // on autonomous nights the agent keeps being woken while the scope is released: it connects it again itself
