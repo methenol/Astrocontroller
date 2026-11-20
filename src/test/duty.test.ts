@@ -18,17 +18,19 @@ class StubAgent extends EventEmitter {
   ready = true;
   busy = false;
   prompts: string[] = [];
+  modes: Array<string | undefined> = [];
   notes: string[] = [];
   failNext = false;
   note(_kind: string, text: string) {
     this.notes.push(text);
   }
-  async prompt(text: string) {
+  async prompt(text: string, _images?: unknown, mode?: string) {
     if (this.failNext) {
       this.failNext = false;
       throw new Error('agent not reachable');
     }
     this.prompts.push(text);
+    this.modes.push(mode);
   }
   set(o: { ready?: boolean; busy?: boolean }) {
     Object.assign(this, o);
@@ -134,6 +136,42 @@ describe('DutyLoop', () => {
     await new Promise((r) => setTimeout(r, 3100));
     assert.match(agent.prompts[0], /ORDER \(the owner's autonomous mode\): the Starfront roof opened/);
     assert.match(agent.prompts[0], /carry them out now/);
+  });
+
+  test('an urgent order is steered into a running turn at once; an ordinary one waits for the turn to end', async () => {
+    duty.dispose();
+    const dev = { ...dwarfDuty(dwarf as unknown as Dwarf), autonomous: () => true };
+    Object.defineProperty(dev, 'state', { get: () => dwarf.state });
+    duty = new DutyLoop(dev, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
+    agent.set({ busy: true });
+    duty.order('the Starfront roof has REOPENED');
+    duty.order('the Starfront roof is CLOSING: stop_stacking and park NOW', { urgent: true });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(agent.prompts.length, 1, 'only the urgent order, without waiting for the turn');
+    assert.equal(agent.modes[0], 'steer');
+    assert.match(agent.prompts[0], /ORDER \(the owner's autonomous mode\): the Starfront roof is CLOSING/);
+    assert.match(agent.prompts[0], /interrupts what you are doing now/);
+    assert.doesNotMatch(agent.prompts[0], /REOPENED/);
+    await new Promise((r) => setTimeout(r, 3100));
+    assert.equal(agent.prompts.length, 1, 'the ordinary order waits for the turn to end');
+    agent.set({ busy: false });
+    await new Promise((r) => setTimeout(r, 3100));
+    assert.equal(agent.prompts.length, 2);
+    assert.equal(agent.modes[1], 'followUp');
+    assert.match(agent.prompts[1], /REOPENED/);
+    assert.doesNotMatch(agent.prompts[1], /CLOSING/, 'the urgent order is not delivered twice');
+  });
+
+  test('an urgent order to an idle agent goes out at once as an ordinary wake', async () => {
+    duty.dispose();
+    const dev = { ...dwarfDuty(dwarf as unknown as Dwarf), autonomous: () => true };
+    Object.defineProperty(dev, 'state', { get: () => dwarf.state });
+    duty = new DutyLoop(dev, agent as unknown as AgentBridge, { now: () => now, tickMs: 0 });
+    duty.order('the Starfront roof is CLOSING', { urgent: true });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(agent.prompts.length, 1);
+    assert.equal(agent.modes[0], 'followUp');
+    assert.match(agent.prompts[0], /the Starfront roof is CLOSING/);
   });
 
   test('dispose removes every listener it added', () => {

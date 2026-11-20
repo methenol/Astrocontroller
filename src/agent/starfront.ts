@@ -258,7 +258,7 @@ export class StarfrontNights extends SafeEmitter {
 
     // the roof changed during a night already started: tell the agent at once
     if (night.engagedAt && this.wasOpen !== null && open !== null && open !== this.wasOpen && duty.status !== 'off') {
-      this.d.duty.order(open ? ROOF_REOPENED_ORDER : ROOF_CLOSING_ORDER);
+      this.d.duty.order(open ? ROOF_REOPENED_ORDER : ROOF_CLOSING_ORDER, { urgent: !open });
     }
     if (open !== null) this.wasOpen = open;
     // during a night on duty, the roof closing has the agent park and transfer (the closing order);

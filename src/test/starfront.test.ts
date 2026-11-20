@@ -36,7 +36,7 @@ function rig(o: { building?: number; dutyStatus?: 'off' | 'active' } = {}) {
         return {} as never;
       }) as never,
       event: (text: string) => void events.push(text),
-      order: (text: string) => void events.push(`ORDER ${text}`),
+      order: (text: string, o?: { urgent?: boolean }) => void events.push(`ORDER ${o?.urgent ? 'URGENT ' : ''}${text}`),
       status: (() => ({ status: dutyStatus, objective: 'the user\'s own' })) as never,
     },
     site: () => SITE,
@@ -106,7 +106,7 @@ describe('autonomous Starfront nights', () => {
     await r.nights.tick();
     r.roof({});
     await r.nights.tick();
-    assert.ok(r.events.some((e) => /^ORDER the Starfront roof is CLOSING: stop_stacking and park NOW.*transfer.*seestar_disconnect/s.test(e)), r.events.join('\n'));
+    assert.ok(r.events.some((e) => /^ORDER URGENT the Starfront roof is CLOSING: stop_stacking and park NOW.*transfer.*seestar_disconnect/s.test(e)), r.events.join('\n'));
     r.roof({ 6: true });
     await r.nights.tick();
     assert.ok(r.events.some((e) => /^ORDER the Starfront roof has REOPENED: seestar_connect/.test(e)));
@@ -182,7 +182,7 @@ describe('autonomous Starfront nights', () => {
     r.roof({});
     await r.nights.tick();
     assert.equal(r.nights.transferHold(), null, 'roof closed: fair game');
-    assert.ok(r.events.some((e) => /^ORDER the Starfront roof is CLOSING: stop_stacking and park NOW.*transfer/s.test(e)));
+    assert.ok(r.events.some((e) => /^ORDER URGENT the Starfront roof is CLOSING: stop_stacking and park NOW.*transfer/s.test(e)));
     r.roof({ 6: true });
     await r.nights.tick();
     assert.match(String(r.nights.transferHold()), /roof is open/, 'reopened: held again');

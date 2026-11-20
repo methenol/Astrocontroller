@@ -44,6 +44,8 @@ const WAKE_RETRY_MS = 60_000;
 /** Events kept while the agent cannot be woken; the oldest are dropped. */
 const MAX_EVENTS = 30;
 const TICK_MS = 1_000;
+/** An urgent order that could not be steered in is tried again this much later. */
+const STEER_RETRY_MS = 10_000;
 
 export interface DutyState {
   status: 'off' | 'active' | 'paused';
@@ -72,6 +74,8 @@ interface PendingEvent {
   text: string;
   /** a step of a mode the owner turned on (Starfront's autonomous nights): carried out, not just noted */
   order?: boolean;
+  /** it cannot wait for the running turn to end (the roof closing over a scope at work): steered into it */
+  urgent?: boolean;
 }
 
 type WakeKind = 'tick' | 'event' | 'event-only' | 'final';
@@ -162,7 +166,8 @@ export class DutyLoop extends SafeEmitter {
   dispose(): void {
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.deliverTimer) clearTimeout(this.deliverTimer);
-    this.tickTimer = this.deliverTimer = null;
+    if (this.steerTimer) clearTimeout(this.steerTimer);
+    this.tickTimer = this.deliverTimer = this.steerTimer = null;
     this.agent.off('status', this.onStatus);
     this.stopSensors();
   }
@@ -256,6 +261,8 @@ export class DutyLoop extends SafeEmitter {
     if (this.events.length) log.info(`dropping ${this.events.length} event(s) queued before the fresh start`);
     this.events = [];
     this.finalPending = null;
+    if (this.steerTimer) clearTimeout(this.steerTimer);
+    this.steerTimer = null;
     // their delivery too: it would wake the fresh start with an empty sample of its own
     if (this.deliverTimer) clearTimeout(this.deliverTimer);
     this.deliverTimer = null;
@@ -332,10 +339,15 @@ export class DutyLoop extends SafeEmitter {
    * A step the owner's standing mode asks for now (Starfront's autonomous nights: the roof check,
    * the roof opening before dark, closing, reopening). Delivered like an event, on duty or not, but
    * the agent is told to carry it out: an ordinary automatic message must not start new work.
+   *
+   * urgent: it cannot wait for the agent's turn to end. A turn can run for an hour (a GoTo that
+   * keeps failing its plate solve under a closed roof, and the agent diagnosing it), so an urgent
+   * order is steered into the running turn at its next step, as a message typed in chat is.
    */
-  order(text: string): void {
+  order(text: string, o: { urgent?: boolean } = {}): void {
     if (!this.scope.autonomous?.()) return;
-    this.push({ at: this.now(), text, order: true });
+    this.push({ at: this.now(), text, order: true, urgent: o.urgent });
+    if (o.urgent) this.steerSoon(0);
   }
 
   private push(e: PendingEvent): void {
@@ -353,10 +365,64 @@ export class DutyLoop extends SafeEmitter {
     if (this.deliverTimer) return;
     this.deliverTimer = setTimeout(() => {
       this.deliverTimer = null;
-      if (!this.agent.ready || this.agent.busy) return; // delivered when the turn ends
+      if (!this.agent.ready) return; // delivered when the agent is back
+      if (this.agent.busy) {
+        // delivered when the turn ends, but an urgent order goes into the turn now
+        if (this.events.some((e) => e.urgent)) this.steerSoon(0);
+        return;
+      }
       void this.wake(this.finalPending !== null ? 'final' : this.state.status === 'active' ? 'event' : 'event-only');
     }, ms);
     this.deliverTimer.unref();
+  }
+
+  private steerTimer: NodeJS.Timeout | null = null;
+
+  private steerSoon(ms: number): void {
+    if (this.steerTimer) return;
+    this.steerTimer = setTimeout(() => {
+      this.steerTimer = null;
+      void this.steer();
+    }, ms);
+    this.steerTimer.unref?.();
+  }
+
+  /**
+   * Urgent orders go into the running turn now (omp's steering queue: delivered at the turn's next
+   * step) instead of waiting for it to end. An idle agent gets them as an ordinary wake (with the
+   * duty's measurements); one that cannot be reached keeps them for when it can.
+   */
+  private async steer(): Promise<void> {
+    if (!this.events.some((e) => e.urgent)) return;
+    if (!this.agent.ready) return; // queued: delivered once the agent is back (onAgentStatus)
+    if (!this.agent.busy) {
+      // idle: the ordinary delivery (it carries the measurements on duty), without the batching wait
+      if (this.deliverTimer) clearTimeout(this.deliverTimer);
+      this.deliverTimer = null;
+      this.scheduleDelivery(0);
+      return;
+    }
+    const urgent = this.events.filter((e) => e.urgent);
+    this.events = this.events.filter((e) => !e.urgent);
+    try {
+      await this.agent.prompt(this.steerMessage(urgent), [], 'steer');
+      log.info(`steered ${urgent.length} urgent order(s) into the running turn`);
+    } catch (e) {
+      this.events.unshift(...urgent);
+      log.warn(`could not steer an urgent order into the running turn: ${errMsg(e)}`);
+      this.steerSoon(STEER_RETRY_MS);
+    } finally {
+      this.publish();
+    }
+  }
+
+  private steerMessage(events: PendingEvent[]): string {
+    return [
+      '[Astrocontroller ORDER: automatic, not typed by the user. It interrupts what you are doing now]',
+      ...this.eventLines(events),
+      '',
+      "These are steps of a mode the owner turned on (autonomous Starfront nights) and they override the work in progress: drop it now — do not finish the step you were on, retry it, or diagnose why it failed — and carry them out, exactly as written, as your next tool calls.",
+    ].join('\n');
   }
 
   // ---------------------------------------------------------------- scheduling
@@ -404,6 +470,7 @@ export class DutyLoop extends SafeEmitter {
     this.finalPending = null;
     const events = retryFinal !== null ? [] : this.events.splice(0);
     let text: string | undefined;
+    let delivered = false;
     try {
       text = retryFinal ?? (kind === 'event-only' ? this.eventMessage(events) : this.dutyMessage(kind, events));
       this.state.lastWakeAt = this.now();
@@ -412,6 +479,7 @@ export class DutyLoop extends SafeEmitter {
       if (kind !== 'event-only') this.state.wakes++;
       this.save();
       await this.agent.prompt(text, [], 'followUp');
+      delivered = true;
       this.fresh = false;
     } catch (e) {
       // not delivered: keep the events (an END wake: the whole message), try again at the next sample (or, off duty, a little later)
@@ -422,6 +490,8 @@ export class DutyLoop extends SafeEmitter {
       log.warn(`could not wake the agent: ${errMsg(e)}`);
     } finally {
       this.delivering = false;
+      // an urgent order that came in while this wake was on its way: into the turn it started
+      if (delivered && this.events.some((e) => e.urgent)) this.steerSoon(0);
       this.publish();
     }
   }
