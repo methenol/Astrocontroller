@@ -205,6 +205,48 @@ describe('night plan: the solver', () => {
     }
   });
 
+  test('the minimum block holds for targets that need less than it, and in the night’s last hours', () => {
+    const long = { ...SETTINGS, minBlockMin: 120 };
+    // the short needs (4 and 47 min) are the ones the solver used to give 40- and 90-min blocks
+    const cands = [cand('M 76', { goalMin: 4 }), cand('M 27', { goalMin: 47, priority: 4 }), cand('M 42', { goalMin: 14, priority: 2 }), cand('M 31'), cand('M 33'), cand('M 45'), cand('NGC 7000')];
+    const r = solve(cands, { settings: long, overheadMin: 26.6 });
+    const blocks = targetBlocks(r);
+    assert.ok(blocks.length >= 2, 'the plan has blocks (test premise)');
+    for (const [k, b] of blocks.entries()) {
+      const prev = blocks[k - 1];
+      const goesOn = !!prev && prev.target!.key === b.target!.key && prev.end === b.start;
+      assert.ok(goesOn || b.end - b.start >= 120 * 60e3, `${b.target!.displayName} at ${new Date(b.start).toISOString()}: ${(b.end - b.start) / 60e3} min`);
+    }
+    // a 4-min need is still a whole minimum block, never a short one
+    for (const b of blocks.filter((x) => x.target!.displayName === 'M 76')) assert.ok(b.end - b.start >= 120 * 60e3);
+  });
+
+  test('a target that needs less than the minimum block gets the whole block, not its need', () => {
+    const long = { ...SETTINGS, minBlockMin: 120 };
+    for (const goalMin of [4, 14, 47]) {
+      const r = solve([cand('M 42', { goalMin, priority: 2 }), cand('M 76', { goalMin, priority: 3 })], { settings: long, overheadMin: 26.6, mount: 'eq' });
+      for (const b of targetBlocks(r)) assert.ok(b.end - b.start >= 120 * 60e3, `goal ${goalMin}: ${b.target!.displayName} ${(b.end - b.start) / 60e3} min`);
+    }
+  });
+
+  test('no new target starts with less than a minimum block of the night left', () => {
+    const long = { ...SETTINGS, minBlockMin: 120 };
+    // the night's last 60 min, held free of everything else: only a short block could use them
+    const end = W.end.getTime();
+    const r = solve([cand('M 42', { goalMin: 30 })], { settings: long, from: new Date(end - 60 * 60e3), mount: 'eq' });
+    for (const b of targetBlocks(r)) assert.ok(b.end - b.start >= 120 * 60e3, `${b.target!.displayName} ${(b.end - b.start) / 60e3} min`);
+  });
+
+  test('a running target whose need is covered still keeps its minimum block', () => {
+    const long = { ...SETTINGS, minBlockMin: 120 };
+    const from = new Date(W.start.getTime() + 3600e3);
+    // M 31 has run 60 min and needs 10 more: it goes on to its 120 min, not 20 min more
+    const r = solve([cand('M 31', { goalMin: 10 }), cand('M 33')], { settings: long, from, current: { key: 'ngc 224', since: W.start.getTime() } });
+    const first = targetBlocks(r)[0];
+    assert.equal(first.target!.displayName, 'M 31');
+    assert.ok(first.end - W.start.getTime() >= 120 * 60e3, `M 31 ends ${(first.end - W.start.getTime()) / 60e3} min after it started`);
+  });
+
   test('a switch costs the overhead, and continuing the running target does not', () => {
     const r = solve([cand('M 31')], { from: new Date(W.start.getTime() + 3600e3), current: { key: 'ngc 224', since: W.start.getTime() } });
     const first = targetBlocks(r)[0];

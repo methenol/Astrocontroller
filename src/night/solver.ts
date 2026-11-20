@@ -760,8 +760,11 @@ export function solveNight(input: SolveInput): Solved {
     const curLen = curRun + (live?.ranSlots ?? 0);
     const curLeft = live ? (remaining.get(live.cv) ?? 0) - yieldOf(live, curRun) : 0;
     const curUsable = !!live && usable(live.cv, i) && curLeft > 0;
-    // a block keeps its minimum length unless its target can no longer be shot; the locked one, its whole block
-    if (live && curUsable && (curLen < minBlockSlots || (live.cv === running && lockedAt(i)))) {
+    // a block keeps its minimum length unless its target can no longer be shot, even once tonight's need is
+    // covered: the GoTo, centring, focus and measurements before stacking are paid for the whole block, and
+    // collecting a little past the goal costs nothing more. The locked one keeps its whole block.
+    const curUp = !!live && usable(live.cv, i);
+    if (live && ((curUp && curLen < minBlockSlots) || (curUsable && live.cv === running && lockedAt(i)))) {
       live.endIdx = i + 1;
       continue;
     }
@@ -778,26 +781,23 @@ export function solveNight(input: SolveInput): Solved {
       if (waiting && !allSlots[i].cloudy) continue;
       if (isCur ? !curUsable : !usable(cv, i)) continue;
       if (isCur && curLen >= maxBlockSlots) continue;
+      // a new block needs its target usable for the whole minimum block, however little it still needs:
+      // a shorter run spends most of itself on the GoTo, focus and measurements before stacking. In the
+      // night's last minutes (less than a minimum block left) no new target starts; the one shot just
+      // before, unbroken, may go on (no switch).
+      const prev = runs[runs.length - 1];
+      const goesOn = isCur || (!!prev && prev.cv === cv && prev.endIdx === i);
+      if (!goesOn && look < minBlockSlots) continue;
       let sum = 0;
       let ok = true;
       for (let j = i; j < i + look; j++) {
-        // a new block needs its target usable for the whole minimum block (or what it needs, if less)
         if (!usable(cv, j)) {
-          if (!isCur && (j - i) * slotYield < Math.min(need, look * slotYield)) ok = false;
+          if (!goesOn) ok = false;
           break;
         }
         sum += cv.merit[j];
       }
       if (!ok) continue;
-      // in the night's last minutes (less than a minimum block left) a new block must be worth its switch:
-      // a GoTo, centring and focus for a minute of integration is not
-      if (!isCur && look < minBlockSlots) {
-        const prev = runs[runs.length - 1];
-        const cost = prev && prev.cv === cv && prev.endIdx === i ? 0 : switchCost(cv, i);
-        let k = 0;
-        for (let j = i; j < i + look && usable(cv, j); j++) k += slotW[j] * SLOT_MIN;
-        if (cost > 0 && k - cost < Math.max(SLOT_MIN, cost)) continue;
-      }
       const meanMerit = sum / look;
       // a filler has no goal to race the night for: the one about to set is not worth more for it
       const urgency = cv.c.source === 'filler' ? 0 : clamp01(need / Math.max(slotYield, available(cv, i)));
