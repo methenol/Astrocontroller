@@ -16,8 +16,8 @@
  * peak hours (the best targets are those whose optimal time coincides with clear sky), and the
  * app's memory — what was suggested recently and what the library already holds.
  *
- * Geometry is sampled every 15 minutes; the catalog is funnelled on a cheap proxy first so the
- * ephemeris is only paid for the ~400 rows that could plausibly make the list.
+ * Geometry is sampled every 15 minutes. Every catalog row that can reach the sky through the filters
+ * asked for is ranked: no default filter and no shortlist decides what the plan may draw on.
  */
 import { catalog, displayName, gotoLabel, typeGroup, type DsoObject } from './catalog.js';
 import { nightWindow, moonState, separationDeg, fmtTime, localDate, bodyAlt, type Site, altAz } from './sky.js';
@@ -60,7 +60,7 @@ export interface PlanOptions {
   today?: string;
   /** the site's obstructions (astro/horizon.ts): a target counts as up only above them too; without one, minAltitude alone */
   horizon?: Horizon;
-  /** catalog keys (rest.targetKey) with integration towards a goal: always ranked and always on the list, past the funnel and the limit */
+  /** catalog keys (rest.targetKey) with integration towards a goal: always on the list, past the limit */
   started?: ReadonlySet<string>;
   /** choose the list to cover the night: the best of every part of it (a block's length, an hour at least) in every quadrant of the sky */
   spanNight?: { blockMin: number };
@@ -181,16 +181,12 @@ export function framing(o: DsoObject, fov: { w: number; h: number }): { text: st
   return { text: `small (${maj}') — only ${Math.round(frac * 100)}% of the frame; it will look tiny`, fit: 0.25, mosaic: false };
 }
 
-/** Defaults of the plan's filters. */
-const DEFAULT_MAX_MAG = 11;
-const DEFAULT_MIN_SIZE = 4;
-const DEFAULT_MAX_SIZE = 600;
+/** How many rows a list shows when no limit is given. It only shortens the list: every row the filters let through is ranked. */
 const DEFAULT_LIMIT = 15;
 /** No darkness known (polar summer): this many hours from the start. */
 const DEFAULT_NIGHT_H = 8;
 /** A plan covers one night: a longer window is refused (it would also sample the catalog for days). */
 const MAX_WINDOW_H = 24;
-const MAX_LIMIT = 200;
 /** Altitude, Moon and forecast are sampled every this many hours across the window. */
 const STEP_H = 0.25;
 /** A target up for less than this is not worth a session. */
@@ -224,8 +220,6 @@ const KEYHOLE_START = 75;
 const KEYHOLE_FULL = 85;
 const KEYHOLE_FLOOR = 0.15;
 
-/** How many rows the cheap funnel keeps before the ephemeris is paid for. */
-const FUNNEL_KEEP = 400;
 /** Rows further than this from the pole-side reach of the site can never be used. */
 const DEC_PREFILTER_MARGIN = 65;
 /** A hero that spends this long in the zenith keyhole with too little clean time yields (source engine's guard). */
@@ -423,21 +417,6 @@ export function chooseGlass(o: DsoObject, glass: Glass): { filter: string; d: De
 }
 
 /**
- * The proxy a row is ranked on before any ephemeris is computed: transit altitude stands in for
- * integration time, framing, detectability and appeal are computed from the row alone. It only
- * has to be good enough to keep the rows the real score would rank near the top inside
- * `FUNNEL_KEEP`; the hard gates already ran in the catalog filter.
- */
-function cheapScore(o: DsoObject, site: Site, fov: { w: number; h: number }, glass: Glass): number {
-  const fr = framing(o, fov);
-  const transit = 90 - Math.abs(site.lat - o.decDeg);
-  const { d } = chooseGlass(o, glass);
-  const detect = d.bucket === 'UNKNOWN' ? brightness(o) * 100 : d.score;
-  const integration = Math.max(0, Math.min(1, (transit - 40) / 35)) * 100;
-  return W.framing * fr.fit * 100 + W.integration * integration + W.detect * detect + W.appeal * appealScore(o.type);
-}
-
-/**
  * What tonight's sky is about, judged on the best-placed rows rather than on the calendar: the
  * Milky Way core, the Magellanic Clouds, a galaxy field, or a mix. The source engine tells its
  * user this before the list; it is the one sentence that explains why tonight's list looks like
@@ -493,30 +472,25 @@ export function planNight(site: Site, opts: PlanOptions & { now?: Date }): Night
 
   const types = new Set<string>();
   for (const t of opts.types ?? []) for (const code of typeGroup(t) ?? [t]) types.add(code);
-  const maxMag = opts.maxMagnitude ?? DEFAULT_MAX_MAG;
-  const minSize = Math.max(opts.minSizeArcmin ?? DEFAULT_MIN_SIZE, ((opts.minFovPercent ?? 0) / 100) * opts.fovArcmin.w);
-  const maxSize = opts.maxSizeArcmin ?? DEFAULT_MAX_SIZE;
-  const limit = Math.min(MAX_LIMIT, Math.floor(opts.limit ?? DEFAULT_LIMIT));
+  // only the filters asked for: the whole catalog is ranked, nothing is cut by a default
+  const maxMag = opts.maxMagnitude;
+  const minSize = Math.max(opts.minSizeArcmin ?? 0, ((opts.minFovPercent ?? 0) / 100) * opts.fovArcmin.w);
+  const maxSize = opts.maxSizeArcmin ?? Infinity;
+  const limit = Math.floor(opts.limit ?? DEFAULT_LIMIT);
 
-  // Cheap funnel: only rows that can ever reach the sky, then only the ones a no-ephemeris
-  // proxy puts near the top. The ephemeris is the expensive part; it is paid for ~400 rows.
+  // every row that can ever reach the sky through the filters asked for is ranked on the ephemeris
   const isStarted = (id: string) => opts.started?.has(id.trim().toLowerCase()) ?? false;
   const reachable = catalog().filter((o) => {
     if (Math.abs(site.lat - o.decDeg) > DEC_PREFILTER_MARGIN) return false;
     if (types.size && !types.has(o.type)) return false;
     if (ONLY_ON_REQUEST.includes(o.type) && !types.has(o.type)) return false;
     const famous = o.aliases.some((a) => FAMOUS.test(a));
-    // Bright enough: a magnitude within the limit, or (nebulae have none) a bright or moderate class.
-    // A target already being collected passes the default brightness floor; a magnitude the owner set still applies.
-    const startedPass = opts.maxMagnitude === undefined && isStarted(o.id);
-    if (!famous && !startedPass && !(o.mag !== undefined ? o.mag <= maxMag : o.brightClass !== undefined && o.brightClass <= 2)) return false;
+    // Bright enough, when a magnitude limit is set: within it, or (nebulae have none) a bright or moderate class.
+    if (maxMag !== undefined && !famous && !(o.mag !== undefined ? o.mag <= maxMag : o.brightClass !== undefined && o.brightClass <= 2)) return false;
     if ((o.majorArcmin ?? 0) < minSize || (o.majorArcmin ?? 0) > maxSize) return false;
     return 90 - Math.abs(site.lat - o.decDeg) >= opts.minAltitude;
   });
-  const funnel: Array<{ proxy: number; o: DsoObject }> = [];
-  for (const o of reachable) funnel.push({ proxy: cheapScore(o, site, opts.fovArcmin, glass), o });
-  funnel.sort((a, b) => b.proxy - a.proxy);
-  const candidates = [...funnel.slice(0, FUNNEL_KEEP), ...funnel.slice(FUNNEL_KEEP).filter((f) => isStarted(f.o.id))].map((f) => f.o);
+  const candidates = reachable;
 
   // What the window's own darkness allows: integration is scored against this, so a two-hour
   // session before dawn is judged on what was on offer, not against a full night.

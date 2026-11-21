@@ -273,31 +273,54 @@ describe('focus offsets: the night plan', () => {
     assert.equal(findObject(f!.name)?.type, 'OCl');
   });
 
-  test('it goes in the first stretch that is clear and steady, and the targets go around it', () => {
-    // cloud for the first 2 h, then clear; the seeing poor until 3 h, steady after
+  test('it goes in the soonest clear stretch, not a later steadier one, and the targets go around it', () => {
+    // cloud for the first 2 h, then clear; the seeing mediocre until 3 h, steady after
     const conditions = (t: Date) => ({ observability: t.getTime() < hour(2) ? 10 : 90, seeingIdx: t.getTime() < hour(3) ? 6 : 3 });
     const r = solveNight({ site: SITE, start: W.start, end: W.end, candidates: [cand('M 31'), cand('M 45')], settings: SETTINGS, overheadMin: 8, efficiency: 0.75, conditions, mount: 'eq', calibration: { minutes: 50, fieldAt: field } });
     const cal = r.blocks.filter((b) => b.kind === 'calibration');
     assert.equal(cal.length, 1);
     const c = cal[0];
-    assert.ok(c.start >= hour(3) - 10 * 60e3 && c.start <= hour(3) + 10 * 60e3, `starts at the steady seeing (${new Date(c.start).toISOString()})`);
+    assert.ok(c.start >= hour(2) - 10 * 60e3 && c.start <= hour(2) + 10 * 60e3, `starts when the sky clears (${new Date(c.start).toISOString()})`);
     assert.equal((c.end - c.start) / 60e3, 50);
-    assert.match(c.reason, /clear, steady/);
+    assert.match(c.reason, /first clear stretch/);
     for (const b of r.blocks.filter((x) => x.kind === 'target')) assert.ok(b.end <= c.start || b.start >= c.end, 'no target block overlaps it');
     const after = r.blocks.find((b) => b.kind === 'target' && b.start === c.end);
     if (after) assert.ok(after.overheadMin > 0, 'the target after it pays its GoTo');
   });
 
-  test('without a steady hour it takes the first clear one; a clouded night has none', () => {
+  test('a sky above the plan\'s floor but not clear is not a calibration sky', () => {
+    // 40/100 (above the 35 floor) for the first 3 h, clear after
+    const conditions = (t: Date) => ({ observability: t.getTime() < hour(3) ? 40 : 90, seeingIdx: 3 });
+    const r = solveNight({ site: SITE, start: W.start, end: W.end, candidates: [cand('M 31')], settings: SETTINGS, overheadMin: 8, efficiency: 0.75, conditions, mount: 'eq', calibration: { minutes: 30, fieldAt: field } });
+    const c = r.blocks.find((b) => b.kind === 'calibration')!;
+    assert.ok(c.start >= hour(3) - 10 * 60e3 && c.start <= hour(3) + 10 * 60e3, `starts when the sky is clear (${new Date(c.start).toISOString()})`);
+  });
+
+  test('bad seeing is not a calibration sky; mediocre seeing in a clear sky is; a clouded night has none', () => {
+    const bad = solveNight({ site: SITE, start: W.start, end: W.end, candidates: [cand('M 31')], settings: SETTINGS, overheadMin: 8, efficiency: 0.75, conditions: (t: Date) => ({ observability: 90, seeingIdx: t.getTime() < hour(1) ? 8 : 6 }), mount: 'eq', calibration: { minutes: 30, fieldAt: field } });
+    const cb = bad.blocks.find((b) => b.kind === 'calibration')!;
+    assert.ok(cb.start >= hour(1) - 10 * 60e3 && cb.start <= hour(1) + 10 * 60e3, `starts once the seeing is not bad (${new Date(cb.start).toISOString()})`);
     const mediocre = () => ({ observability: 90, seeingIdx: 6 });
     const r = solveNight({ site: SITE, start: W.start, end: W.end, candidates: [cand('M 31')], settings: SETTINGS, overheadMin: 8, efficiency: 0.75, conditions: mediocre, mount: 'eq', calibration: { minutes: 30, fieldAt: field } });
     const c = r.blocks.find((b) => b.kind === 'calibration')!;
     assert.equal(c.start, W.start.getTime());
-    assert.match(c.reason, /none steadier/);
+    assert.match(c.reason, /first clear stretch/);
     const clouded = solveNight({ site: SITE, start: W.start, end: W.end, candidates: [cand('M 31')], settings: SETTINGS, overheadMin: 8, efficiency: 0.75, conditions: () => ({ observability: 5 }), mount: 'eq', calibration: { minutes: 30, fieldAt: field } });
     assert.equal(clouded.blocks.filter((b) => b.kind === 'calibration').length, 0);
     assert.ok(clouded.notes.some((n) => /focus calibration due/.test(n)));
     assert.ok(clouded.blocks.some((b) => b.kind === 'target'), 'collection goes on without it');
+  });
+
+  test('the stretch before the calibration is filled, even when it is shorter than the minimum block', () => {
+    // the sky clears at 1 h 50 min: the calibration goes there, 110 min after the start, with a 120-min minimum block
+    const clearAt = hour(110 / 60);
+    const conditions = (t: Date) => ({ observability: t.getTime() < clearAt ? 50 : 90, seeingIdx: 3 });
+    const r = solveNight({ site: SITE, start: W.start, end: W.end, candidates: [cand('M 31'), cand('M 45')], settings: { ...SETTINGS, minBlockMin: 120 }, overheadMin: 8, efficiency: 0.75, conditions, mount: 'eq', calibration: { minutes: 40, fieldAt: field } });
+    const c = r.blocks.find((b) => b.kind === 'calibration')!;
+    assert.ok(Math.abs(c.start - clearAt) <= 10 * 60e3, `calibration at ${new Date(c.start).toISOString()}`);
+    const before = r.blocks.filter((b) => b.end <= c.start);
+    assert.ok(before.length > 0 && before.every((b) => b.kind === 'target'), `before it: ${before.map((b) => `${b.kind} ${new Date(b.start).toISOString()}`).join(', ')}`);
+    assert.equal(before[before.length - 1].end, c.start, 'a target runs up to the calibration');
   });
 
   test('a calibration under way is placed from now, whatever the sky', () => {

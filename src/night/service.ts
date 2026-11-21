@@ -67,8 +67,6 @@ const OBSTRUCTION_AZ_HALF_DEG = 3;
 const OBSTRUCTION_AZ_MAX_DEG = 12;
 /** an obstruction hold is not ended by its own clear check sooner than this (the target was just seen blocked) */
 const HOLD_MIN_MS = 10 * 60_000;
-/** catalog targets the fillers (and Find targets) are drawn from */
-const FILLER_POOL = 120;
 /** a catalog target with at least this much integration counts as started: it is finished before new ones begin */
 const FILLER_STARTED_MIN = 10;
 /** refocus once the forecast temperature has moved this much since the last focus, or after this long */
@@ -412,7 +410,7 @@ export class PlanService extends SafeEmitter {
       if (restGoal && c.totalMin >= restGoal) continue;
       if (!restState(key, w.night, userRests)) started.add(key);
     }
-    const p = this.catalogPlan(site, w, settings, conditions, { limit: FILLER_POOL, filter, started });
+    const p = this.catalogPlan(site, w, settings, conditions, { limit: Infinity, filter, started });
     const candidates: Candidate[] = [];
     const rows = new Map<string, (typeof p.targets)[number]>();
     for (const r of p.targets) {

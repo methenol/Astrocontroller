@@ -92,9 +92,10 @@ const OWN_QUADRANT_AZ_CLEAR = 15;
 const ALTERNATES = 4;
 /** an hour the forecast puts below the floor keeps this share of its merit (advisory: still planned, fillers and all) */
 const CLOUDY_MERIT = 0.25;
-/** a focus calibration wants seeing at least this steady (7Timer); failing any, at most this bad */
-const CAL_SEEING_GOOD = SEEING_GOOD;
+/** a focus calibration wants seeing no worse than this (7Timer) */
 const CAL_SEEING_OK = SEEING_BAD - 1;
+/** and a clear sky: every slot of it at or above this observability (the clear window's, astro/weather.ts) */
+const CAL_CLEAR_SKY = 60;
 
 export type Quadrant = 'N' | 'E' | 'S' | 'W';
 export const quadrantOf = (az: number): Quadrant => {
@@ -698,8 +699,8 @@ export function solveNight(input: SolveInput): Solved {
   const lock = running && input.lock?.key === running.c.key ? input.lock : null;
   const lockedAt = (i: number) => !!lock && allSlots[i].t < lock.until;
 
-  // the focus calibration: the first stretch of its length that is clear and steady, outside the pins
-  // and the lock; steady seeing first, then any that is not bad. A clouded night has none.
+  // the focus calibration: the soonest stretch of its length that is clear (not merely above the plan's
+  // floor) with seeing that is not bad, outside the pins and the lock. A night with no clear stretch has none.
   const cal = placeCalibration();
   const calAt = (i: number) => !!cal && i >= cal.a && i < cal.b;
   function placeCalibration(): { a: number; b: number; field: CalibrationField; seeingIdx?: number; why: string; running?: boolean } | null {
@@ -715,20 +716,21 @@ export function solveNight(input: SolveInput): Solved {
       const xs = allSlots.slice(a, b).map((x) => x.seeingIdx).filter((x): x is number => x !== undefined);
       return xs.length ? Math.max(...xs) : undefined;
     };
-    for (const limit of [CAL_SEEING_GOOD, CAL_SEEING_OK]) {
-      for (let a = firstIdx; a + len <= n; a++) {
-        let ok = true;
-        for (let j = a; j < a + len && ok; j++) ok = !allSlots[j].cloudy && !pinnedAt(j) && !lockedAt(j) && (allSlots[j].seeingIdx === undefined || allSlots[j].seeingIdx! <= limit);
-        if (!ok) continue;
-        const f = fieldOf(a);
-        if (!f) continue;
-        const see = seeing(a, a + len);
-        const sky = allSlots.slice(a, a + len).map((x) => x.sky).filter((x): x is number => x !== null);
-        const why = see === undefined && !sky.length
-          ? "no forecast: the night's first slot"
-          : `the night's first ${limit === CAL_SEEING_GOOD ? 'clear, steady' : 'clear'} stretch${see !== undefined ? ` (seeing ${see}/8${limit === CAL_SEEING_GOOD ? '' : `: none steadier than ${CAL_SEEING_GOOD} tonight`})` : ''}${sky.length ? `, sky ${Math.min(...sky)}/100 or better` : ''}`;
-        return { a, b: a + len, field: f, seeingIdx: see, why };
+    for (let a = firstIdx; a + len <= n; a++) {
+      let ok = true;
+      for (let j = a; j < a + len && ok; j++) {
+        const x = allSlots[j];
+        ok = !pinnedAt(j) && !lockedAt(j) && (x.sky === null || x.sky >= CAL_CLEAR_SKY) && (x.seeingIdx === undefined || x.seeingIdx <= CAL_SEEING_OK);
       }
+      if (!ok) continue;
+      const f = fieldOf(a);
+      if (!f) continue;
+      const see = seeing(a, a + len);
+      const sky = allSlots.slice(a, a + len).map((x) => x.sky).filter((x): x is number => x !== null);
+      const why = see === undefined && !sky.length
+        ? "no forecast: the night's first slot"
+        : `the night's first clear stretch${see !== undefined ? ` (seeing ${see}/8)` : ''}${sky.length ? `, sky ${Math.min(...sky)}/100 or better` : ''}`;
+      return { a, b: a + len, field: f, seeingIdx: see, why };
     }
     notes.push('focus calibration due, but no clear stretch of its length tonight: collection goes on without it');
     return null;
@@ -812,6 +814,10 @@ export function solveNight(input: SolveInput): Solved {
   };
   const switchCost = (cv: Curve, i: number) => (i === firstIdx && cv.c.key === currentKey ? 0 : input.overheadMin);
 
+  // the next slot a fixed block (the calibration, a pin) holds, from each slot: the free stretch before it is filled whole,
+  // however short of a minimum block it is (nothing else can use it)
+  const nextFixed = new Int32Array(n + 1).fill(n);
+  for (let i = n - 1; i >= 0; i--) nextFixed[i] = calAt(i) || pinnedAt(i) ? i : nextFixed[i + 1];
   for (let i = firstIdx; i < n; i++) {
     if (calAt(i)) {
       close();
@@ -843,7 +849,8 @@ export function solveNight(input: SolveInput): Solved {
       continue;
     }
     const open: Array<{ cv: Curve; v: number; waiting: boolean }> = [];
-    const look = Math.min(minBlockSlots, n - i);
+    const toFixed = nextFixed[i] - i;
+    const look = Math.min(minBlockSlots, n - i, toFixed);
     for (const cv of cvs) {
       const isCur = !!live && live.cv === cv;
       const need = isCur ? curLeft : (remaining.get(cv) ?? 0);
@@ -858,10 +865,11 @@ export function solveNight(input: SolveInput): Solved {
       // a new block needs its target usable for the whole minimum block, however little it still needs:
       // a shorter run spends most of itself on the GoTo, focus and measurements before stacking. In the
       // night's last minutes (less than a minimum block left) no new target starts; the one shot just
-      // before, unbroken, may go on (no switch).
+      // before, unbroken, may go on (no switch). A stretch the calibration or a pin cuts short is filled whole.
       const prev = runs[runs.length - 1];
       const goesOn = isCur || (!!prev && prev.cv === cv && prev.endIdx === i);
-      if (!goesOn && look < minBlockSlots) continue;
+      const beforeFixed = nextFixed[i] < n && look === toFixed;
+      if (!goesOn && look < minBlockSlots && !beforeFixed) continue;
       let sum = 0;
       let ok = true;
       for (let j = i; j < i + look; j++) {
