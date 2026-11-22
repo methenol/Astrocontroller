@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
-import { fetchFile } from '../../drivers/dwarf/http.js';
+import { cardRoot, fetchFile, stripCardRoot } from '../../drivers/dwarf/http.js';
 import type { CameraName } from '../../drivers/dwarf/device.js';
 import { isFits } from '../fits.js';
 import type { CameraSource, StreamHub } from '../streams.js';
@@ -79,9 +79,10 @@ export function resolveLocalPath(p: string): string {
   throw new Error(`file not found: ${p} (looked in library, captures, workspace)`);
 }
 
-/** An SD-card path as the telescope's HTTP server wants it (under /DWARF3), never with "..". */
+/** An SD-card path as the telescope's HTTP server wants it (under the model's folder: /DWARF3, /DWARF_mini), never with "..". */
 export function devicePath(p: string): string {
-  const full = p.startsWith('/DWARF3') ? p : `/DWARF3${p.startsWith('/') ? '' : '/'}${p}`;
+  const rel = stripCardRoot(p.startsWith('/') ? p : `/${p}`);
+  const full = `${cardRoot()}${rel}`;
   if (full.split('/').includes('..')) throw new Error(`bad device path ${p}`);
   return full;
 }
@@ -114,7 +115,6 @@ async function stillAtExposure(hub: StreamHub, camera: CameraName, exposureS: nu
   const dwarf = hub.dwarf;
   // checked before the exposure is changed: the still itself would refuse only after it
   dwarf.assertNoOperation('a still with its own exposure');
-  dwarf.assertNoNdLock('a still with its own exposure');
   dwarf.assertCameraFree(camera, 'a still with its own exposure');
   return dwarf.exclusive(`taking a ${exposureS}s ${camera} still`, async () => {
     const cam = hub.camera(camera);

@@ -10,6 +10,7 @@ import { busyWith, isTracking, request, type Core, type Location } from './core.
 import { notePhotoState } from './photo-watch.js';
 import { noteCaptureState } from './session-finish.js';
 import { applyDeviceStateInfo } from './state.js';
+import { dwarfModel } from './model.js';
 import { timezoneOffsetHours } from './util.js';
 
 const log = logger('dwarf');
@@ -69,6 +70,8 @@ export class SystemControl {
       const fw = await http.getFirmware().catch(() => null);
       const st = this.core.store.state;
       st.device = { name: info.deviceName, serial: info.sn, ip: info.staIpAddress, firmware: fw?.version };
+      // album paths and FTP are rooted at the model's folder on the card
+      http.setCardRoot(dwarfModel(st.device) === 'mini' ? '/DWARF_mini' : '/DWARF3');
       if (info.sdCardInfo) st.storage = { availableGB: info.sdCardInfo.availableSize, totalGB: info.sdCardInfo.totalSize };
       this.core.store.changed();
     } catch (err) {

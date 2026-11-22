@@ -9,7 +9,7 @@ import { invalidateParamSchema } from './http/params.js';
 import { resetApiHealth } from './http/client.js';
 
 export { parseBigSafe } from './http/json.js';
-export { type ApiHealth, apiHealth, timeoutExplanation, fileUrl, fetchFile, API_TIMEOUT_MS, FILE_TIMEOUT_MS } from './http/client.js';
+export { type ApiHealth, type CardRoot, apiHealth, timeoutExplanation, fileUrl, fetchFile, cardRoot, setCardRoot, isCardRooted, stripCardRoot, API_TIMEOUT_MS, FILE_TIMEOUT_MS } from './http/client.js';
 export { type DeviceInfo, type FirmwareInfo, type ShootingModeDef, getDeviceInfo, redactDeviceInfo, getFirmware, getShootingModes, resolveShootingMode, SHOOTING_TECH_NAMES } from './http/device.js';
 export { type ParamDef, type ParamSchema, getParamSchema, invalidateParamSchema, buildParamSchema } from './http/params.js';
 export { type MediaItem, type DeleteOutcome, MEDIA_TYPES, getMediaCounts, listMedia, deleteMedia } from './http/album.js';

@@ -164,7 +164,6 @@ export function registerSystemTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
       timeout_s: z.number().min(1).max(600).optional(),
     },
     async ({ cmd, params, request_type, response_type, timeout_s }) => {
-      dwarf.assertNoNdLock('raw commands');
       dwarf.assertNoOperation('a raw command');
       return text((await dwarf.raw(cmd, params ?? {}, request_type, response_type, (timeout_s ?? 15) * 1000)) ?? 'no reply');
     },

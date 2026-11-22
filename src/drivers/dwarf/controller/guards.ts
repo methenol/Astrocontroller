@@ -11,19 +11,12 @@
  *   exposure, gain and filter must not change and no still may be taken (2026-10-12: the live-video
  *   watchdog set the wide exposure to auto 3 s after each wide stack start; the stack then shot
  *   6 frames/s and rejected every one, all night). Focus and mount motion are refused likewise.
- * - The ND lock: while the magnetic ND filter sits on the lenses for darks, any motion knocks it
- *   off and light frames are worthless. Persisted, so a restart mid-session keeps it. A running
- *   dark capture owns the tele camera like a stack does.
+ * - A running dark capture owns the tele camera like a stack does.
  */
-import fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { errMsg, logger } from '../../../log.js';
 import type { StackTracker, CameraName } from '../stacking.js';
 import { CAMERAS } from '../stacking.js';
 import type { StateStore } from './state.js';
-import { writeFileAtomic } from '../../../util/fs.js';
-
-const log = logger('dwarf');
 
 export class Guards {
   private readonly opContext = new AsyncLocalStorage<string>();
@@ -36,10 +29,7 @@ export class Guards {
   constructor(
     private readonly store: StateStore,
     private readonly stacks: StackTracker,
-    private readonly ndLockFile: string,
-  ) {
-    this.loadNdLock();
-  }
+  ) {}
 
   // ---- long operations -----------------------------------------------------
 
@@ -107,6 +97,12 @@ export class Guards {
   }
 
   /** A running dark capture (tele only) owns the camera: no setting may change under it. */
+  /** Light captures on either camera wait for a running dark capture: it holds the firmware's DSO mode. */
+  assertNoDarkCapture(what: string): void {
+    if (this.store.state.darkCapture?.state !== 'running') return;
+    throw new Error(`refused: ${what} while a dark capture is running; wait for its master (dark_frames action=status) or stop it (dark_frames action=stop)`);
+  }
+
   darkCaptureOwns(cam: CameraName): boolean {
     return cam === 'tele' && this.store.state.darkCapture?.state === 'running';
   }
@@ -134,50 +130,5 @@ export class Guards {
   assertNoStackForMotion(): void {
     const cam = CAMERAS.find((c) => this.stackOwnsCamera(c));
     if (cam) throw new Error(`refused: the ${cam} camera is live stacking (or a stack start was just sent); moving the mount now would ruin it. Stop it first (live_stacking action=stop).`);
-  }
-
-  // ---- ND lock -------------------------------------------------------------
-
-  /** A lock file that exists but cannot be read keeps the lock: the filter may well be fitted. */
-  private loadNdLock(): void {
-    let text: string;
-    try {
-      text = fs.readFileSync(this.ndLockFile, 'utf8');
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') log.warn(`cannot read ${this.ndLockFile}: ${errMsg(e)}; keeping the ND lock on`);
-      this.store.state.ndLock = (e as NodeJS.ErrnoException).code === 'ENOENT' ? null : { since: Date.now(), note: 'lock file unreadable' };
-      return;
-    }
-    try {
-      const v: unknown = JSON.parse(text);
-      const o = v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
-      this.store.state.ndLock = {
-        since: typeof o.since === 'number' && Number.isFinite(o.since) ? o.since : Date.now(),
-        note: typeof o.note === 'string' ? o.note : '',
-      };
-    } catch {
-      log.warn(`${this.ndLockFile} is not valid JSON; keeping the ND lock on`);
-      this.store.state.ndLock = { since: Date.now(), note: 'lock file unreadable' };
-    }
-  }
-
-  setNdLock(on: boolean, note = ''): void {
-    if (on) {
-      const lock = this.store.state.ndLock ?? { since: Date.now(), note };
-      writeFileAtomic(this.ndLockFile, JSON.stringify(lock));
-      this.store.publish({ ndLock: lock });
-      log.info(`ND filter fitted: motion and light frames locked (${note})`);
-    } else {
-      fs.rmSync(this.ndLockFile, { force: true });
-      this.store.publish({ ndLock: null });
-      log.info('ND filter removed: lock released');
-    }
-  }
-
-  assertNoNdLock(what: string): void {
-    if (!this.store.state.ndLock) return;
-    throw new Error(
-      `refused: ${what} while the ND filter is fitted for darks — any motion knocks the magnetic filter off, and light frames would be black. When the operator has removed the filter, call dark_frames action=nd_removed operator_confirmed=true, then motors_home (a hand-tilted scope has lost its motor position).`,
-    );
   }
 }

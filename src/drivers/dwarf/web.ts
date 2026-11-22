@@ -12,6 +12,7 @@ import type { Capabilities, DeviceSwitches, GotoTarget, SwitchView, WebTelescope
 import type { TelescopeState } from './controller/state.js';
 import type { PowerAction } from './controller/system.js';
 import type { ControlAction } from '../../web/routes/control.js';
+import { dwarfModel, MODEL_LABEL } from './controller/model.js';
 
 const LEVEL_PITCH_DEG = 90;
 /** the web UI's Burst button takes at least this many frames */
@@ -171,11 +172,16 @@ export function dwarfWeb(dwarf: Dwarf, hub: StreamHub): WebTelescope {
 
   return {
     driver: 'dwarf',
-    label: 'DWARFLAB Dwarf 3',
+    get label() {
+      return `DWARFLAB ${MODEL_LABEL[dwarfModel(dwarf.state.device) ?? 'dwarf3']}`;
+    },
     get state() {
       return dwarf.state as unknown as WebTelescope['state'];
     },
-    capabilities: CAPABILITIES,
+    // the mini's rotation has no reference: no motor-angle obstruction survey
+    get capabilities() {
+      return dwarfModel(dwarf.state.device) === 'mini' ? { ...CAPABILITIES, horizonSurvey: false } : CAPABILITIES;
+    },
     hub,
     location: () => dwarf.location(),
     requireLocation: () => dwarf.requireLocation(),

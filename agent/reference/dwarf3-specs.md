@@ -27,7 +27,7 @@ approximate). This unit: DWARF3_704420, serial D3001265B00067, firmware 1.5.3.9 
 | Astro | 440–690 nm (passes Hα) | broadband deep sky: galaxies, clusters, reflection nebulae |
 | Duo-Band | OIII 500.7 nm + Hα 656.3 nm | emission nebulae; cuts light pollution and moonlight |
 - **Solar filter:** magnetic, integrated, in the box [P]. Required for any Sun pointing.
-- **ND filter for dark frames:** the manual says to install the ND filter and "fully retract the lens cylinder (closed position)" [M 3.2.3.1]. **On this device the operator tilts the scope up by hand and fits the magnetic filter; parking or any motion knocks it off [V 2026-10-03].** Use `dark_frames action=nd_fitted` (locks all motion) and the dark-library skill.
+- **ND filter for dark frames:** the manual says to install the ND filter and "fully retract the lens cylinder (closed position)" [M 3.2.3.1]. The owner makes this unit's darks in the DWARFLAB app (dark-library skill).
 
 ## Exposure, gain and modes
 - Deep-sky exposure up to **60 s** [P]. Manufacturer guidance: 15–60 s and gain 60–80 [M]. **Auto mode** caps exposure at 15 s [M].

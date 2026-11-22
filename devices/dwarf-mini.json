@@ -38,9 +38,10 @@
   "sources": [
     "optics and sensor: digitalcameraworld.com, astrobackyard.com and skyatnightmagazine.com reviews (30 mm f/5, 150 mm, IMX662 1080p 2.9 µm; exposures up to 90 s; Astro, Duo-Band and dark filters)",
     "IMX662: ZWO ASI662MC page (full well 38.2 ke⁻, read noise 0.8 e⁻ in HCG)",
-    "data format, gain scale, dither and dark rules: assumed the same as the Dwarf 3 (same firmware family)"
+    "data format, gain scale, dither and dark rules: assumed the same as the Dwarf 3 (same firmware family)",
+    "black level: dark master 1 s / gain 60 / 37 °C of this unit, median 200 ADU (2026-11-21); tele exposures up to 180 s (camera schema, fw 1.1.4.19)"
   ],
   "notes": [
-    "Conversion gain, black level, read noise and the exposure list are estimates: measure them, and correct the exposure list from the device (get_camera_settings)."
+    "Conversion gain and read noise are estimates: measure them. The rotation axis has no home sensor: the driver counts its pulse moves from the power-on position (0.009° per pulse, 40,000 per turn), and homing and park turn it back there. Darks are shot behind its built-in dark filter."
   ]
 }

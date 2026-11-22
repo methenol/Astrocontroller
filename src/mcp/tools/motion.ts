@@ -60,7 +60,7 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
 
   tool(
     'move_motors',
-    'Move the motors. Returns when the telescope reports the move finished. If the motors have no reference (after power-on, while tracking after a GoTo, or after a failed astro routine), it stops tracking and homes them first by itself. Absolute: pitch ~2.5 parked/down, ~90 level (Alt-Az: altitude ≈ pitch − 90, so 135 ≈ 45° up); rotation ~159 after homing is the centre of travel. relative=true moves BY the given degrees instead. Directions (verified): rotation DEcreasing pans the view RIGHT; pitch increasing tilts UP. To centre a subject at pixel offset (dx right, dy down) from frame centre: rotation_deg = −dx·scale, pitch_deg = −dy·scale, with scale ≈ 0.0235°/px (wide) or 0.0015°/px (tele) for a 1920-px-wide frame (scale by 1920/width for smaller frames). speed 0.1-30 °/s (default 10). Waits until the motion completes.',
+    'Move the motors. Returns when the telescope reports the move finished. If the motors have no reference (after power-on, while tracking after a GoTo, or after a failed astro routine), it stops tracking and homes them first by itself. Absolute: pitch ~2.5 parked/down, ~90 level (Alt-Az: altitude ≈ pitch − 90, so 135 ≈ 45° up); rotation ~159 after homing is the centre of travel. relative=true moves BY the given degrees instead. Directions (verified): rotation DEcreasing pans the view RIGHT; pitch increasing tilts UP. To centre a subject at pixel offset (dx right, dy down) from frame centre: rotation_deg = −dx·scale, pitch_deg = −dy·scale, with scale ≈ 0.0235°/px (wide) or 0.0015°/px (tele) for a 1920-px-wide frame (scale by 1920/width for smaller frames). speed 0.1-30 °/s (default 10). Waits until the motion completes. Dwarf mini: rotation is degrees from its power-on position (−360…360, counted by the driver; motors_home returns it to 0), not available after a firmware routine turned the base (motor_position says why).',
     { rotation_deg: z.number().optional(), pitch_deg: z.number().optional(), relative: z.boolean().optional(), speed: z.number().min(0.1).max(30).optional() },
     async ({ rotation_deg, pitch_deg, relative, speed }) => {
       if (rotation_deg === undefined && pitch_deg === undefined) throw new Error('give rotation_deg and/or pitch_deg. Nothing was moved.');
@@ -71,13 +71,17 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
         }
       }
       const p = await dwarf.readMotorPositions();
-      if (!p.homed || p.rotationDeg === undefined || p.pitchDeg === undefined) {
+      // only the axes being moved need a position (the Dwarf mini's rotation has none once a routine turned it uncounted)
+      if (p.homed && rotation_deg !== undefined && p.rotationDeg === undefined && dwarf.state.motors.rotationUnknown) {
+        throw new Error(`a relative rotation cannot be computed: ${dwarf.state.motors.rotationUnknown}. Turn it with nudge instead. Nothing was moved.`);
+      }
+      if (!p.homed || (rotation_deg !== undefined && p.rotationDeg === undefined) || (pitch_deg !== undefined && p.pitchDeg === undefined)) {
         throw new Error(
           'the motors report no position (no reference: while tracking, after power-on or a failed astro routine), so a relative move cannot be computed. Give an absolute move instead (it homes first by itself), or call motors_home. Nothing was moved.',
         );
       }
       const res = await dwarf.moveTo(
-        { rotationDeg: rotation_deg !== undefined ? p.rotationDeg + rotation_deg : undefined, pitchDeg: pitch_deg !== undefined ? p.pitchDeg + pitch_deg : undefined },
+        { rotationDeg: rotation_deg !== undefined ? p.rotationDeg! + rotation_deg : undefined, pitchDeg: pitch_deg !== undefined ? p.pitchDeg! + pitch_deg : undefined },
         speed,
       );
       return text(`relative move (Δrotation ${rotation_deg ?? 0}°, Δpitch ${pitch_deg ?? 0}°): ${res}`);
@@ -98,7 +102,7 @@ export function registerMotionTools(tool: ToolFn, { dwarf, hub }: ToolContext): 
       if (angle === undefined) throw new Error('give direction or angle_deg');
       await dwarf.nudge(angle, speed ?? 0.5, seconds * 1000);
       const p = await dwarf.readMotorPositions().catch(() => null);
-      return text(`nudged ${direction ?? `${angle}°`} for ${seconds}s${p ? `; now rotation ${p.rotationDeg}°, pitch ${p.pitchDeg}°` : ''}`);
+      return text(`nudged ${direction ?? `${angle}°`} for ${seconds}s${p ? `; now ${p.rotationDeg !== undefined ? `rotation ${p.rotationDeg}°, ` : ''}pitch ${p.pitchDeg}°` : ''}`);
     },
   );
 

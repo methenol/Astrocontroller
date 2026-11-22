@@ -6,6 +6,7 @@ import path from 'node:path';
 import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
 import { downloadFiles, downloadOne, withLister, type FtpEntry } from './ftp.js';
+import { cardRoot, isCardRooted, stripCardRoot } from './http/client.js';
 import type { DeviceLibrary } from '../../library/device-library.js';
 import { isTransferredFolder, parseSessionFolder, type DeviceSession, type DeviceSessionEntry } from '../../library/sessions.js';
 
@@ -50,7 +51,7 @@ async function listSessions(withCounts: boolean): Promise<{ sessions: DeviceSess
  * Throws for a path that would leave the library.
  */
 function albumLocalPath(devicePath: string, day: string): string {
-  const rel = devicePath.replace(/\\/g, '/').replace(/^\/?DWARF3\//, '').replace(/^\/+/, '');
+  const rel = stripCardRoot(devicePath.replace(/\\/g, '/')).replace(/^\/+/, '');
   const parts = rel.split('/');
   if (!rel || parts.some((p) => p === '..' || p === '.' || p === '')) throw new Error(`bad device path ${devicePath}`);
   const root = path.resolve(config.paths.library);
@@ -61,7 +62,9 @@ function albumLocalPath(devicePath: string, day: string): string {
 }
 
 export const dwarfLibrary: DeviceLibrary = {
-  label: 'DWARFLAB Dwarf 3',
+  get label() {
+    return cardRoot() === '/DWARF_mini' ? 'DWARFLAB Dwarf mini' : 'DWARFLAB Dwarf 3';
+  },
   listSessions,
   async resolveSession(folderOrLatest) {
     if (folderOrLatest === 'latest') {
@@ -91,7 +94,7 @@ export const dwarfLibrary: DeviceLibrary = {
   },
   isSessionLight: (s, remote) => remote.startsWith(`${s.path}/`) && isSub({ name: path.posix.basename(remote) }),
   async deleteSession(s) {
-    const [r] = await (await album()).deleteMedia([{ filePath: `/DWARF3${s.path}`, mediaType: 4 }]);
+    const [r] = await (await album()).deleteMedia([{ filePath: `${cardRoot()}${s.path}`, mediaType: 4 }]);
     return { deleted: r.deleted, ...(r.note ? { note: r.note } : {}) };
   },
   downloadOne,
@@ -99,7 +102,7 @@ export const dwarfLibrary: DeviceLibrary = {
   album: {
     counts: async () => (await album()).getMediaCounts(),
     list: async (type, page, size) => (await album()).listMedia(type, page, size),
-    isDevicePath: (p) => p.startsWith('/DWARF3/') && !p.split('/').some((s) => s === '..' || s === '.'),
+    isDevicePath: (p) => isCardRooted(p) && p.split('/').length > 2 && !p.split('/').some((s) => s === '..' || s === '.'),
     fetch: async (p, maxBytes) => {
       const h = await album();
       return h.fetchFile(p, h.FILE_TIMEOUT_MS, maxBytes);

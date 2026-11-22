@@ -72,7 +72,6 @@ export class StackingControl {
   async startWith(camera: CameraName, o: StackRequest): Promise<string> {
     this.core.guards.assertNoOperation('starting live stacking');
     // refused before the mode switch and the settings writes: a refusal leaves the camera as it was
-    this.core.guards.assertNoNdLock('live stacking');
     return this.core.guards.preparingStack(camera, () => this.prepareAndStart(camera, o));
   }
 
@@ -117,7 +116,6 @@ export class StackingControl {
   async start(camera: CameraName, opts: { filterIndex?: number; force?: boolean } = {}): Promise<string> {
     const { guards, stacks } = this.core;
     guards.assertNoOperation('starting live stacking');
-    guards.assertNoNdLock('live stacking');
     await finishEndedSession(this.core, camera, 'the next stack');
     this.exposureAtStart[camera] = (await this.camera.exposureSeconds(camera).catch(() => null)) ?? undefined;
     stacks.startSent(camera);

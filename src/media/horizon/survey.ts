@@ -20,6 +20,7 @@ import { config } from '../../config.js';
 import { errMsg, logger } from '../../log.js';
 import type { Dwarf, HorizonSurvey } from '../../drivers/dwarf/device.js';
 import { PITCH_RANGE, ROTATION_RANGE } from '../../drivers/dwarf/controller/motors.js';
+import { dwarfModel } from '../../drivers/dwarf/controller/model.js';
 import { daylightRefusal } from '../../drivers/dwarf/controller/astro.js';
 import * as sky from '../../astro/sky.js';
 import { compass, describeMask, newMaskId, saveMask, unknownSectors, type HorizonMask } from '../../astro/horizon.js';
@@ -157,7 +158,8 @@ export function cappedAzimuths(capped: number[]): number[] {
 /** The survey's refusals, checked before anything is sent (a caller starting it in the background answers with them). Returns the site. */
 export function assertSurveyAllowed(dwarf: Dwarf) {
   if (surveyRunning(dwarf)) throw new Error('an obstruction survey is already running');
-  dwarf.assertNoNdLock('the obstruction survey');
+  // the survey maps motor angles to the sky: the mini's rotation has no reference, so no angle to map
+  if (dwarfModel(dwarf.state.device) === 'mini') throw new Error('the obstruction survey needs absolute rotation angles, and the Dwarf mini\'s rotation axis has no home sensor to give them');
   dwarf.assertNoOperation('the obstruction survey');
   dwarf.assertCameraFree('wide', 'the obstruction survey');
   const loc = dwarf.requireLocation();

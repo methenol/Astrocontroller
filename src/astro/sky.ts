@@ -200,6 +200,13 @@ export function j2000ToOfDate(raHours: number, decDeg: number, when = new Date()
   return { raHours: wrapHours(s.lon / 15), decDeg: s.lat };
 }
 
+/** Hour angle (hours, −12…12; + = west of the meridian) of a J2000 position at a site. */
+export function hourAngle(site: Site, raHours: number, decDeg: number, when = new Date()): number {
+  const lst = A.SiderealTime(A.MakeTime(when)) + site.lon / 15;
+  const ha = lst - j2000ToOfDate(raHours, decDeg, when).raHours;
+  return ((((ha + 12) % 24) + 24) % 24) - 12;
+}
+
 /** The J2000 position of a position on the equator and equinox of date (the inverse of j2000ToOfDate). */
 export function ofDateToJ2000(raHours: number, decDeg: number, when = new Date()): { raHours: number; decDeg: number } {
   const t = A.MakeTime(when);

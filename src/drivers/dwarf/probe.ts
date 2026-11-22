@@ -57,7 +57,6 @@ export function dwarfProbeDriver(dwarf: Dwarf): ProbeDriver {
     busy() {
       const st = dwarf.state;
       if (!st.connected || st.released) return 'the Dwarf is not connected';
-      if (st.ndLock) return 'the ND filter is fitted for darks';
       if (st.stacking.tele.state === 'running') return 'a tele stack is running: live_stacking action=stop first (test cohorts are shot before the stack)';
       if (st.darkCapture && /running|capturing/.test(String((st.darkCapture as { state?: string }).state ?? ''))) return 'dark frames are being taken';
       return null;

@@ -94,17 +94,6 @@ describe('Dwarf live stacking against the fake telescope', () => {
     assert.equal(fake.requestsFor(Cmd.TASK_MANAGER_SWITCH_SHOOTING_MODE).length, 0);
   });
 
-  test('a stack asked for under the ND lock is refused before the mode or any setting is touched', async () => {
-    dwarf.setNdLock(true, 'test');
-    try {
-      await assert.rejects(dwarf.startStackingWith('tele', { exposure: 15, gain: 80, filter: 'Astro', startedBy: 'ui' }), /refused: live stacking while the ND filter is fitted/);
-      for (const cmd of [Cmd.TASK_MANAGER_SWITCH_SHOOTING_MODE, Cmd.PARAM_SET_EXPOSURE, Cmd.ASTRO_START_CAPTURE_RAW_LIVE_STACKING]) assert.equal(fake.requestsFor(cmd).length, 0);
-      assert.equal(fake.requests.length, 0, `nothing sent: ${fake.requests.map((r) => r.cmd).join(', ')}`);
-    } finally {
-      dwarf.setNdLock(false);
-    }
-  });
-
   test('a start the firmware neither answers nor reports fails with an explanation', async () => {
     fake.silent(Cmd.ASTRO_START_WIDE_CAPTURE_LIVE_STACKING);
     await assert.rejects(dwarf.startStacking('wide'), /neither acknowledged/);

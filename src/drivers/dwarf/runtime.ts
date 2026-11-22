@@ -72,8 +72,8 @@ function create({ agent }: DriverDeps): DriverRuntime {
       ['stack supervisor', () => stackSupervisor.stop()],
       ['wire log', () => flushWire()],
     ],
-    describeTarget: () => `Dwarf 3 at ${config.dwarf.host}`,
+    describeTarget: () => `Dwarf at ${config.dwarf.host}`,
   };
 }
 
-export const dwarfDriver: TelescopeDriver = { id: 'dwarf', label: 'DWARFLAB Dwarf 3', create };
+export const dwarfDriver: TelescopeDriver = { id: 'dwarf', label: 'DWARFLAB Dwarf 3 / mini', create };

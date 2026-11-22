@@ -790,6 +790,8 @@ export class DwarfLink extends SafeEmitter {
     const timeout = opts.timeout ?? this.t.requestTimeoutMs;
     const sentAt = Date.now();
     wire('>', `${cmdName(cmd)}${opts.bestEffort ? ' [best-effort]' : ''}`, params);
+    // every command sent, whoever sent it (the mini's rotation count watches for routines that turn it)
+    this.emit('sent', cmd, params);
     return new Promise((resolve, reject) => {
       const entry: Pending = {
         resolve,

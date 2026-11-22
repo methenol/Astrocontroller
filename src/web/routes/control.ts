@@ -2,7 +2,7 @@
  * Manual control from the web UI, for every driver. Each action is validated and checked against
  * what the driver's telescope can do before anything is sent; GoTo targets are resolved and
  * checked here (altitude, the Sun) and the driver only carries them out. The drivers' own guards
- * (the Dwarf's ND lock, exclusive operations, a running stack) still apply.
+ * (exclusive operations, a running stack) still apply.
  */
 import express, { type Router } from 'express';
 import { z } from 'zod';

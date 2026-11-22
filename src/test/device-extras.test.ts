@@ -34,11 +34,9 @@ describe('the device switches the SDK never registered', () => {
     dwarf = new Dwarf({ host: '127.0.0.1', port: fake.port, linkTiming: { requestTimeoutMs: 300 } });
     dwarf.link.start();
     await dwarf.link.waitConnected(2000);
-    dwarf.setNdLock(true, 'test');
   });
 
   afterEach(async () => {
-    dwarf.setNdLock(false);
     dwarf.stop();
     await fake.stop();
   });

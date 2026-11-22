@@ -7,7 +7,7 @@
 import { errMsg, logger } from '../../log.js';
 import type { DarkFrameRef, FactsSource, LiveFacts } from '../../astro/acquisition/index.js';
 import { listDir } from './ftp.js';
-import { resolveShootingMode } from './http.js';
+import { cardRoot, resolveShootingMode } from './http.js';
 import type { Dwarf } from './device.js';
 
 const log = logger('dwarf.acquisition');
@@ -71,7 +71,7 @@ export async function dwarfDarkFrames(): Promise<DarkFrameRef[]> {
       if (f.isDir || !/\.fits?$/i.test(f.name)) continue;
       const m = f.name.match(/^(?:dark|bias)_(?:exp_([\d.]+)_)?gain_(\d+)_bin_\d+(?:_(-?\d+)C)?(?:_stack_(\d+))?\.fits?$/i);
       out.push({
-        path: `/DWARF3${dir}/${f.name}`,
+        path: `${cardRoot()}${dir}/${f.name}`,
         kind,
         exposureS: m?.[1] !== undefined ? Number(m[1]) : kind === 'bias' ? 0 : undefined,
         gain: m ? Number(m[2]) : undefined,
@@ -89,5 +89,5 @@ export async function dwarfSessionSubs(folder: string): Promise<string[]> {
   return (await listDir(`/Astronomy/${folder}`))
     .filter((f) => !f.isDir && /\.fits$/i.test(f.name) && !/^(stacked|failed_)/i.test(f.name))
     .sort((a, b) => stamp(a.name).localeCompare(stamp(b.name)))
-    .map((f) => `/DWARF3/Astronomy/${folder}/${f.name}`);
+    .map((f) => `${cardRoot()}/Astronomy/${folder}/${f.name}`);
 }

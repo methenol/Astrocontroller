@@ -210,7 +210,6 @@ let lastSweepShot: { filter: string; exposureS?: number; gain?: number } | null 
 export async function measureTele({ dwarf, hub }: FocusDeps, o: { exposureS?: number; gain?: number; crop?: Crop } = {}): Promise<{ sharp: StarSharpness; img: FloatImage; settings: string }> {
   // checked before anything is changed: a refusal half way would leave the gain behind
   dwarf.assertNoOperation('a focus measurement');
-  dwarf.assertNoNdLock('a focus measurement');
   dwarf.assertCameraFree('tele', 'a focus measurement');
   return dwarf.exclusive('measuring focus', async () => {
     const filter = await filterOf(dwarf);
@@ -384,7 +383,6 @@ export async function starFocusSweep(deps: FocusDeps, o: FocusSweepOptions = {})
   checkSweepOptions(o);
   const busy = dwarf.isBusy();
   if (busy) throw new Error(`refusing to sweep focus while ${busy} is running — stop it first (a refocus takes the tele camera out of a stack)`);
-  dwarf.assertNoNdLock('a star-focus sweep');
   // isBusy() only sees a stack once it runs: one that is starting owns the camera too
   dwarf.assertCameraFree('tele', 'a star-focus sweep');
   // one sweep at a time: the agent and the web UI fighting over the focuser measure nothing

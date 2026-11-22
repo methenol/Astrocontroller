@@ -1,12 +1,25 @@
-/** The dark-frame library: an ND session (lock, masters, unlock). */
+/** The dark-frame library: list, capture (in the background), status, stop. */
 import { z } from 'zod';
 import { errMsg } from '../../log.js';
 import { round } from '../../drivers/dwarf/device.js';
+import { dwarfModel } from '../../drivers/dwarf/controller/model.js';
+import { withAstroBusyRecovery } from './astro.js';
 import { listDir } from '../../drivers/dwarf/ftp.js';
 import { exposureArgSeconds, text, type ToolContext, type ToolFn } from './common.js';
 
 const DARK_DIR = '/Astronomy/CALI_FRAME/dark/cam_0';
 const DEFAULT_FRAMES = 20;
+
+/**
+ * The firmware's gain code (gainIndex) for a gain, from the DWARFLAB app's table, shared by the Dwarf 3
+ * and the Dwarf mini (stevejcl/dwarf_python_api AllowedGainsD3; matches this Dwarf 3's dark list:
+ * gain 40 = 12, 60 = 18): 0, 2, 5 are 0, 1, 2, then 0.3 per gain step of 10 from 10 = 3 up to 240 = 72.
+ */
+export function darkGainIndex(gain: number): number | null {
+  const low: Record<number, number> = { 0: 0, 2: 1, 5: 2 };
+  if (gain in low) return low[gain];
+  return Number.isInteger(gain) && gain >= 10 && gain <= 240 && gain % 10 === 0 ? (gain / 10) * 3 : null;
+}
 
 export function registerDarkTools(tool: ToolFn, { dwarf }: ToolContext): void {
   const capture = () => {
@@ -23,31 +36,20 @@ export function registerDarkTools(tool: ToolFn, { dwarf }: ToolContext): void {
 
   tool(
     'dark_frames',
-    'Dark-frame library (tele camera). An ND session: the operator fits the magnetic ND filter over the lenses (they tilt the scope by hand) -> nd_fitted (locks every motion and light capture: moving or parking would knock the filter off) -> capture each master (runs in the background, ~frames x exposure + 1 min; you get an event when it is saved) -> the operator removes the filter -> nd_removed. Actions: list (masters on the scope, firmware codes, sensor temperature), nd_fitted, capture, status, stop, nd_removed. NEVER move, park or home the scope during an ND session.',
+    'Dark-frame library (tele camera). Actions: list (masters on the scope, firmware codes, sensor temperature), capture (runs in the background, ~frames x exposure + 1 min; you get an event when the master is saved), status, stop. Dwarf mini (telescope_status.device.name DWARF_mini_…): it closes its own built-in dark filter for each capture, so capture whenever the scope is idle; the scope may stay where it is. Dwarf 3: it has no dark filter and the owner makes its darks in the DWARFLAB app: capture only when the owner asks and says the lens is covered.',
     {
-      action: z.enum(['list', 'nd_fitted', 'capture', 'status', 'stop', 'nd_removed']),
+      action: z.enum(['list', 'capture', 'status', 'stop']),
       exposure_s: z.number().positive().optional(),
       gain: z.number().min(0).optional(),
       frames: z.number().int().min(5).max(20).optional().describe('frames stacked into the master (default 20, the firmware maximum)'),
-      operator_confirmed: z.boolean().optional().describe('nd_fitted / nd_removed: the operator told you the ND filter is on / off'),
-      nd_filter_confirmed: z.boolean().optional().describe('capture: same as calling nd_fitted first'),
     },
-    async ({ action, exposure_s, gain, frames, operator_confirmed, nd_filter_confirmed }) => {
+    async ({ action, exposure_s, gain, frames }) => {
       switch (action) {
         case 'status':
-          return text({ capture: capture(), ndLock: dwarf.state.ndLock ?? null, sensorNowC: dwarf.state.cmosTempC.tele });
+          return text({ capture: capture(), sensorNowC: dwarf.state.cmosTempC.tele });
         case 'stop':
           await dwarf.stopDarks();
           return text({ stopped: true, capture: capture() });
-        case 'nd_fitted':
-          if (operator_confirmed !== true) throw new Error('Only after the operator has said the ND filter is on: call again with operator_confirmed=true.');
-          dwarf.setNdLock(true, 'operator confirmed the ND filter');
-          return text('ND session started: motion, homing, GoTo, calibration, stacking and tracking are locked until nd_removed. Do not move or park the scope.');
-        case 'nd_removed':
-          if (operator_confirmed !== true) throw new Error('Only after the operator has said the ND filter is off: call again with operator_confirmed=true.');
-          if (dwarf.state.darkCapture?.state === 'running') throw new Error('a dark capture is still running; wait for it (status) or stop it first');
-          dwarf.setNdLock(false);
-          return text('ND session ended, motion unlocked. The scope was tilted by hand, so its motor position is unknown: run motors_home before any pointing.');
         case 'list': {
           const firmwareList = await dwarf.darkFrameList().catch((e) => ({ error: errMsg(e) }));
           const files = await listDir(DARK_DIR).catch((e) => {
@@ -64,18 +66,14 @@ export function registerDarkTools(tool: ToolFn, { dwarf }: ToolContext): void {
                   stack: Number(f.name.match(/stack_(\d+)/)?.[1] ?? 1),
                 }))
             : files;
-          return text({ sensorNowC: dwarf.state.cmosTempC.tele, ndLock: dwarf.state.ndLock ?? null, capture: capture(), firmwareList, masterFiles });
+          return text({ sensorNowC: dwarf.state.cmosTempC.tele, capture: capture(), firmwareList, masterFiles });
         }
         case 'capture':
           break;
       }
       if (exposure_s === undefined || gain === undefined) throw new Error('exposure_s and gain are required. Nothing was captured.');
-      if (!dwarf.state.ndLock && nd_filter_confirmed !== true) {
-        throw new Error(
-          'Ask the operator to fit the ND filter (no parking: they tilt the scope by hand), wait for their confirmation, then dark_frames action=nd_fitted operator_confirmed=true. Nothing was captured.',
-        );
-      }
-      // refused before the lock and the mode switch: a refusal must leave the telescope as it was
+      const ownFilter = dwarfModel(dwarf.state.device) === 'mini';
+      // refused before the mode switch: a refusal must leave the telescope as it was
       if (dwarf.state.darkCapture?.state === 'running') throw new Error('a dark capture is already running (dark_frames action=status). Nothing was captured.');
       dwarf.assertNoOperation('a dark capture');
       // the switch to DSO mode ends a stack on either camera
@@ -83,25 +81,22 @@ export function registerDarkTools(tool: ToolFn, { dwarf }: ToolContext): void {
       const listed = await dwarf.darkFrameList();
       // the firmware addresses exposure and gain by its own index codes; its dark list pairs them with names
       // exposure names are "15" or "1/2" (parseFloat would read "1/2" as 1 s); within 1 %, so 1/1000 and 1/2000 stay apart
-      const expHit = listed.find((d) => Math.abs(exposureArgSeconds(d.exposure) - exposure_s) <= exposure_s * 0.01);
-      const gainHit = listed.find((d) => Math.abs(parseFloat(d.gain) - gain) < 0.01);
-      if (!gainHit) {
-        throw new Error(
-          `no known gain code for gain ${gain}: the firmware's dark list only covers gains ${[...new Set(listed.map((d) => d.gain))].join(', ') || 'none'}. Capture a dark at that gain once with the DWARFLAB app, then this tool can repeat it.`,
-        );
-      }
-      if (!expHit) {
-        throw new Error(
-          `no known exposure code for ${exposure_s} s: the firmware's dark list covers ${[...new Set(listed.map((d) => d.exposure))].join(', ') || 'none'}. Capture that exposure once with the DWARFLAB app, then this tool can repeat it.`,
-        );
-      }
-      // the lock only once the request is known to be valid
-      if (!dwarf.state.ndLock) dwarf.setNdLock(true, 'confirmed with the first capture');
+      // the codes come from the dark list when it has them; else exposure from the camera's own parameter
+      // codes and gain from the app's table (a new telescope has no darks yet: the Dwarf mini, 2026-11-21)
+      const listedExp = listed.find((d) => Math.abs(exposureArgSeconds(d.exposure) - exposure_s) <= exposure_s * 0.01);
+      const listedGain = listed.find((d) => Math.abs(parseFloat(d.gain) - gain) < 0.01);
+      const expIndex = listedExp?.expIndex ?? (await dwarf.exposureCode('tele', exposure_s));
+      const gainIndex = listedGain?.gainIndex ?? darkGainIndex(gain);
+      if (gainIndex === null) throw new Error(`no gain code for gain ${gain}: darks take 0, 2, 5 or a multiple of 10 from 10 to 240. Nothing was captured.`);
+      if (expIndex === null) throw new Error(`the tele camera has no ${exposure_s} s exposure (camera_settings lists them). Nothing was captured.`);
+      const binIndex = listedExp?.binIndex ?? listed[0]?.binIndex ?? 0;
+      const binName = listedExp?.bin || listed[0]?.bin || 'bin1';
       const n = frames ?? DEFAULT_FRAMES;
       await dwarf.ensureMode('DSO');
-      await dwarf.captureDarks({ expIndex: expHit.expIndex, gainIndex: gainHit.gainIndex, binIndex: expHit.binIndex, frames: n, exposureS: exposure_s, gain });
+      // -11501 with nothing running is the stuck astro service (the Dwarf mini after a stack stop, 2026-11-21): recover, start again
+      await withAstroBusyRecovery(dwarf, 'a dark capture', () => dwarf.captureDarks({ expIndex, gainIndex, binIndex, frames: n, exposureS: exposure_s, gain }));
       return text(
-        `dark capture running in the background: ${exposure_s} s, gain ${gain}, ${expHit.bin || 'bin1'}, ${n} frames, ≈${Math.ceil((n * exposure_s) / 60) + 1} min, sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. The telescope never acknowledges this command; Astrocontroller detects the finished master when it appears in CALI_FRAME and wakes you with an event (dark master saved, or why it failed). End your turn now; on that event start the next master. The scope must not move until the operator has removed the ND filter.`,
+        `dark capture running in the background: ${exposure_s} s, gain ${gain}, ${binName}, ${n} frames, ≈${Math.ceil((n * exposure_s) / 60) + 1} min, sensor ${dwarf.state.cmosTempC.tele ?? '?'} °C. The telescope never acknowledges this command; Astrocontroller detects the finished master when it appears in CALI_FRAME and wakes you with an event (dark master saved, or why it failed). End your turn now; on that event start the next master.${ownFilter ? ' The Dwarf mini shoots it behind its own dark filter.' : ' Keep the lens covered until it is saved.'}`,
       );
     },
   );

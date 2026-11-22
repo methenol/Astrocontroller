@@ -60,7 +60,6 @@ export function dwarfCalibrationDriver(dwarf: Dwarf, hub: StreamHub, facts = dwa
     busy() {
       const st = dwarf.state;
       if (!st.connected || st.released) return 'the Dwarf is not connected';
-      if (st.ndLock) return 'the ND filter is fitted for darks';
       if (st.stacking.tele.state === 'running') return 'a tele stack is running: live_stacking action=stop first';
       const op = dwarf.isBusy();
       if (op) return `${op} is running`;

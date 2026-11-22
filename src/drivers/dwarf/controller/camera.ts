@@ -475,6 +475,29 @@ export class CameraControl {
     return name ? exposureLabelSeconds(name) : null;
   }
 
+  /**
+   * The firmware's exposure code for a tele exposure of `seconds` (the exp parameter's value code,
+   * which its dark list and dark capture use as expIndex: 15 s = 156, 30 s = 159, 120 s = 165 on both
+   * models), or null when the camera has no such exposure. Within 1 %, so 1/1000 and 1/2000 stay apart.
+   */
+  async exposureCode(camera: CameraName, seconds: number): Promise<number | null> {
+    const def = (await this.schema()).cameras[camId(camera)]?.exp;
+    const hit = ((def?.values ?? []) as Array<{ name: string; value: number }>).find((v) => {
+      const s = exposureLabelSeconds(v.name);
+      return s !== null && Math.abs(s - seconds) <= seconds * 0.01;
+    });
+    return hit ? hit.value : null;
+  }
+
+  /** The current manual exposure's own label ("10", "1/8"), to put it back later; null = auto or not reported. */
+  async exposureLabel(camera: CameraName): Promise<string | null> {
+    const def = (await this.schema()).cameras[camId(camera)]?.exp;
+    if (!def) return null;
+    const live = this.core.params.get(String(def.paramId));
+    if (!live || live.mode === 0) return null;
+    return ((def.values ?? []) as Array<{ name: string; value: number }>).find((v) => v.value === live.value)?.name ?? null;
+  }
+
   /** The tele filter in use: the live value, else the schema's (stale) one, else VIS. */
   async currentFilterIndex(): Promise<number> {
     const def = (await this.schema()).cameras[0]?.filterType;
@@ -490,9 +513,9 @@ export class CameraControl {
 
   /** Take a still photo and return the album entry it produced (null if it finished but none appeared). */
   async takePhoto(camera: CameraName): Promise<http.MediaItem | null> {
-    this.core.guards.assertNoNdLock('taking a photo');
     this.core.guards.assertNoOperation('taking a photo');
     this.core.guards.assertCameraFree(camera, 'taking a photo');
+    this.core.guards.assertNoDarkCapture('taking a photo');
     if (this.state.photoStuckSince?.[camera]) throw new Error(stuckPhotoMessage(camera));
     // an ended stacking session not finished leaves a tele photo unanswered (wire logs 2026-10-10..12)
     await finishEndedSession(this.core, camera, 'a photo');
@@ -561,9 +584,9 @@ export class CameraControl {
 
   async burst(camera: CameraName, count: number): Promise<string> {
     if (!Number.isInteger(count) || count < 1 || count > BURST_MAX) throw new Error(`a burst is a whole number of frames up to ${BURST_MAX} (got ${count})`);
-    this.core.guards.assertNoNdLock('a burst');
     this.core.guards.assertNoOperation('a burst');
     this.core.guards.assertCameraFree(camera, 'a burst');
+    this.core.guards.assertNoDarkCapture('a burst');
     const { def, switched } = await this.modeFor(camera, 'burst', 'burstCount', 'a burst');
     if (!def) throw new Error('a burst is not available: the telescope lists no burst count');
     await this.setShootingTech('burst');
@@ -586,9 +609,9 @@ export class CameraControl {
   async record(camera: CameraName, action: 'start' | 'stop'): Promise<string> {
     let switched: string | undefined;
     if (action === 'start') {
-      this.core.guards.assertNoNdLock('recording video');
       this.core.guards.assertNoOperation('recording video');
       this.core.guards.assertCameraFree(camera, 'recording video');
+      this.core.guards.assertNoDarkCapture('recording video');
       ({ switched } = await this.modeFor(camera, 'video', undefined, 'recording video'));
       await this.setShootingTech('video');
     }
@@ -604,9 +627,9 @@ export class CameraControl {
   async timelapse(camera: CameraName, action: 'start' | 'stop', intervalS?: number, totalS?: number): Promise<string> {
     let switched: string | undefined;
     if (action === 'start') {
-      this.core.guards.assertNoNdLock('a timelapse');
       this.core.guards.assertNoOperation('a timelapse');
       this.core.guards.assertCameraFree(camera, 'a timelapse');
+      this.core.guards.assertNoDarkCapture('a timelapse');
       ({ switched } = await this.modeFor(camera, 'timelapse', 'timelapseIntervalTime', 'a timelapse'));
       await this.setShootingTech('timelapse');
       if (intervalS !== undefined) await this.setSetting(camera, 'timelapseIntervalTime', intervalS);

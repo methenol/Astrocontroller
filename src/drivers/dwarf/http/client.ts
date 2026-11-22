@@ -126,9 +126,30 @@ export async function call<T>(method: 'GET' | 'POST', path: string, body?: unkno
   return json.data as T;
 }
 
-/** A device path that stays on the card: absolute, no `..`, no empty or control characters. */
+/**
+ * The device's folder on the SD card, which album paths start with and FTP is rooted at: /DWARF3 on
+ * the Dwarf 3, /DWARF_mini on the Dwarf mini (verified 2026-11-21: /DWARF3/… answers 404 there).
+ * Set from the device info on connect (one telescope per process).
+ */
+export type CardRoot = '/DWARF3' | '/DWARF_mini';
+let root: CardRoot = '/DWARF3';
+export const cardRoot = (): CardRoot => root;
+export function setCardRoot(r: CardRoot): void {
+  root = r;
+}
+const ROOT_RE = /^\/?(?:DWARF3|DWARF_mini)(?=\/|$)/;
+/** A device path under either model's folder ("/DWARF3/…", "/DWARF_mini/…"). */
+export const isCardRooted = (p: string): boolean => ROOT_RE.test(p);
+/** A device path without its model folder: "/DWARF_mini/Astronomy/X" → "/Astronomy/X". */
+export const stripCardRoot = (p: string): string => p.replace(ROOT_RE, '');
+
+/**
+ * A device path that stays on the card: absolute, no `..`, no empty or control characters. A path
+ * under the other model's folder (an old note, a prompt written for the Dwarf 3) is moved to this one's.
+ */
 function cardPath(devicePath: string): string {
-  const p = devicePath.startsWith('/') ? devicePath : `/${devicePath}`;
+  const q = devicePath.startsWith('/') ? devicePath : `/${devicePath}`;
+  const p = isCardRooted(q) ? `${root}${stripCardRoot(q)}` : q;
   if (p.split('/').some((s) => s === '..' || s === '.')) throw new Error(`not a card path: ${devicePath}`);
   if (/[\x00-\x1f]/.test(p)) throw new Error(`not a card path: ${JSON.stringify(devicePath)}`);
   return p;

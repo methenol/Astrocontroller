@@ -43,6 +43,11 @@ const AF_DONE = 3;
 const AF_IDLE = 0;
 /** How long after the routine ends its result code is still awaited. */
 const AF_RESULT_GRACE_MS = 400;
+/** CODE_FOCUS_EXP_TOO_LONG: contrast autofocus refused under a long manual tele exposure (e.g. one left by DSO imaging). */
+export const AF_EXPOSURE_TOO_LONG = -15106;
+
+/** A normal autofocus the firmware refused because the tele exposure is too long; nothing moved. */
+export class AutofocusExposureError extends Error {}
 
 export interface FocusTiming {
   /** one single step every `stepMs` */
@@ -211,6 +216,9 @@ export class Focuser {
       );
     }
     const after = await position();
+    if (!astro && code === AF_EXPOSURE_TOO_LONG) {
+      throw new AutofocusExposureError(`autofocus (normal) refused: ${errorText(code)} (focus position ${before ?? '?'} → ${after ?? '?'})`);
+    }
     if (astro && before !== undefined && after !== undefined && Math.abs(after - before) <= AF_UNMOVED_UNITS) {
       throw new Error(
         `astro autofocus FAILED: it ended after ${secs} s WITHOUT MOVING THE FOCUSER (position ${before} before, ${after} after). The telescope gave up; the focus is unchanged and not verified. Measure it (star_sharpness); if the stars are soft or ring-shaped, run star_focus (a sweep with measured positions). Common causes: no or too few stars in the tele view (cloud, wrong exposure), or the stars too far out of focus to detect — start from focus_position action=infinity.`,

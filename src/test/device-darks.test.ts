@@ -37,11 +37,9 @@ describe('Dwarf dark masters against the fake telescope', () => {
     };
     dwarf.link.start();
     await dwarf.link.waitConnected(2000);
-    dwarf.setNdLock(true, 'test');
   });
 
   afterEach(async () => {
-    dwarf.setNdLock(false);
     dwarf.stop();
     await fake.stop();
   });
@@ -49,12 +47,6 @@ describe('Dwarf dark masters against the fake telescope', () => {
   // 20 x 15 ms "exposures": the master can exist after 300 ms
   const capture = () => dwarf.captureDarks({ expIndex: 156, gainIndex: 18, binIndex: 0, frames: 20, exposureS: 0.015, gain: 60 });
   const master = { name: 'dark_exp_0.015000_gain_60_bin_1_temp_13_stack_20.fits', size: 2000, isDir: false, modifiedAt: 'Oct 12 05:40' };
-
-  test('refused without the ND lock; nothing is sent', async () => {
-    dwarf.setNdLock(false);
-    await assert.rejects(capture(), /refused: darks need the ND filter/);
-    assert.equal(fake.requestsFor(DARK).length, 0);
-  });
 
   test('the new master appearing ends the capture as done; an older master is not taken for it', async () => {
     files = [OLD, { ...master, modifiedAt: 'Oct 11 01:00' }];
@@ -82,16 +74,6 @@ describe('Dwarf dark masters against the fake telescope', () => {
     assert.equal(dwarf.state.darkCapture?.state, 'running');
     await sleep(150);
     assert.equal(fake.requestsFor(DARK).length, 1);
-  });
-
-  test('the ND lock released while the capture lists the SD card: nothing is started', async () => {
-    listFails = 1;
-    const started = capture();
-    dwarf.setNdLock(false);
-    await assert.rejects(started, /ND lock was released while the capture was being prepared/);
-    await sleep(150);
-    assert.equal(fake.requestsFor(DARK).length, 0);
-    assert.notEqual(dwarf.state.darkCapture?.state, 'running');
   });
 
   test('one failed listing is retried', async () => {
@@ -144,12 +126,33 @@ describe('Dwarf dark masters against the fake telescope', () => {
     assert.equal(dwarf.isBusy(), 'a dark capture');
     await assert.rejects(dwarf.setSetting('tele', 'exposure', 'auto'), /refused: a dark capture is running on the tele camera; changing its exposure/);
     await assert.rejects(dwarf.setShootingMode('Normal'), /refused: a dark capture is running.*changing the shooting mode/);
-    await assert.rejects(dwarf.takePhoto('wide'), /refused: taking a photo while the ND filter is fitted/);
-    await assert.rejects(dwarf.burst('wide', 5), /refused: a burst while the ND filter is fitted/);
+    await assert.rejects(dwarf.takePhoto('wide'), /refused: taking a photo while a dark capture is running/);
+    await assert.rejects(dwarf.burst('wide', 5), /refused: a burst while a dark capture is running/);
     assert.equal(await dwarf.autoExposureForLiveView('tele'), null);
     await assert.rejects(dwarf.recoverAstroService(), /refused: a dark capture is running; the recovery/);
     await assert.rejects(dwarf.autofocus('astro'), /refused: a dark capture is running on the tele camera; an autofocus/);
     for (const cmd of [Cmd.PARAM_SET_EXPOSURE, Cmd.TASK_MANAGER_SWITCH_SHOOTING_MODE, Cmd.TASK_MANAGER_SWITCH_SHOOTING_TECH]) assert.equal(fake.requestsFor(cmd).length, 0);
     await dwarf.stopDarks();
+  });
+
+  test('masters split by sensor temperature end the capture once their frames add up', async () => {
+    await capture();
+    files = [OLD, { name: 'dark_exp_0.015000_gain_60_bin_1_36C_stack_12.fits', size: 2000, isDir: false, modifiedAt: 'Oct 12 05:40' }];
+    await sleep(500);
+    assert.equal(dwarf.state.darkCapture?.state, 'running', '12 of 20 frames is not the whole capture');
+    files = [...files, { name: 'dark_exp_0.015000_gain_60_bin_1_37C_stack_8.fits', size: 2000, isDir: false, modifiedAt: 'Oct 12 05:41' }];
+    await sleep(300);
+    assert.equal(dwarf.state.darkCapture?.state, 'done');
+    assert.match(dwarf.state.darkCapture?.master ?? '', /36C_stack_12.*37C_stack_8/);
+  });
+
+  test('a card with no dark folder yet (FTP 550) starts the capture', async () => {
+    dwarf.listSdDir = async () => {
+      throw Object.assign(new Error('550 No such file or directory'), { code: 550 });
+    };
+    await capture();
+    assert.equal(dwarf.state.darkCapture?.state, 'running');
+    await sleep(150);
+    assert.equal(fake.requestsFor(DARK).length, 1);
   });
 });

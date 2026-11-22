@@ -1,4 +1,5 @@
 import { logger, errMsg } from '../../log.js';
+import { dwarfModel } from './controller/model.js';
 import { config } from '../../config.js';
 import { Dwarf, round } from './device.js';
 import { findObject } from '../../astro/catalog.js';
@@ -170,7 +171,8 @@ export class TravelGuard {
     if (this.now() - (d.state.motors.updatedAt ?? 0) >= pollMs) await d.readMotorPositions();
     const rot = d.state.motors.rotationDeg;
     const at = d.state.motors.updatedAt ?? this.now();
-    if (rot === undefined) return;
+    // the Dwarf mini's rotation has no stops (its angle is a count from power-on): nothing to forecast
+    if (rot === undefined || dwarfModel(d.state.device) === 'mini') return;
     if (this.samples.length && this.samples[this.samples.length - 1].t === at) return;
 
     const site = d.location();

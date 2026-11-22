@@ -73,15 +73,14 @@ function renderChips(t) {
   lb.classList.toggle('ghost', !t.released);
   $('#chip-battery').textContent = t.battery == null ? '🔋 –' : `🔋 ${t.battery}%${t.charging ? ' ⚡' : ''}`;
   $('#chip-temp').textContent = t.temperatureC == null ? '🌡 –' : `🌡 ${temp(t.temperatureC)} body · ${temp(t.cmosTempC?.tele)} sensor`;
-  const nd = t.ndLock ? ' · ND lock' : '';
-  $('#chip-mode').textContent = `${t.shootingMode?.name ?? 'mode –'}${t.operation ? ` · ${t.operation}…` : ''}${nd}`;
-  $('#chip-mode').title = [
-    t.operation ? `The telescope is busy ${t.operation}; other commands wait until it finishes.` : '',
-    t.ndLock ? 'The ND filter is fitted for darks: motion and light captures are refused until it is removed (dark_frames action=nd_removed).' : '',
-  ].filter(Boolean).join(' ');
+  $('#chip-mode').textContent = `${t.shootingMode?.name ?? 'mode –'}${t.operation ? ` · ${t.operation}…` : ''}`;
+  $('#chip-mode').title = t.operation ? `The telescope is busy ${t.operation}; other commands wait until it finishes.` : '';
   const m = t.motors ?? {};
   const mount = t.bodyMode === 'eq' ? 'EQ' : t.bodyMode === 'altaz' ? 'Alt-Az' : 'mount';
-  $('#chip-mount').textContent = m.homed === false ? `${mount} · not homed` : m.pitchDeg != null ? `${mount} · rot ${m.rotationDeg}° pitch ${m.pitchDeg}°` : mount;
+  // the Dwarf mini: rotation is the driver's count from power-on; "rot ?" once a routine turned it uncounted
+  const rot = m.rotationDeg != null ? `rot ${m.rotationDeg}° ` : m.rotationCounted === false ? 'rot ? ' : '';
+  $('#chip-mount').textContent = m.homed === false ? `${mount} · not homed` : m.pitchDeg != null ? `${mount} · ${rot}pitch ${m.pitchDeg}°` : mount;
+  $('#chip-mount').title = m.rotationUnknown ?? '';
   $('#chip-sd').textContent = t.storage ? `SD ${t.storage.availableGB}/${t.storage.totalGB} GB` : 'SD –';
   const sel = $('#sel-mode');
   if (t.shootingMode?.name && document.activeElement !== sel) sel.value = t.shootingMode.name;

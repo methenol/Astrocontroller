@@ -50,6 +50,9 @@ const SENTRY_ANSWER_MS = 30_000;
 /** pitch 90° is the horizon */
 const HORIZON_PITCH_DEG = 90;
 
+/** A pose for the replies; the Dwarf mini's rotation is left out when it has no exact count. */
+const poseText = (p: { rotationDeg?: number; pitchDeg?: number }): string => `${p.rotationDeg !== undefined ? `rotation ${p.rotationDeg}°, ` : ''}pitch ${p.pitchDeg}°`;
+
 export interface PolarError {
   azimuthErrorDeg: number;
   altitudeErrorDeg: number;
@@ -92,7 +95,6 @@ export class AstroControl {
 
   private assertMayMove(what: string): void {
     const { guards } = this.core;
-    guards.assertNoNdLock(what);
     guards.assertNoOperation(what);
     guards.assertNoStackForMotion();
   }
@@ -110,7 +112,7 @@ export class AstroControl {
     let ran = false;
     const solves = () => this.state.calibration.plateSolvingTimes ?? '?';
     const resultSince = (t0: number) => (this.state.calibration.at ?? 0) >= t0;
-    return this.routines.follow({
+    const out = await this.routines.follow({
       what: 'calibration',
       cmd: Cmd.ASTRO_START_CALIBRATION,
       params: { lon: loc.lon, lat: loc.lat },
@@ -138,6 +140,10 @@ export class AstroControl {
         return `calibration complete in ${s} s${r ? ` (azimuth ${r.azimuth.toFixed(2)}°, altitude ${r.altitude.toFixed(2)}°)` : ''}; plate solves: ${solves()}`;
       },
     });
+    // the Dwarf mini: the solved pointing gives its rotation back
+    const r = this.state.calibration.result;
+    if (r) await this.motors.miniCalibratedAt(r.azimuth, r.altitude).catch((e) => log.warn(`rotation after the calibration: ${errMsg(e)}`));
+    return out;
   }
 
   /** The firmware's own tele mosaic on the target it is tracking (EQ mode only). Scales are the protocol's integers; forceStart keeps it from asking. */
@@ -154,11 +160,15 @@ export class AstroControl {
     const loc = oneClick ? this.core.requireLocation() : null;
     if (loc) this.assertDark(`the one-click GoTo to ${name}`, loc);
     await this.camera.ensureMode('DSO');
+    const reached = async (r: string) => {
+      await this.motors.miniPointedAt(raHours, decDeg, name).catch((e) => log.warn(`rotation after the GoTo: ${errMsg(e)}`));
+      return r;
+    };
     if (loc) {
       const dso = await http.resolveShootingMode('DSO');
-      return this.runOneClick(Cmd.ASTRO_START_ONE_CLICK_GOTO_DSO, { ra: raHours, dec: decDeg, targetName: name, lon: loc.lon, lat: loc.lat, shootingMode: dso.id, gotoOnly: false }, name);
+      return reached(await this.runOneClick(Cmd.ASTRO_START_ONE_CLICK_GOTO_DSO, { ra: raHours, dec: decDeg, targetName: name, lon: loc.lon, lat: loc.lat, shootingMode: dso.id, gotoOnly: false }, name));
     }
-    return this.runGoto(Cmd.ASTRO_START_GOTO_DSO, { ra: raHours * 15, dec: decDeg, targetName: name, gotoOnly: false }, name);
+    return reached(await this.runGoto(Cmd.ASTRO_START_GOTO_DSO, { ra: raHours * 15, dec: decDeg, targetName: name, gotoOnly: false }, name));
   }
 
   async gotoSolarSystem(body: string, oneClick: boolean): Promise<string> {
@@ -169,13 +179,18 @@ export class AstroControl {
     const loc = this.core.requireLocation();
     const pretty = key[0].toUpperCase() + key.slice(1);
     this.core.store.publish({ pointing: { target: pretty, body: key, at: Date.now() } });
+    const reached = async (r: string) => {
+      const { raHours, decDeg } = sky.bodyRaDec(loc, pretty as sky.BodyName);
+      await this.motors.miniPointedAt(raHours, decDeg, pretty).catch((e) => log.warn(`rotation after the GoTo: ${errMsg(e)}`));
+      return r;
+    };
     if (oneClick) {
       this.assertDark(`the one-click GoTo to ${pretty}`, loc, pretty === 'Moon' ? ' For the Moon in daylight use track_sun_moon.' : '');
       const mode = await http.resolveShootingMode(pretty === 'Moon' ? 'Moon' : pretty === 'Sun' ? 'Sun' : 'Planet');
       await this.camera.ensureMode(mode.name);
-      return this.runOneClick(Cmd.ASTRO_START_ONE_CLICK_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, shootingMode: mode.id, forceStart: false }, pretty);
+      return reached(await this.runOneClick(Cmd.ASTRO_START_ONE_CLICK_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, shootingMode: mode.id, forceStart: false }, pretty));
     }
-    return this.runGoto(Cmd.ASTRO_START_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, forceStart: false }, pretty);
+    return reached(await this.runGoto(Cmd.ASTRO_START_GOTO_SOLAR_SYSTEM, { index, lon: loc.lon, lat: loc.lat, targetName: pretty, forceStart: false }, pretty));
   }
 
   /**
@@ -323,14 +338,16 @@ export class AstroControl {
     await sendStop(this.core, Cmd.ASTRO_STOP_CALIBRATION, RECOVERY_STOP_MS);
     await sleep(this.timing.recoveryReleaseMs);
     const after = await this.motors.readPositions().catch(() => null);
-    const back = before?.homed && before.pitchDeg !== undefined && before.rotationDeg !== undefined ? { rotationDeg: before.rotationDeg, pitchDeg: before.pitchDeg } : null;
+    // the Dwarf mini: the failed routine turned its base by an amount the firmware does not report, so only pitch goes back
+    const mini = (await this.motors.model()) === 'mini';
+    const back = before?.homed && before.pitchDeg !== undefined && (mini || before.rotationDeg !== undefined) ? (mini ? { pitchDeg: before.pitchDeg } : { rotationDeg: before.rotationDeg, pitchDeg: before.pitchDeg }) : null;
     let recovery = '';
     if (after && !after.homed) {
       try {
         await this.motors.home();
         if (back) {
           await this.motors.moveTo(back, RECOVERY_SPEED_DEG_S);
-          recovery = ` The failed ${label} left the motors un-homed; I re-homed them and returned to the previous pointing (rotation ${back.rotationDeg}°, pitch ${back.pitchDeg}°).`;
+          recovery = ` The failed ${label} left the motors un-homed; I re-homed them and returned to the previous pointing (${poseText(back)}).`;
         } else {
           recovery = ` The failed ${label} left the motors un-homed; I re-homed them (now pointing down — raise with move_motors).`;
         }
@@ -341,9 +358,9 @@ export class AstroControl {
       // the firmware's plate-solve sequence leaves the scope wherever it gave up (often pointing at the ground)
       try {
         await this.motors.moveTo(back, RECOVERY_SPEED_DEG_S);
-        recovery = ` The failed ${label} had left the scope at rotation ${after.rotationDeg}°, pitch ${after.pitchDeg}°; I returned it to the previous pointing (rotation ${back.rotationDeg}°, pitch ${back.pitchDeg}°).`;
+        recovery = ` The failed ${label} had left the scope at ${poseText(after)}; I returned it to the previous pointing (${poseText(back)}).`;
       } catch (e) {
-        recovery = ` Scope is at rotation ${after.rotationDeg}°, pitch ${after.pitchDeg}° (altitude ≈ ${Math.round(after.pitchDeg - HORIZON_PITCH_DEG)}°); returning to the previous pointing failed (${errMsg(e)}).`;
+        recovery = ` Scope is at ${poseText(after)} (altitude ≈ ${Math.round(after.pitchDeg - HORIZON_PITCH_DEG)}°); returning to the previous pointing failed (${errMsg(e)}).`;
       }
     }
     return new Error(`${msg}.${recovery}`);
@@ -372,7 +389,6 @@ export class AstroControl {
   }
 
   private async measurePolarAlignmentNow(): Promise<PolarError> {
-    this.core.guards.assertNoNdLock('polar alignment');
     // the solve rotates the mount between its plate solves
     this.core.guards.assertNoStackForMotion();
     const loc = this.core.requireLocation();
@@ -518,7 +534,7 @@ export class AstroControl {
     this.camera.noteLiveViewWoken();
     await this.system.refreshState().catch(() => {});
     const m = await this.motors.readPositions().catch(() => null);
-    if (m && (!m.homed || o.rehome) && !this.state.ndLock) {
+    if (m && (!m.homed || o.rehome)) {
       try {
         steps.push(await this.motors.homeNow());
       } catch (e) {
@@ -534,7 +550,6 @@ export class AstroControl {
   // ---- daytime -------------------------------------------------------------
 
   async trackObject(camera: CameraName, box: { x: number; y: number; w: number; h: number }): Promise<void> {
-    this.core.guards.assertNoNdLock('object tracking');
     this.core.guards.assertNoOperation('object tracking');
     this.core.guards.assertNoStackForMotion();
     // a lock is a track result with a box on the frame; (-100,-100) is the tracker reporting it has lost it
@@ -559,7 +574,6 @@ export class AstroControl {
       await sendConfirmed(this.core, Cmd.SENTRY_MODE_STOP, {}, 'stop sentry mode', { confirm: () => !this.state.sentry || this.state.sentry.state === 'idle' });
       return;
     }
-    this.core.guards.assertNoNdLock('sentry mode');
     this.core.guards.assertNoOperation('sentry mode');
     this.core.guards.assertNoStackForMotion();
     const answered = this.core.link.waitFor((n) => n.name === 'sentryState', SENTRY_ANSWER_MS).then(() => true, () => false);

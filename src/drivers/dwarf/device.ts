@@ -4,7 +4,7 @@
  * presents them as one device:
  *
  *   state.ts     published state and the pure notification reducer
- *   guards.ts    what may run now (one operation at a time, camera ownership by stacks, ND lock)
+ *   guards.ts    what may run now (one operation at a time, camera ownership by stacks and darks)
  *   system.ts    state/device reads, clock and location, power
  *   camera.ts    shooting modes, live view, camera settings, stills/burst/video/timelapse
  *   motors.ts    homing, absolute moves, joystick slews
@@ -33,7 +33,7 @@ import { CameraControl, FILTER_NAMES, type ShootingTech } from './controller/cam
 import { busyWith, isTracking, request, type Core, type Location } from './controller/core.js';
 import { Darks, type DarkRequest } from './controller/darks.js';
 import { DeviceExtrasControl } from './controller/extras.js';
-import { Focuser } from './controller/focuser.js';
+import { AutofocusExposureError, Focuser } from './controller/focuser.js';
 import { Routines } from './controller/follow.js';
 import { Guards } from './controller/guards.js';
 import { Motors, PITCH_RANGE, ROTATION_RANGE } from './controller/motors.js';
@@ -107,7 +107,7 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     this.stacks = new StackTracker(Date.now, (cam) => exposureAtStart[cam]);
     this.store = new StateStore((st) => this.emit('state', st));
     this.store.state.stacking = this.stacks.info;
-    this.guards = new Guards(this.store, this.stacks, path.join(config.paths.data, 'nd-lock.json'));
+    this.guards = new Guards(this.store, this.stacks);
 
     const self = this;
     this.core = {
@@ -123,7 +123,7 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     };
     this.system = new SystemControl(this.core);
     this.camera = new CameraControl(this.core, this.system);
-    this.motors = new Motors(this.core);
+    this.motors = new Motors(this.core, path.join(config.paths.data, 'mini-rotation.json'));
     this.routines = new Routines(this.core);
     this.focuser = new Focuser(this.core, this.routines);
     this.astro = new AstroControl(this.core, this.routines, this.camera, this.motors, this.system);
@@ -140,7 +140,9 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     this.stacks.on('state', () => this.store.changed());
 
     this.link.on('notification', (n: Notification) => this.onNotification(n));
+    this.link.on('sent', (cmd: number, params: Record<string, unknown>) => this.motors.noteSent(cmd, params));
     this.link.on('connected', () => {
+      this.motors.connected();
       this.syncLink();
       if (this.link.usable) this.startResync();
     });
@@ -152,6 +154,7 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     this.link.on('quality', () => this.syncLink());
     // back from a hang (after a power cycle): resync like a fresh connection
     this.link.on('responsive', () => {
+      this.motors.connected();
       this.syncLink();
       this.startResync();
     });
@@ -382,14 +385,6 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     this.guards.assertCameraFree(cam, what);
   }
 
-  setNdLock(on: boolean, note = ''): void {
-    this.guards.setNdLock(on, note);
-  }
-
-  assertNoNdLock(what: string): void {
-    this.guards.assertNoNdLock(what);
-  }
-
   /** The controller may send commands of its own now: commands are executed and no long operation runs. */
   canAct(): boolean {
     return this.link.usable && !this.guards.operation;
@@ -578,8 +573,37 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
     return this.focuser.infinityPosition();
   }
 
-  autofocus(kind: 'normal' | 'astro', x?: number, y?: number): Promise<string> {
-    return this.focuser.autofocus(kind, x, y);
+  /**
+   * Autofocus. A contrast (normal) autofocus is refused under a long manual tele exposure (-15106,
+   * seen on the Dwarf mini in DSO mode, 2026-11-21): the tele goes to auto exposure for it, and the
+   * exposure it had is put back afterwards.
+   */
+  async autofocus(kind: 'normal' | 'astro', x?: number, y?: number): Promise<string> {
+    try {
+      return await this.focuser.autofocus(kind, x, y);
+    } catch (e) {
+      if (!(e instanceof AutofocusExposureError)) throw e;
+      const label = await this.camera.exposureLabel('tele').catch(() => null);
+      await this.camera.setSetting('tele', 'exposure', 'auto');
+      const put = async () => {
+        if (!label) return '';
+        return this.camera.setSetting('tele', 'exposure', label).then(
+          () => `, then put back to ${label} s`,
+          (err) => {
+            log.warn(`autofocus: putting the tele exposure back to ${label} s failed: ${errMsg(err)}`);
+            return `; putting it back to ${label} s FAILED (${errMsg(err)}): set it before imaging`;
+          },
+        );
+      };
+      let r: string;
+      try {
+        r = await this.focuser.autofocus(kind, x, y);
+      } catch (err) {
+        await put();
+        throw err;
+      }
+      return `${r} (the tele's ${label ? `${label} s ` : ''}manual exposure was too long for contrast autofocus, so it ran on auto exposure${await put()})`;
+    }
   }
 
   // ---- astro ---------------------------------------------------------------
@@ -687,6 +711,11 @@ export class Dwarf extends SafeEmitter implements TelescopeDevice {
 
   darkFrameList() {
     return this.darks.list();
+  }
+
+  /** The firmware's exposure code (expIndex) for a camera exposure, from the camera's parameters. */
+  exposureCode(camera: CameraName, seconds: number): Promise<number | null> {
+    return this.camera.exposureCode(camera, seconds);
   }
 
   captureDarks(o: DarkRequest): Promise<void> {

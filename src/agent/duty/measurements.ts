@@ -41,7 +41,7 @@ function telescopeLines(dwarf: MeasuredDwarf): string[] {
   if (!d.connected) return [`- telescope: NOT CONNECTED${d.link?.detail ? ` (${d.link.detail})` : ''}`];
   const m = d.motors;
   const tracking = dwarf.isTracking();
-  const motors = m.homed ? `rotation ${m.rotationDeg}°, pitch ${m.pitchDeg}°` : tracking ? 'no reference (normal while tracking)' : 'NO REFERENCE (not tracking: motors_home before moving them)';
+  const motors = m.homed ? `${m.rotationDeg !== undefined ? `rotation ${m.rotationDeg}°, ` : ''}pitch ${m.pitchDeg}°` : tracking ? 'no reference (normal while tracking)' : 'NO REFERENCE (not tracking: motors_home before moving them)';
   const out = [
     `- telescope: connected; battery ${d.battery ?? '?'}%${d.charging ? ' (charging)' : ''}; mode ${d.shootingMode?.name ?? '?'}; ${tracking ? 'tracking' : 'not tracking'}; motors ${motors}; SD ${d.storage ? `${d.storage.availableGB.toFixed(1)} GB free` : '?'}; sensor ${d.cmosTempC?.tele ?? '?'} °C`,
   ];
@@ -78,7 +78,6 @@ function darkLines(dwarf: MeasuredDwarf, now: number): string[] {
   const out: string[] = [];
   const dc = d.darkCapture;
   if (dc?.state === 'running') out.push(`- dark capture: running (${dc.exposureS} s × ${dc.frames}, about ${dc.expectedEndAt ? fmtMin(Math.max(0, dc.expectedEndAt - now)) : '?'} left)`);
-  if (d.ndLock) out.push('- ND filter fitted: motion locked');
   return out;
 }
 

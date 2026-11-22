@@ -138,7 +138,6 @@ export function registerPlanningTools(all: ToolFn, o: PlanningContext): void {
       const exp = exposure_s ?? SKY_CHECK_EXPOSURE_S;
       const g = gain ?? SKY_CHECK_GAIN;
       // refused before the gain changes: the still inside would refuse only after it
-      dwarf.assertNoNdLock('a sky check');
       dwarf.assertCameraFree('wide', 'a sky check');
       // one operation: nothing else may change the wide camera between the gain change and its restore
       const { img, pos, restoredTo } = await dwarf.exclusive('checking the sky', async () => {

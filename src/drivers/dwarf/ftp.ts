@@ -14,6 +14,7 @@ import { Client, FileType } from 'basic-ftp';
 import { config } from '../../config.js';
 import { errMsg } from '../../log.js';
 import { assertLinked } from './gate.js';
+import { stripCardRoot } from './http/client.js';
 
 export interface FtpEntry {
   name: string;
@@ -58,10 +59,9 @@ export class TransferCancelled extends Error {
   }
 }
 
-/** An SD-card path as FTP sees it (the DWARF3 folder is the root); ".." is refused. */
+/** An SD-card path as FTP sees it (the model's folder, /DWARF3 or /DWARF_mini, is the root); ".." is refused. */
 export function toFtpPath(devicePath: string): string {
-  let p = devicePath.replace(/\\/g, '/');
-  if (p.startsWith('/DWARF3/')) p = p.slice('/DWARF3'.length);
+  let p = stripCardRoot(devicePath.replace(/\\/g, '/'));
   if (!p.startsWith('/')) p = `/${p}`;
   if (p.split('/').includes('..')) throw new Error(`bad device path ${devicePath}`);
   return p.replace(/\/+$/, '') || '/';

@@ -22,6 +22,9 @@ const EXTRA_CMDS = {
   STEP_MOTOR_RUN_TO: 14001,
   STEP_MOTOR_RESET: 14003,
   STEP_MOTOR_GET_POSITION: 14011, // CMD_STEP_MOTOR_GET_POSITION
+  // In WsCmd (CMD_STEP_MOTOR_RUN_IN_PULSE) but not in the SDK's enum. A relative move by a pulse
+  // count: the Dwarf mini's rotation, which has no reference, turns exactly with it (rotation-odometer.ts).
+  STEP_MOTOR_RUN_IN_PULSE: 14010,
   // The SDK puts this at 16406, which this build assigns to GLOBAL_VOICE_ASSISTANT_TASK (module
   // TASK_CENTER). The real VOICE_ASSISTANT module command is 16800.
   VOICE_ASSISTANT_TASK: 16800,
@@ -53,6 +56,7 @@ const OVERRIDES = new Map<number, Codec>([
   [Cmd.STEP_MOTOR_STOP, { req: T('motor.ReqMotorStop'), res: T('motor.ResMotor') }],
   [Cmd.STEP_MOTOR_RESET, { req: T('motor.ReqMotorReset'), res: T('motor.ResMotor') }],
   [Cmd.STEP_MOTOR_GET_POSITION, { req: T('motor.ReqMotorGetPosition'), res: T('motor.ResMotorPosition') }],
+  [Cmd.STEP_MOTOR_RUN_IN_PULSE, { req: T('motor.ReqMotorRunInPulse'), res: T('motor.ResMotor') }],
   [Cmd.STEP_MOTOR_SERVICE_JOYSTICK_STOP, { req: T('motor.ReqMotorServiceJoystickStop'), res: OK }],
   // system / power
   [Cmd.SYSTEM_SET_MASTER, { req: T('system.ReqsetMasterLock'), res: OK }],

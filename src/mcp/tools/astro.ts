@@ -244,7 +244,6 @@ export function registerAstroTools(tool: ToolFn, { dwarf, hub }: ToolContext): v
       if (action === 'start') {
         if (body === 'sun' && !solar_filter_confirmed) throw new Error('Ask the user to confirm the solar filter is fitted, then call again with solar_filter_confirmed=true');
         // refused before the mode switch: a refusal must leave the telescope as it was
-        dwarf.assertNoNdLock(`${body} tracking`);
         dwarf.assertNoOperation(`${body} tracking`);
         await dwarf.ensureMode(body === 'sun' ? 'Sun' : 'Moon');
       }

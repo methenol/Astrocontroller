@@ -10,7 +10,7 @@ Use only when the session log or the user gives a reason. Examples:
 - A firmware update changed behaviour.
 - The user wants to try a gain other than 60.
 
-Experiments cost a night of normal imaging and may need an ND session for darks, so run one only when the reason above is clear, and report it.
+Experiments cost a night of normal imaging and may need new dark masters, so run one only when the reason above is clear, and report it.
 
 ## Design
 1. **One question, one candidate vs the incumbent.** No grids (not 15/20/30/45/60 at once, not gains 40–80).

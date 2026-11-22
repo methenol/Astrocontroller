@@ -5,7 +5,7 @@ description: Which exposure / gain / filter to capture with on the Dwarf 3 (a sm
 # Acquisition profiles
 
 ## The rule
-The table below lists the **default** profiles for when the owner has not specified settings. **The owner's explicit instruction always overrides this skill entirely: if the owner says use a gain, exposure or filter, capture exactly that, no questions, no gates, no opinions.** These defaults apply only in the owner's absence. Do not invent a new exposure or gain on my own initiative because a target is faint or the preview looks dark. Every exposure/gain pair needs its own dark master; darks need the ND filter fitted by hand (see **dark-library**).
+The table below lists the **default** profiles for when the owner has not specified settings. **The owner's explicit instruction always overrides this skill entirely: if the owner says use a gain, exposure or filter, capture exactly that, no questions, no gates, no opinions.** These defaults apply only in the owner's absence. Do not invent a new exposure or gain on my own initiative because a target is faint or the preview looks dark. Every exposure/gain pair needs its own dark master (see **dark-library**).
 
 ## Qualified profiles (tele camera, bin 1 = 3840×2160)
 | Profile | Mount | Exposure | Gain | Use |

@@ -10,6 +10,7 @@ import type { TravelForecast } from '../travel-guard.js';
 import type { CameraName, StackingInfo } from '../stacking.js';
 import { logger, errMsg } from '../../../log.js';
 import { astroState, bodyMode, deviceOn, opState, round, WB_SCENES } from './util.js';
+import { dwarfModel } from './model.js';
 
 const log = logger('dwarf');
 /** State broadcasts are coalesced to one per this. */
@@ -33,7 +34,26 @@ export function canonicalParamId(id: unknown): string {
   return ASTRO_ECHO_CONTEXTS.has(v >> 56n) ? String((0x02n << 56n) | (v & ((1n << 56n) - 1n))) : s;
 }
 
-const teleInWide = (d: Record<string, any>) => ({ x: d.x ?? 0, y: d.y ?? 0, width: d.width ?? 0, height: d.height ?? 0 });
+/** The wide frame the tele footprint is given in. */
+const WIDE_W = 1920;
+const WIDE_H = 1080;
+
+/**
+ * The tele's footprint in the wide frame. The Dwarf 3's firmware matching is used as reported. The
+ * Dwarf mini's re-match after a normal autofocus lands far off (2026-11-21, indoors: 831,654 86×47,
+ * ~3° below where the tele looked, while the tele showed the scene at the wide frame's centre), so
+ * there the footprint is the tele field centred in the wide one, from the two fields of view: what its
+ * firmware reports at power-on (912,514 96×53).
+ */
+function teleInWide(st: TelescopeState, d: Record<string, any>): TelescopeState['teleInWide'] {
+  const { tele, wide } = st.fov;
+  if (dwarfModel(st.device) === 'mini' && tele?.h && tele.v && wide?.h && wide.v) {
+    const width = Math.round((WIDE_W * tele.h) / wide.h);
+    const height = Math.round((WIDE_H * tele.v) / wide.v);
+    return { x: Math.round((WIDE_W - width) / 2), y: Math.round((WIDE_H - height) / 2), width, height };
+  }
+  return { x: d.x ?? 0, y: d.y ?? 0, width: d.width ?? 0, height: d.height ?? 0 };
+}
 const fov = (c: Record<string, any>) => ({ h: round(c.hFov, 3), v: round(c.vFov ?? 0, 3) });
 
 /** Progress of a star-sharpness measurement or star-focus sweep, for the web UI. */
@@ -119,7 +139,8 @@ export interface TelescopeState {
   switches?: { antiTangle?: boolean; lensDefog?: boolean; autoCooling?: boolean; autoShutdown?: boolean; powerSound?: boolean; doNotDisturb?: boolean; ringLight?: boolean; powerIndicator?: boolean };
   /** The device's own IMU attitude, in degrees, as it reports it (`CMD_NOTIFY_DEVICE_ATTITUDE`). */
   attitude?: { pitchDeg: number; yawDeg: number; rollDeg: number; at: number };
-  motors: { rotationDeg?: number; pitchDeg?: number; homed?: boolean; updatedAt?: number };
+  /** rotationCounted/rotationUnknown: the Dwarf mini, whose rotation angle is the driver's count from power-on */
+  motors: { rotationDeg?: number; pitchDeg?: number; homed?: boolean; rotationCounted?: boolean; rotationUnknown?: string; updatedAt?: number };
   fov: { tele?: { h: number; v: number }; wide?: { h: number; v: number } };
   teleInWide?: { x: number; y: number; width: number; height: number };
   calibration: { state: string; plateSolvingTimes?: number; result?: { azimuth: number; altitude: number }; at?: number };
@@ -133,8 +154,6 @@ export interface TelescopeState {
   oneClickGoto?: Record<string, unknown>;
   stacking: { tele: StackingInfo; wide: StackingInfo };
   darkCapture?: DarkCaptureState;
-  /** ND filter fitted for dark frames: nothing may move the scope or take light frames. */
-  ndLock?: { since: number; note: string } | null;
   eqSolving: { state: string; result?: { azimuthErrorDeg: number; altitudeErrorDeg: number; at: number } };
   /**
    * How the firmware serves the wide camera: 1 is RTSP live video, anything else is no live video.
@@ -255,7 +274,7 @@ export function applyNotification(st: TelescopeState, params: ParamCache, n: Not
       st.bodyMode = bodyMode(d.bodyStatus);
       break;
     case 'pictureMatching':
-      st.teleInWide = teleInWide(d);
+      st.teleInWide = teleInWide(st, d);
       break;
     case 'calibrationState':
       st.calibration = { ...st.calibration, state: astroState(d.state), plateSolvingTimes: d.plateSolvingTimes };
@@ -394,7 +413,7 @@ export function applyDeviceStateInfo(
   if (dev.temperature) st.temperatureC = dev.temperature.temperature ?? 0;
   if (dev.storageInfo) st.storage = { availableGB: dev.storageInfo.availableSize ?? 0, totalGB: dev.storageInfo.totalSize ?? 0 };
   if (dev.bodyStatus) st.bodyMode = bodyMode(dev.bodyStatus.bodyStatus);
-  if (dev.pictureMatching) st.teleInWide = teleInWide(dev.pictureMatching);
+  if (dev.pictureMatching) st.teleInWide = teleInWide(st, dev.pictureMatching);
   const sw: Partial<NonNullable<TelescopeState['switches']>> = {};
   for (const [field, key] of Object.entries(SWITCH_FIELDS)) if (dev[field]) sw[key] = deviceOn(dev[field].state);
   if (Object.keys(sw).length) st.switches = { ...st.switches, ...sw };

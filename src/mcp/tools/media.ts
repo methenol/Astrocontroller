@@ -39,7 +39,7 @@ export function registerMediaTools(tool: ToolFn, { hub }: ToolContext): void {
 
   tool(
     'view_image',
-    'Show an image to you. source: "device:/DWARF3/…" (album JPG/PNG or FITS subframe on the telescope), or a library/captures path. FITS and 16-bit stacks are debayered and auto-stretched. Use crop to zoom (fractions 0..1).',
+    'Show an image to you. source: "device:/DWARF3/…" or "device:/DWARF_mini/…" (album JPG/PNG or FITS subframe on the telescope), or a library/captures path. FITS and 16-bit stacks are debayered and auto-stretched. Use crop to zoom (fractions 0..1).',
     { source: z.string(), crop: cropArg, max_size: z.number().int().min(256).max(2048).optional(), stretch: z.boolean().optional() },
     async ({ source, crop, max_size, stretch }) => {
       let { img } = await loadImage(source, hub);
@@ -91,7 +91,7 @@ export function registerMediaTools(tool: ToolFn, { hub }: ToolContext): void {
       files.sort((a, b) => stamp(a.name).localeCompare(stamp(b.name)));
       const subs = [];
       for (const f of files.slice(-(count ?? 3))) {
-        const { img } = await loadImage(`device:/DWARF3/Astronomy/${folder}/${f.name}`, hub);
+        const { img } = await loadImage(`device:${http.cardRoot()}/Astronomy/${folder}/${f.name}`, hub);
         const a = analyze(img, parsed.camera);
         subs.push({
           file: f.name,

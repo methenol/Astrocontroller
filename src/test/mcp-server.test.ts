@@ -75,35 +75,18 @@ describe('MCP endpoint', () => {
     }
   });
 
-  test('Sun/Moon tracking under the ND lock is refused before the shooting mode is touched', async () => {
-    const client = new Client({ name: 'test', version: '0' });
-    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
-    dwarf.setNdLock(true, 'test');
-    try {
-      const r = (await client.callTool({ name: 'track_sun_moon', arguments: { body: 'moon', action: 'start' } })) as { isError?: boolean; content: Array<{ text?: string }> };
-      assert.equal(r.isError, true);
-      // a mode switch first would fail on the unreachable telescope with a different error
-      assert.match(r.content[0]?.text ?? '', /refused: moon tracking while the ND filter is fitted/);
-    } finally {
-      dwarf.setNdLock(false);
-      await client.close();
-    }
-  });
-
-  test('a refused dark capture leaves no ND lock behind and sends nothing', async () => {
+  test('a refused dark capture sends nothing', async () => {
     const client = new Client({ name: 'test', version: '0' });
     await client.connect(new StreamableHTTPClientTransport(new URL(url)));
     const before = dwarf.state.darkCapture;
     dwarf.state.darkCapture = { state: 'running', exposureS: 30, gain: 80, frames: 20, startedAt: Date.now(), expectedEndAt: Date.now() + 660_000, progress: 0 };
     try {
-      const r = (await client.callTool({ name: 'dark_frames', arguments: { action: 'capture', exposure_s: 30, gain: 80, nd_filter_confirmed: true } })) as { isError?: boolean; content: Array<{ text?: string }> };
+      const r = (await client.callTool({ name: 'dark_frames', arguments: { action: 'capture', exposure_s: 30, gain: 80 } })) as { isError?: boolean; content: Array<{ text?: string }> };
       assert.equal(r.isError, true);
       // listing the firmware's masters first would fail on the unreachable telescope with a different error
       assert.match(r.content[0]?.text ?? '', /a dark capture is already running/);
-      assert.equal(dwarf.state.ndLock ?? null, null);
     } finally {
       dwarf.state.darkCapture = before;
-      dwarf.setNdLock(false);
       await client.close();
     }
   });
@@ -120,25 +103,6 @@ describe('MCP endpoint', () => {
       assert.equal(dwarf.locationOverride, null);
     } finally {
       dwarf.state.darkCapture = before;
-      await client.close();
-    }
-  });
-
-  test('camera work under the ND lock is refused before any setting changes', async () => {
-    const client = new Client({ name: 'test', version: '0' });
-    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
-    dwarf.setNdLock(true, 'test');
-    try {
-      const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as { isError?: boolean; content: Array<{ text?: string }> };
-      // a settings change first would fail on the unreachable telescope with a different error
-      const sky = await call('sky_check', {});
-      assert.equal(sky.isError, true);
-      assert.match(sky.content[0]?.text ?? '', /refused: a sky check while the ND filter is fitted/);
-      const still = await call('view_camera', { source: 'tele', exposure_s: 2 });
-      assert.equal(still.isError, true);
-      assert.match(still.content[0]?.text ?? '', /refused: a still with its own exposure while the ND filter is fitted/);
-    } finally {
-      dwarf.setNdLock(false);
       await client.close();
     }
   });
