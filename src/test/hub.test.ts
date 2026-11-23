@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { childEnv, editorSettings, ProfileInput as ProfileInputSchema, seestarKeyProblem, legacyProfile, ownedVar, ProfileStore, publicProfile, slugFor, type HubPaths, type ProfileInput } from '../hub/profiles.js';
-import { splitPrefixed } from '../hub/proxy.js';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { proxyRequest, splitPrefixed, type ProxyTarget } from '../hub/proxy.js';
 import { settingProblems } from '../config/settings.js';
 import { Instance, type InstanceStatus } from '../hub/instances.js';
 
@@ -228,6 +230,88 @@ describe('proxy paths', () => {
     assert.deepEqual(splitPrefixed('/p/dwarf'), { id: 'dwarf', rest: '/' });
     assert.equal(splitPrefixed('/hub/api/profiles'), null);
     assert.equal(splitPrefixed('/p/../etc'), null);
+  });
+});
+
+describe('proxy requests', () => {
+  const listen = (s: http.Server): Promise<number> => new Promise((r) => s.listen(0, '127.0.0.1', () => r((s.address() as AddressInfo).port)));
+  const close = (s: http.Server): Promise<void> => new Promise((r) => (s.closeAllConnections(), s.close(() => r())));
+  /** A hub in front of `target`; returns its port and the failures it reported. */
+  async function hub(target: () => ProxyTarget) {
+    const failures: string[] = [];
+    const server = http.createServer((req, res) => proxyRequest(req, res, target(), req.url ?? '/', (_t, r, rest, err, n) => failures.push(`${r.method} ${rest} ${err.code} ${n}`)));
+    return { server, port: await listen(server), failures };
+  }
+  const get = async (port: number, init: RequestInit = {}, p = '/x') => {
+    const r = await fetch(`http://127.0.0.1:${port}${p}`, init);
+    return { status: r.status, type: r.headers.get('content-type') ?? '', body: await r.text() };
+  };
+
+  test('a GET whose connection the child resets before answering is sent again, and answered', async () => {
+    let seen = 0;
+    const child = http.createServer((req, res) => (++seen === 1 ? req.socket.destroy() : res.end('ok')));
+    const port = await listen(child);
+    const h = await hub(() => ({ port, name: 'T', active: true, running: true }));
+    try {
+      assert.deepEqual(await get(h.port).then((r) => [r.status, r.body]), [200, 'ok']);
+      assert.equal(seen, 2);
+      assert.deepEqual(h.failures, []);
+    } finally {
+      await close(h.server);
+      await close(child);
+    }
+  });
+
+  test('a POST is never sent twice', async () => {
+    let seen = 0;
+    const child = http.createServer((req) => (seen++, req.socket.destroy()));
+    const port = await listen(child);
+    const h = await hub(() => ({ port, name: 'T', active: true, running: true }));
+    try {
+      const r = await get(h.port, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+      assert.equal(r.status, 502);
+      assert.equal(seen, 1);
+      assert.equal(h.failures.length, 1);
+    } finally {
+      await close(h.server);
+      await close(child);
+    }
+  });
+
+  test('a script, image or API call that fails gets a JSON error, never the reloading HTML page; a page load gets the page', async () => {
+    const dead = http.createServer();
+    const port = await listen(dead);
+    await close(dead); // nothing listens there now
+    const h = await hub(() => ({ port, name: 'T', active: true, running: true }));
+    try {
+      const script = await get(h.port, { headers: { 'sec-fetch-dest': 'script' } });
+      assert.equal(script.status, 502);
+      assert.match(script.type, /application\/json/);
+      assert.match(JSON.parse(script.body).error, /T: Not answering/);
+      const page = await get(h.port, { headers: { 'sec-fetch-dest': 'iframe', accept: 'text/html' } });
+      assert.equal(page.status, 502);
+      assert.match(page.body, /astro-hub-wait/);
+      assert.match(page.body, /location\.reload/);
+      // GETs are tried twice before they count as failed
+      assert.deepEqual(h.failures.map((f) => f.split(' ').at(-1)), ['2', '2']);
+    } finally {
+      await close(h.server);
+    }
+  });
+
+  test('a profile that is not running answers 503: JSON for an asset, the waiting page for a page', async () => {
+    const h = await hub(() => ({ port: 1, name: 'T', active: true, running: false }));
+    try {
+      const asset = await get(h.port, { headers: { accept: '*/*' } });
+      assert.equal(asset.status, 503);
+      assert.match(JSON.parse(asset.body).error, /Starting/);
+      const page = await get(h.port, { headers: { accept: 'text/html' } });
+      assert.equal(page.status, 503);
+      assert.match(page.body, /Starting… This page reloads by itself/);
+      assert.deepEqual(h.failures, []);
+    } finally {
+      await close(h.server);
+    }
   });
 });
 

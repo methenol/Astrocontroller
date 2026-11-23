@@ -204,6 +204,56 @@ $('#switch-manage').addEventListener('click', () => (closeSwitcher(false), openM
 $('#switch-new').addEventListener('click', () => (closeSwitcher(false), openEditor(null)));
 
 let frameFor = null;
+
+// ---- the frame watchdog: a telescope UI that did not boot is loaded again
+// One request of the page that hangs (a phone between networks) or fails (one of the app's modules)
+// leaves the app unbooted: a black frame and nothing that ever retries. The app marks its document
+// once every module ran (public/js/main.js); a frame that loaded without the mark, or never finished
+// loading, is loaded again. The hub's own "starting" page reloads itself and is left alone.
+const FRAME_LOAD_TIMEOUT_MS = 30_000;
+const FRAME_BOOT_GRACE_MS = 5_000;
+const FRAME_RETRY_MAX_MS = 60_000;
+let bootTimer = null;
+let frameRetries = 0;
+const frameUrl = () => `p/${encodeURIComponent(frameFor)}/`;
+
+function navigateFrame() {
+  $('#frame').src = frameUrl();
+  armBootCheck(FRAME_LOAD_TIMEOUT_MS);
+}
+function armBootCheck(ms) {
+  clearTimeout(bootTimer);
+  bootTimer = setTimeout(checkBoot, ms);
+}
+function checkBoot() {
+  if (!frameFor) return;
+  let doc = null;
+  let path = '';
+  try {
+    doc = $('#frame').contentDocument;
+    path = $('#frame').contentWindow.location.pathname;
+  } catch {
+    /* not ours to look into: leave it */
+    return;
+  }
+  const root = new URL(frameUrl(), location.href).pathname;
+  if (doc?.documentElement?.dataset.booted) {
+    frameRetries = 0;
+    return;
+  }
+  if (doc?.querySelector('meta[name="astro-hub-wait"]')) return armBootCheck(FRAME_LOAD_TIMEOUT_MS);
+  // somewhere else inside this profile (an image opened in the frame): not a failed boot
+  if (path.startsWith(root) && path !== root && path !== `${root}index.html`) return;
+  frameRetries++;
+  console.warn(`hub: the telescope UI did not start (attempt ${frameRetries}); loading it again`);
+  setTimeout(
+    () => frameFor && navigateFrame(),
+    Math.min(1000 * 2 ** (frameRetries - 1), FRAME_RETRY_MAX_MS),
+  );
+}
+// every load of the frame (the first, the "starting" page's own reloads): the app has booted by now
+$('#frame').addEventListener('load', () => frameFor && armBootCheck(FRAME_BOOT_GRACE_MS));
+
 function renderStage() {
   const frame = $('#frame');
   const idle = $('#idle');
@@ -225,13 +275,15 @@ function renderStage() {
     frame.hidden = false;
     if (frameFor !== p.id) {
       frameFor = p.id;
-      frame.src = `p/${encodeURIComponent(p.id)}/`;
+      frameRetries = 0;
+      navigateFrame();
     }
     return;
   }
   // inactive, or given up on: no UI to show, and nothing of it runs
   if (frameFor !== null) {
     frameFor = null;
+    clearTimeout(bootTimer);
     frame.src = 'about:blank';
   }
   frame.hidden = true;

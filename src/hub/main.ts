@@ -23,7 +23,7 @@ import { errMsg, logger } from '../log.js';
 import { body, jsonErrors, notFound, rejectCrossSite, route } from '../web/http.js';
 import { Instance, type InstanceSpec } from './instances.js';
 import { childEnv, editorSettings, seestarKeyPath, seestarKeyProblem, usesSeestarKey, legacyProfile, ProfileInput, ProfileStore, profileDataDir, publicProfile, type HubPaths, type Profile } from './profiles.js';
-import { guard, proxyRequest, proxyUpgrade, refuseUpgrade, splitPrefixed } from './proxy.js';
+import { guard, proxyRequest, proxyUpgrade, refuseUpgrade, splitPrefixed, type UpstreamFailure } from './proxy.js';
 import { TunnelManager } from './tunnels.js';
 
 const log = logger('hub');
@@ -263,8 +263,13 @@ const server = http.createServer((req, res) => {
     return;
   }
   const inst = instances.get(p.id);
-  proxyRequest(req, res, { name: p.name, port: CHILD_PORT_BASE + p.slot, active: p.active, running: !!inst && p.active && inst.status().phase === 'running' }, hit.rest);
+  proxyRequest(req, res, { name: p.name, port: CHILD_PORT_BASE + p.slot, active: p.active, running: !!inst && p.active && inst.status().phase === 'running' }, hit.rest, upstreamFailed);
 });
+
+/** A request the running profile's process did not answer, even on a second connection: worth a line. */
+const upstreamFailed: UpstreamFailure = (target, req, rest, err, attempts) => {
+  log.warn(`${target.name}: ${req.method} ${rest.slice(0, 160)} failed after ${attempts} attempt(s): ${err.code ?? ''} ${errMsg(err)}`.replace(/\s+/g, ' '));
+};
 
 server.on('upgrade', (req, socket, head) => {
   guard(socket);

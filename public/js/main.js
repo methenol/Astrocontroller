@@ -29,3 +29,5 @@ connect();
 startWeather();
 startGuardWatch();
 layoutBoot();
+// every module loaded and ran: the profile hub's frame watchdog reloads a frame that never gets here
+document.documentElement.dataset.booted = '1';

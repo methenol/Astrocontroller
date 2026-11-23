@@ -25,7 +25,7 @@ export function horizonRoutes({ scope, duty }: WebContext): Router {
       const ev = m ? evidencePathOf(m) : null;
       return {
         mask: m
-          ? { ...m, summary: describeMask(m), notObserved: unknownSectors(m), panoramaUrl: m.survey?.panorama ? `/captures/${m.survey.panorama}` : null, evidenceUrl: ev ? `/captures/${ev}` : null, surveyId: surveyIdOf(m) }
+          ? { ...m, summary: describeMask(m), notObserved: unknownSectors(m), panoramaUrl: m.survey?.panorama ? `captures/${m.survey.panorama}` : null, evidenceUrl: ev ? `captures/${ev}` : null, surveyId: surveyIdOf(m) }
           : null,
         survey: scope.state.horizonSurvey ?? null,
       };
