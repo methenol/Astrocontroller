@@ -1,6 +1,7 @@
 /**
  * Builds catalog/objects.tsv, the merged object database used by the planner, GoTo and the
- * Database tab, from OpenNGC plus the VizieR catalogs and the IAU star names in catalog/sources.ts.
+ * Database tab, from OpenNGC plus the VizieR catalogs, SIMBAD queries and the IAU star names in
+ * catalog/sources.ts. VizieR and SIMBAD are read from CDS, or from their CfA mirrors when CDS is down.
  *
  *   npm run catalog                download what is missing into catalog/.cache, then merge
  *   npm run catalog -- --fresh     download everything again
@@ -12,7 +13,8 @@
  * fills fields the object lacks; otherwise the record becomes a new object. Sources are merged in
  * the order listed, so the first catalog that has an object names it. Its type is then weighed
  * against the classifying surveys that matched it (`resolveType`): a general catalog's label gives
- * way when the surveys agree the object is something else.
+ * way when the surveys agree the object is something else. A source may also only add names
+ * (HyperLEDA's small galaxies, SIMBAD's common names): its records that match nothing are dropped.
  */
 import path from 'node:path';
 import { typeName } from '../astro/designations.js';
@@ -36,13 +38,14 @@ async function main(): Promise<void> {
     let added = 0;
     let merged = 0;
     for (const rec of records) {
-      const outcome = catalog.add(rec, src.key, src.near);
+      const outcome = catalog.add(rec, src.key, src.near, src.create?.(rec) ?? true);
       if (outcome === 'added') added++;
       else if (outcome === 'merged') merged++;
     }
     for (const [alias, target] of aliases) catalog.alias(alias, target);
     stats.push({ key: src.key, title: src.title, cite: src.cite, records: records.length, added, merged });
-    console.log(`  ${records.length} records: ${added} new, ${merged} merged into existing objects`);
+    const dropped = records.length - added - merged;
+    console.log(`  ${records.length} records: ${added} new, ${merged} merged into existing objects${dropped ? `, ${dropped} matched nothing and were not added` : ''}`);
   }
 
   const { objects } = catalog;

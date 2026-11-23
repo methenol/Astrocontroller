@@ -1,10 +1,12 @@
 /**
  * The object database: catalog/objects.tsv, built by `npm run catalog` (src/tools/build-catalog.ts)
- * from OpenNGC (CC-BY-SA 4.0, github.com/mattiaverga/OpenNGC) and the VizieR catalogs listed in
- * catalog/sources.json: Sharpless, LBN, LDN, Barnard, vdB, Cederblad, RCW, Strasbourg-ESO and
- * Macquarie/AAO/Strasbourg (MASH) PNe, Green SNRs, Dias open clusters, Harris globulars, RC3 and
- * the Principal Galaxies Catalogue (PGC/LEDA), Arp, Hickson, Abell clusters, the Bright Star
- * Catalogue and the IAU star names.
+ * from OpenNGC (CC-BY-SA 4.0, github.com/mattiaverga/OpenNGC), the VizieR catalogs and the SIMBAD
+ * queries listed in catalog/sources.json: Sharpless, LBN, LDN, Barnard, vdB, vdBH, Magakian's
+ * reflection nebulae, Cederblad, RCW, Gum, Henize (Magellanic Clouds), Hartley and Feitzinger &
+ * Stüwe southern dark clouds, Strasbourg-ESO, MASH and SIMBAD PNe, Green SNRs, Dias open clusters,
+ * Harris globulars, RC3, PGC and HyperLEDA galaxies, McConnachie's Local Group and the Updated
+ * Nearby Galaxy Catalog, Arp, Hickson, Abell clusters, the Bright Star Catalogue, the IAU star
+ * names and SIMBAD's common names.
  */
 import fs from 'node:fs';
 import path from 'node:path';

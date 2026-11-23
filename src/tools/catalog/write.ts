@@ -5,7 +5,11 @@ import type { Obj } from './types.js';
 export const TSV_HEADER = '# id\ttype\tra_h\tdec_deg\tcon\tmaj_arcmin\tmin_arcmin\tpa\tmag\tsb\tvis\tnames\tids\tsources';
 
 // Display order of designations: the ones observers use first.
-const ID_ORDER = ['M ', 'C ', 'NGC ', 'IC ', 'Sh2-', 'B ', 'vdB ', 'Cr ', 'Mel ', 'Tr ', 'Arp ', 'HCG ', 'Abell ', 'ACO ', 'LBN ', 'LDN ', 'Ced ', 'RCW ', 'Gum ', 'UGC ', 'PGC ', 'ESO ', 'MCG ', 'CGCG ', 'PN G', 'PK ', 'SNR G', 'HR ', 'HD ', 'HIP '];
+const ID_ORDER = [
+  'M ', 'C ', 'NGC ', 'IC ', 'Sh2-', 'B ', 'vdB ', 'vdBH ', 'Cr ', 'Mel ', 'Tr ', 'Arp ', 'HCG ', 'Abell ', 'ACO ', 'LBN ', 'LDN ', 'Ced ', 'RCW ', 'Gum ', 'LHA ',
+  'DG ', 'CG ', 'FeSt ', 'DCld ', 'UGC ', 'UGCA ', 'DDO ', 'Mrk ', 'VV ', 'KDG ', 'KK', 'VCC ', 'FCC ', 'PGC ', 'ESO ', 'MCG ', 'CGCG ',
+  'Ou ', 'StDr ', 'Kn ', 'Pa ', 'PN G', 'PK ', 'SNR G', 'HR ', 'HD ', 'HIP ',
+];
 
 export function idRank(s: string): number {
   if (/^[α-ω]\d? /.test(s)) return -2;

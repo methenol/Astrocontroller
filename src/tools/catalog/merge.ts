@@ -72,14 +72,18 @@ export class Catalog {
     return this.byKey.get(normalizeName(designation));
   }
 
-  /** Merges one record: into the object it matches, or as a new object. Non-finite positions are skipped (null). */
-  add(rec: Rec, source: string, near?: NearMatch): Outcome | null {
+  /**
+   * Merges one record: into the object it matches, or as a new object when `create` allows it.
+   * Non-finite positions, and records that match nothing and may not create, are skipped (null).
+   */
+  add(rec: Rec, source: string, near?: NearMatch, create = true): Outcome | null {
     if (!Number.isFinite(rec.ra) || !Number.isFinite(rec.dec)) return null;
     const hit = this.byDesignation(rec) ?? (near ? this.nearest(rec, near) : null);
     if (hit) {
       this.mergeInto(hit, rec, source);
       return 'merged';
     }
+    if (!create) return null;
     this.insert(rec, source);
     return 'added';
   }
@@ -165,6 +169,10 @@ export class Catalog {
     const take = (d: string, list: string[]) => {
       const k = normalizeName(d);
       if (have.has(k)) return;
+      // a designation already naming another object stays that object's: HyperLEDA lists "NGC 1"
+      // on a PGC entry the database may also hold as NGC 1's own object
+      const owner = this.byKey.get(k);
+      if (owner && owner !== o && isDesignation(d)) return;
       list.push(d);
       have.add(k);
     };

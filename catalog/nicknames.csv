@@ -93,3 +93,91 @@ Perseus Cluster;ACO 426
 Perseus Galaxy Cluster;ACO 426
 Hercules Cluster;ACO 2151
 Hercules Galaxy Cluster;ACO 2151
+# Popular imaging nicknames the catalogs and SIMBAD do not carry, each checked against the target's position
+# (and against SIMBAD's position for the name where SIMBAD knows it)
+Running Chicken Nebula;IC 2944
+Running Chicken;IC 2944
+Thackeray's Globules;IC 2944
+Prawn Nebula;IC 4628
+Prawn;IC 4628
+Statue of Liberty Nebula;NGC 3576
+Gabriela Mistral Nebula;NGC 3324
+Eta Carinae Nebula;NGC 3372
+Great Carina Nebula;NGC 3372
+Skull and Crossbones Nebula;NGC 2467
+Minkowski's Butterfly;M 2-9
+Twin Jet Nebula;M 2-9
+Jones-Emberson 1;PN G164.8+31.1
+Headphone Nebula;PN G164.8+31.1
+HFG1;PN G136.3+05.5
+Fleming 1;PN G290.5+07.9
+Flying Bat Nebula;Sh2-129
+Spaghetti Nebula;Sh2-240
+Simeis 147;Sh2-240
+Vela Supernova Remnant;SNR G263.9-03.3
+Blue Horsehead Nebula;IC 4592
+Blue Horsehead;IC 4592
+Ghost of Cassiopeia;IC 63
+Shark Nebula;LDN 1235
+Dark Shark Nebula;LDN 1235
+Dolphin Nebula;Sh2-308
+Dolphin Head Nebula;Sh2-308
+Tadpole Nebula;IC 410
+Fly Nebula;NGC 1931
+Tulip Nebula;Sh2-101
+Angelfish Nebula;Sh2-264
+Lambda Orionis Ring;Sh2-264
+Meathook Galaxy;NGC 2442
+Hockey Stick Galaxy;NGC 4656
+Crowbar Galaxy;NGC 4656
+Southern Pinwheel;M 83
+Ghost Nebula;vdB 141
+Snake Nebula;B 72
+Coalsack;C 99
+Copeland's Septet;HCG 57
+Sagittarius Dwarf;Sagittarius dSph
+Sagittarius Dwarf Galaxy;Sagittarius dSph
+Rho Ophiuchi Nebula;IC 4604
+Spirograph Nebula;IC 418
+Cleopatra's Eye;NGC 1535
+Fetus Nebula;NGC 7008
+Jewel Bug Nebula;NGC 7027
+Skull Nebula;NGC 246
+Lemon Slice Nebula;IC 3568
+Bat Nebula;NGC 6995
+Western Veil Nebula;NGC 6960
+Eastern Veil Nebula;NGC 6992
+Fighting Dragons of Ara;NGC 6188
+Celestial Snow Angel;Sh2-106
+Hubble's Variable Nebula;NGC 2261
+De Mairan's Nebula;M 43
+Boogeyman Nebula;LDN 1622
+Lobster Claw Nebula;Sh2-157
+Ghost Head Nebula;NGC 2080
+Retina Nebula;IC 4406
+Southern Ring Nebula;NGC 3132
+Mice Galaxies;NGC 4676
+Eyes Galaxies;NGC 4438
+Little Sombrero Galaxy;NGC 7814
+Sarah's Galaxy;NGC 3628
+Lost Galaxy;NGC 4535
+Phantom Galaxy;M 74
+Ghost of Mirach;NGC 404
+Splinter Galaxy;NGC 5907
+Silver Sliver Galaxy;NGC 891
+Outer Limits Galaxy;NGC 891
+Penguin and Egg;Arp 142
+Cosmic Bat Nebula;NGC 1788
+Northern Lagoon Nebula;NGC 7538
+Northern Trifid Nebula;NGC 1579
+Seahorse Nebula;B 150
+Hidden Galaxy;IC 342
+Ink Spot Nebula;B 86
+Embryo Nebula;NGC 1333
+Duck Nebula;NGC 2359
+Southern Pleiades;IC 2602
+Leo I Dwarf;Leo I
+Southern Crab Nebula;PN G315.4+09.4
+Hen 2-104;PN G315.4+09.4
+Dwingeloo 1;Dw 1
+Dwingeloo 2;Dw 2

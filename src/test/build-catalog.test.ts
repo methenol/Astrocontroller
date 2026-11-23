@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { num, sexa, crossIds, parseOpenNgc, prettyOpenNgcId } from '../tools/catalog/parse.js';
+import { num, sexa, crossIds, parseOpenNgc, prettyOpenNgcId, simbadId, simbadName, simbadObjects, ledaName, ledaNames, prettyGalaxyName } from '../tools/catalog/parse.js';
 import { Catalog, sepArcmin, extendedTol, resolveType } from '../tools/catalog/merge.js';
-import { Downloader, parseVizierTsv } from '../tools/catalog/fetch.js';
+import { Downloader, parseVizierTsv, parseTapTsv, tapError, vizierError } from '../tools/catalog/fetch.js';
 import { idRank, tsvRow, TSV_HEADER } from '../tools/catalog/write.js';
 import type { Rec } from '../tools/catalog/types.js';
 
@@ -158,22 +158,133 @@ describe('catalog build: output', () => {
     assert.equal(tsvRow({ ...rec({ id: 'X 2', ra: 12.5, dec: 10, ids: [], names: [] }), sources: ['openngc'] }).split('\t')[2], '12.5');
   });
 
-  test('downloads are cached, retried on server errors, and a client error is final', async () => {
+  test('downloads are cached, retried on server errors, and a client error moves on to the next mirror', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catdl-'));
     try {
       let calls = 0;
-      const ok = new Downloader(dir, false, (async () => { calls++; return new Response(calls === 1 ? 'busy' : 'data', { status: calls === 1 ? 503 : 200 }); }) as typeof fetch, () => {});
-      // the first attempt fails with 503; the backoff before the second is 3 s
+      const ok = new Downloader(dir, false, (async () => { calls++; return new Response(calls === 1 ? 'busy' : 'data', { status: calls === 1 ? 503 : 200 }); }) as typeof fetch, () => {}, 1);
       assert.equal(await ok.text('a.txt', 'http://x'), 'data');
       assert.equal(await ok.text('a.txt', 'http://x'), 'data');
       assert.equal(calls, 2, 'the second read came from the cache');
       assert.deepEqual(fs.readdirSync(dir), ['a.txt'], 'no temporary file left behind');
       let gone = 0;
-      const missing = new Downloader(dir, false, (async () => { gone++; return new Response('', { status: 404 }); }) as typeof fetch, () => {});
-      await assert.rejects(missing.text('b.txt', 'http://x'), /HTTP 404 \(attempt 1 of 3\)/);
-      assert.equal(gone, 1);
+      const missing = new Downloader(dir, false, (async () => { gone++; return new Response('', { status: 404 }); }) as typeof fetch, () => {}, 1);
+      await assert.rejects(missing.text('b.txt', ['http://one', 'http://two']), /b\.txt: one: HTTP 404; two: HTTP 404/);
+      assert.equal(gone, 2, 'a client error is not retried on the same mirror');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('a mirror answering with an error page is retried, then the next mirror is used, and the error page is never cached', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catdl-'));
+    try {
+      const asked: string[] = [];
+      const table = '#c\nSh2\tDiam\n\tarcmin\n---\t---\n155\t50\n';
+      const fetchFn = (async (url: string | URL) => {
+        const host = new URL(String(url)).host;
+        asked.push(host);
+        if (host === 'down') return new Response('<!doctype html>Page unavailable', { status: 404 });
+        // the mirror's database is unreachable for its first two answers
+        return new Response(asked.filter((h) => h === 'flaky').length <= 2 ? '#INFO\tError=The database is not currently reachable.\t\n' : table);
+      }) as typeof fetch;
+      const d = new Downloader(dir, false, fetchFn, () => {}, 1);
+      assert.equal(await d.text('t.tsv', ['http://down/q', 'http://flaky/q'], vizierError), table);
+      assert.deepEqual(asked, ['down', 'flaky', 'flaky', 'flaky']);
+      assert.equal(fs.readFileSync(path.join(dir, 't.tsv'), 'utf8'), table);
+      assert.equal(vizierError('#INFO\tError=Table or Catalog not found: X/1\t\n'), 'Table or Catalog not found: X/1');
+      assert.equal(vizierError('#\n#RESOURCE=\n#Name:\n'), 'no table in the response', 'an empty resource is a dropped query, not an empty table');
+      assert.equal(vizierError('#c\nSh2\n\n---\n'), null, 'a table with no rows is still a table');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('TAP results: quoted fields, missing columns and error documents', () => {
+    const tsv = 'oid\tra\thit\n123\t83.8\t"NAME Orion Nebula"\n124\t\t"say ""hi"""\n';
+    assert.deepEqual(parseTapTsv(tsv, 'q', ['oid', 'hit']), [{ oid: '123', ra: '83.8', hit: 'NAME Orion Nebula' }, { oid: '124', ra: '', hit: 'say "hi"' }]);
+    assert.match(tapError(tsv, ['alt']) ?? '', /columns missing.*alt/);
+    assert.match(tapError('<?xml version="1.0"?><VOTABLE><INFO name="QUERY_STATUS" value="ERROR">Incorrect ADQL query</INFO></VOTABLE>', []) ?? '', /query failed: Incorrect ADQL query/);
+  });
+});
+
+describe('catalog build: SIMBAD, HyperLEDA and nearby-galaxy designations', () => {
+  test('SIMBAD identifiers in this database\'s spelling; star, IR and radio surveys are not kept', () => {
+    const cases: [string, string | null][] = [
+      ['NGC  2579', 'NGC 2579'], ['IC 2599', 'IC 2599'], ['M  42', 'M 42'], ['SH  2-155', 'Sh2-155'], ['LBN   959', 'LBN 959'],
+      ['Barnard  18F', 'B 18F'], ['VdB 12', 'vdB 12'], ['VdBH  3a', 'vdBH 3a'], ['Ced  32c', 'Ced 32c'], ['GUM 31', 'Gum 31'],
+      ['PN A66   21', 'Abell 21'], ['PN G331.3-12.1', 'PN G331.3-12.1'], ['SNR G005.4-01.2', 'SNR G005.4-01.2'], ['LEDA 2557', 'PGC 2557'],
+      ['ESO 351-30', 'ESO 351-30'], ['ACO  1656', 'ACO 1656'], ['ACO S  373', 'ACO S373'], ['Cl Collinder  399', 'Cr 399'],
+      ['LHA 120-N  11', 'LHA 120-N 11'], ['NAME PN Kn 61', 'Kn 61'],
+      ['HD  73882', null], ['IRAS 05327+3404', null], ['LBN 123.4-05.6', null], ['PN VV\'  474', null], ['NAME Orion Nebula', null],
+    ];
+    for (const [raw, want] of cases) assert.equal(simbadId(raw), want, raw);
+  });
+
+  test('SIMBAD names: common names kept, part labels, survey ids and designations dropped', () => {
+    assert.equal(simbadName('NAME the Witch Head Nebula'), 'Witch Head Nebula');
+    assert.equal(simbadName("NAME Barnard's Loop"), "Barnard's Loop");
+    for (const keep of ['NAME Ring Nebula', 'NAME North America Nebula', 'NAME Southern Pinwheel', 'NAME Horsehead Nebula']) assert.ok(simbadName(keep), keep);
+    for (const drop of ['NAME [BM89] L1082C', 'NAME Mon R2 IRS3', 'NAME Cygnus Loop Northern Shell', 'NAME PN Kn 40', 'NAME B18-F', 'NAME OAC', 'NGC 224', 'NAME Rho Oph region', 'NAME Vela']) {
+      assert.equal(simbadName(drop), null, drop);
+    }
+  });
+
+  test('SIMBAD rows group into objects, without a size where SIMBAD has the 32767 placeholder angle', () => {
+    const row = (alt: string) => ({ oid: '7', ra: '161.26', dec: '-59.7', otype: 'HII', galdim_majaxis: '120', galdim_minaxis: '', galdim_angle: '32767', hit: 'GUM 33', alt });
+    const [o, ...rest] = simbadObjects([row('NGC  3372'), row('RCW  53'), { ...row('X'), oid: '8', ra: '' }]);
+    assert.equal(rest.length, 0, 'a row without a position is dropped');
+    assert.deepEqual(o.keys, ['GUM 33']);
+    assert.deepEqual(o.idents, ['NGC  3372', 'RCW  53']);
+    assert.ok(Math.abs(o.ra - 161.26 / 15) < 1e-9);
+    assert.equal(o.maj, 120);
+    assert.equal(o.pa, undefined);
+  });
+
+  test('HyperLEDA alternate names: brackets, "!" and "?" are not the galaxy\'s own', () => {
+    assert.deepEqual(ledaNames('UGC12889              MCG8-01-018           CGCG549-13            [RC2]A2357+47         IRAS23574+4659'), ['UGC 12889', 'MCG +8-01-018', 'CGCG 549-13']);
+    assert.deepEqual(ledaNames('(NGC190)              (UGC397)              MCG1-02-042           HCG5B                 !MCG5-01-040          ?NGC21'), ['MCG +1-02-042', 'HCG 5B']);
+    assert.equal(ledaName('ESO293-27'), 'ESO 293-27');
+    assert.equal(ledaName('ESO-LV2930270'), null);
+    assert.equal(ledaName('MRK1138'), 'Mrk 1138');
+    assert.equal(ledaName('MCG-7-01-005'), 'MCG -7-01-005');
+    assert.equal(ledaName('NGC0023'), 'NGC 23');
+  });
+
+  test('nearby-galaxy names', () => {
+    assert.equal(prettyGalaxyName('UGC12894'), 'UGC 12894');
+    assert.equal(prettyGalaxyName('ESO409-015'), 'ESO 409-15');
+    assert.equal(prettyGalaxyName('ESO 410- G 005'), 'ESO 410-5');
+    assert.equal(prettyGalaxyName('And XVIII'), 'Andromeda XVIII');
+    assert.equal(prettyGalaxyName('MESSIER081'), 'M 81');
+    assert.equal(prettyGalaxyName('KK 230'), 'KK 230');
+    assert.equal(prettyGalaxyName('WLM'), 'WLM');
+    assert.equal(prettyGalaxyName('HolmII'), 'Holmberg II');
+    assert.equal(prettyGalaxyName('LeoIV'), 'Leo IV');
+    assert.equal(prettyGalaxyName('LeoT'), 'Leo T');
+    assert.equal(prettyGalaxyName('CVnII'), 'Canes Venatici II');
+    assert.equal(prettyGalaxyName('UMa II'), 'Ursa Major II');
+    assert.equal(prettyGalaxyName('Sc22'), 'Sc22');
+    assert.equal(prettyGalaxyName('GARLAND'), 'GARLAND');
+  });
+
+  test('a source that may not create only adds names to objects already listed', () => {
+    const c = new Catalog();
+    c.add(rec({ id: 'PGC 2557', type: 'G', maj: 180 }), 'pgc');
+    assert.equal(c.add(rec({ id: 'PGC 2557', type: 'G', ids: ['UGC 454'] }), 'leda', undefined, false), 'merged');
+    assert.equal(c.get('UGC 454')?.id, 'PGC 2557');
+    assert.equal(c.add(rec({ id: 'PGC 9', type: 'G', ra: 7 }), 'leda', undefined, false), null);
+    assert.equal(c.get('PGC 9'), undefined);
+    assert.equal(c.objects.length, 1);
+  });
+
+  test('a merge does not copy a designation that already names another object', () => {
+    const c = new Catalog();
+    c.add(rec({ id: 'NGC 1', type: 'G', ra: 0.1, dec: 27.7 }), 'openngc');
+    c.add(rec({ id: 'PGC 564', type: 'G', ra: 0.1, dec: 27.71 }), 'pgc');
+    c.add(rec({ id: 'PGC 564', type: 'G', ra: 0.1, dec: 27.71, ids: ['NGC 1', 'UGC 57'] }), 'leda');
+    const pgc = c.get('PGC 564')!;
+    assert.deepEqual(pgc.ids, ['UGC 57']);
+    assert.equal(c.get('NGC 1')?.id, 'NGC 1');
   });
 });

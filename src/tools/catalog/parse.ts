@@ -1,6 +1,6 @@
 /** Field parsers shared by the source loaders. */
 import fs from 'node:fs';
-import { prettyId } from '../../astro/designations.js';
+import { CONSTELLATIONS, isDesignation, prettyId } from '../../astro/designations.js';
 import type { Rec } from './types.js';
 import type { Row } from './fetch.js';
 
@@ -105,3 +105,138 @@ export function parseOpenNgc(text: string, name = 'OpenNGC'): { records: Rec[]; 
 }
 
 export const readOpenNgc = (file: string) => parseOpenNgc(fs.readFileSync(file, 'utf8'), file);
+
+/** "ESO409-015" → "ESO 409-15": a catalog prefix glued to its number, as UNGC and HyperLEDA write them. */
+function spaced(prefix: string, rest: string): string {
+  return `${prefix} ${rest.replace(/(^|-)0+(?=\d)/g, '$1')}`;
+}
+
+// SIMBAD writes designations padded ("NGC  2579", "SH  2-155", "PN A66   21"): its catalog
+// acronyms → this database's spelling. Catalogs not listed (stars, IR and radio surveys) are not used.
+const SIMBAD_IDS: readonly (readonly [RegExp, (m: RegExpExecArray) => string])[] = [
+  [/^(NGC|IC) (\d+)([A-Z]?)$/, (m) => `${m[1]} ${Number(m[2])}${m[3]}`],
+  [/^M (\d+)$/, (m) => `M ${Number(m[1])}`],
+  [/^SH 2-(\d+)$/, (m) => `Sh2-${Number(m[1])}`],
+  [/^(LBN|LDN|RCW|UGC|UGCA|HCG|Arp|DDO|KDG|VV|Mrk|VCC|FCC|KK|KKH|KKR) (\d+)([A-Za-z]?)$/, (m) => `${m[1]} ${Number(m[2])}${m[3]}`],
+  [/^Barnard (\d+)([A-Za-z]?)$/, (m) => `B ${Number(m[1])}${m[2]}`],
+  [/^VdB (\d+)$/, (m) => `vdB ${Number(m[1])}`],
+  [/^VdBH (\d+)([a-z]?)$/, (m) => `vdBH ${Number(m[1])}${m[2]}`],
+  [/^Ced (\d+)([a-z]?)$/, (m) => `Ced ${Number(m[1])}${m[2]}`],
+  [/^GUM (\d+)([a-z]?)$/, (m) => `Gum ${Number(m[1])}${m[2]}`],
+  [/^PN A66 (\d+)$/, (m) => `Abell ${Number(m[1])}`],
+  [/^PN G(\d{3}\.\d[+-]\d{2}\.\d)$/, (m) => `PN G${m[1]}`],
+  [/^SNR G(\d{3}\.\d[+-]\d{2}\.\d)$/, (m) => `SNR G${m[1]}`],
+  [/^(?:PGC|LEDA) (\d+)$/, (m) => `PGC ${Number(m[1])}`],
+  [/^ESO (\d+)-(\d+)([A-Z]?)$/, (m) => `ESO ${Number(m[1])}-${Number(m[2])}${m[3]}`],
+  [/^MCG ?([+-]\d+-\d+-\d+)$/, (m) => `MCG ${m[1]}`],
+  [/^CGCG (\d+-\d+)$/, (m) => spaced('CGCG', m[1])],
+  [/^ACO (\d+)$/, (m) => `ACO ${Number(m[1])}`],
+  [/^ACO S (\d+)$/, (m) => `ACO S${Number(m[1])}`],
+  [/^Cl (Collinder|Melotte|Trumpler) (\d+)$/, (m) => `${{ Collinder: 'Cr', Melotte: 'Mel', Trumpler: 'Tr' }[m[1]]} ${Number(m[2])}`],
+  [/^Cl (Berkeley|King|Stock|Czernik|Dolidze) (\d+)$/, (m) => `${m[1]} ${Number(m[2])}`],
+  [/^LHA (120|115)-N (\d+)([A-Z]?)$/, (m) => `LHA ${m[1]}-N ${Number(m[2])}${m[3]}`],
+  // planetaries found since the big catalogs, named in SIMBAD as "NAME PN Kn 61", "NAME PN StDr 138"
+  [/^NAME PN ([A-Z][A-Za-z]{0,5}) (\d+)$/, (m) => `${m[1]} ${Number(m[2])}`],
+];
+
+/** A SIMBAD identifier in this database's spelling ("NGC  2579" → "NGC 2579", "SH  2-155" → "Sh2-155"), or null for catalogs not used here. */
+export function simbadId(raw: string): string | null {
+  const s = raw.replace(/\s+/g, ' ').trim();
+  for (const [re, to] of SIMBAD_IDS) {
+    const m = re.exec(s);
+    if (m) return to(m);
+  }
+  return null;
+}
+
+const CONSTELLATION_NAMES = new Set(CONSTELLATIONS.map(([, name]) => name));
+const CONSTELLATION_BY_ABBR = new Map(CONSTELLATIONS.map(([abbr, name]) => [abbr.toLowerCase(), name]));
+
+/** Words that mark a SIMBAD "NAME" as a part or a feature of an object, not what observers call it. */
+const PART_WORDS = /\b(?:IRS|companion|core|clump|knot|filament|jet|shell|lobe|ridge|outflow|region|part|source|center|centre|component)\b/i;
+
+/**
+ * A SIMBAD "NAME …" identifier as a common name ("NAME the Witch Head Nebula" → "Witch Head
+ * Nebula"), or null for the ones that are designations, sub-region labels or survey ids
+ * ("NAME [BM89] L1082C", "NAME Mon R2 IRS3", "NAME Cygnus Loop Northern Shell").
+ */
+export function simbadName(raw: string): string | null {
+  if (!/^NAME /.test(raw)) return null;
+  const s = raw.replace(/\s+/g, ' ').trim().replace(/^NAME (?:the )?/i, '');
+  if (s.length < 4 || /[\d[\]()/_]/.test(s) || PART_WORDS.test(s) || isDesignation(s)) return null;
+  if (!/[a-z]/.test(s)) return null; // all capitals: an acronym
+  if (CONSTELLATION_NAMES.has(s)) return null; // "NAME Vela" on the Vela SNR: the constellation's name, not the object's
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** One SIMBAD object, from the rows of a query that joined its identifiers (one row per identifier). */
+export interface SimbadObject {
+  oid: string;
+  ra: number;
+  dec: number;
+  otype: string;
+  maj?: number;
+  min?: number;
+  pa?: number;
+  /** identifiers matched by the query's filter */
+  keys: string[];
+  /** all identifiers returned for it */
+  idents: string[];
+}
+
+/** Groups TAP rows (oid, ra, dec, otype, galdim_*, hit: the identifier the query matched, alt: another of its identifiers) by object. Rows without a position are dropped. */
+export function simbadObjects(rows: readonly Row[]): SimbadObject[] {
+  const byOid = new Map<string, SimbadObject>();
+  for (const r of rows) {
+    const ra = num(r.ra);
+    const dec = num(r.dec);
+    if (ra === undefined || dec === undefined) continue;
+    let o = byOid.get(r.oid);
+    if (!o) {
+      const maj = num(r.galdim_majaxis);
+      const min = num(r.galdim_minaxis);
+      const pa = num(r.galdim_angle);
+      o = { oid: r.oid, ra: ra / 15, dec, otype: r.otype, maj: maj && maj > 0 ? round(maj, 2) : undefined, min: min && min > 0 ? round(min, 2) : undefined, pa: pa !== undefined && pa >= 0 && pa < 360 ? pa : undefined, keys: [], idents: [] };
+      byOid.set(r.oid, o);
+    }
+    if (r.hit && !o.keys.includes(r.hit)) o.keys.push(r.hit);
+    if (r.alt && !o.idents.includes(r.alt)) o.idents.push(r.alt);
+  }
+  return [...byOid.values()];
+}
+
+// HyperLEDA's alternate names ("UGC12889  MCG8-01-018  CGCG549-13"): the catalogs observers
+// search by. A name in brackets is the system the galaxy belongs to, "!" a wrong one, "?" a doubtful one.
+const LEDA_NAME = /^(NGC|IC|UGCA|UGC|ESO|MCG|CGCG|MRK|ARP|VV|DDO|KDG|KKH|KKR|KK|VCC|FCC|HCG|FGC)([-+]?\d.*)$/;
+const LEDA_PREFIX: Readonly<Record<string, string>> = { MRK: 'Mrk', ARP: 'Arp' };
+
+/** One HyperLEDA alternate name in this database's spelling, or null for a catalog not used here. */
+export function ledaName(raw: string): string | null {
+  const m = LEDA_NAME.exec(raw.trim());
+  if (!m) return null;
+  const [, p, rest] = m;
+  if (p === 'MCG') return /^[-+]?\d+-\d+-\d+$/.test(rest) ? `MCG ${/^[-+]/.test(rest) ? rest : `+${rest}`}` : null;
+  if (p === 'ESO' || p === 'CGCG') return /^\d+-\d+[A-Z]?$/.test(rest) ? spaced(p, rest) : null;
+  if (!/^\d+[A-Z]?$/.test(rest)) return null;
+  return spaced(LEDA_PREFIX[p] ?? p, rest);
+}
+
+/** The usable designations in HyperLEDA's ANames field. */
+export const ledaNames = (field: string): string[] => field.split(/\s{2,}/).map(ledaName).filter((x): x is string => x !== null);
+
+/** UNGC and McConnachie spell designations glued or padded ("UGC12894", "ESO 410- G 005", "And XVIII", "MESSIER081"). */
+export function prettyGalaxyName(raw: string): string {
+  const s = raw.replace(/\s+/g, ' ').trim();
+  let m: RegExpExecArray | null;
+  if ((m = /^MESSIER ?0*(\d+)$/i.exec(s))) return `M ${m[1]}`;
+  if ((m = /^ESO ?(\d+) ?- ?(?:G|IG|N|\?)? ?(\d+)$/.exec(s))) return `ESO ${Number(m[1])}-${Number(m[2])}`;
+  if ((m = /^Holm ?([IVX]+)$/.exec(s))) return `Holmberg ${m[1]}`;
+  // a constellation's dwarfs, glued or abbreviated: "And XVIII", "LeoIV", "CVnII", "UMa II", "BootesI"
+  if ((m = /^([A-Z][A-Za-z]+?) ?([IVX]+|[A-Z])$/.exec(s))) {
+    const con = CONSTELLATION_BY_ABBR.get(m[1].toLowerCase()) ?? (CONSTELLATION_NAMES.has(m[1]) ? m[1] : undefined);
+    if (con) return `${con} ${m[2]}`;
+  }
+  if ((m = /^MRK ?(\d+)$/i.exec(s))) return `Mrk ${Number(m[1])}`;
+  if ((m = /^(NGC|IC|UGCA|UGC|DDO|KDG|KKH|KKR|KKSG|KK|AGC|VCC|FCC|LeG|BTS|HIZSS|GR|Maffei|Dw|PGC) ?(\d+)([A-Z]?)$/.exec(s))) return `${m[1]} ${Number(m[2])}${m[3]}`;
+  return s;
+}

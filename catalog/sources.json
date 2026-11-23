@@ -1,6 +1,6 @@
 {
-  "built": "2026-10-17",
-  "total": 74853,
+  "built": "2026-11-23",
+  "total": 80758,
   "sources": [
     {
       "key": "openngc",
@@ -43,6 +43,14 @@
       "merged": 0
     },
     {
+      "key": "simbad-pn",
+      "title": "Planetary nebulae (SIMBAD: confirmed PNe with a PN G designation)",
+      "cite": "Wenger M. et al., The SIMBAD astronomical database, 2000 (A&AS 143, 9), CDS Strasbourg: objects SIMBAD classifies as planetary nebulae, including the discoveries since the Strasbourg-ESO and MASH catalogues (Kn, Pa, Ou…)",
+      "records": 2575,
+      "added": 551,
+      "merged": 2024
+    },
+    {
       "key": "green",
       "title": "Supernova remnants (Green 2024)",
       "cite": "Green D.A., A catalogue of 310 Galactic supernova remnants, 2024 (VizieR VII/297)",
@@ -55,32 +63,48 @@
       "title": "Sharpless HII regions (Sh2)",
       "cite": "Sharpless S., A Catalogue of H II Regions, 1959 (VizieR VII/20)",
       "records": 313,
-      "added": 257,
-      "merged": 56
+      "added": 253,
+      "merged": 60
     },
     {
       "key": "rcw",
       "title": "RCW southern HII regions",
       "cite": "Rodgers A.W., Campbell C.T., Whiteoak J.B., A catalogue of H-alpha emission regions in the southern Milky Way, 1960 (VizieR VII/216)",
       "records": 181,
-      "added": 126,
-      "merged": 55
+      "added": 123,
+      "merged": 58
+    },
+    {
+      "key": "gum",
+      "title": "Gum southern HII regions",
+      "cite": "Gum C.S., A study of diffuse southern H-alpha nebulae, 1955 (MmRAS 67, 155); positions and cross-identifications from SIMBAD (CDS)",
+      "records": 96,
+      "added": 30,
+      "merged": 66
+    },
+    {
+      "key": "henize",
+      "title": "Henize nebulae of the Magellanic Clouds (LHA 120-N, LHA 115-N)",
+      "cite": "Henize K.G., Catalogues of H-alpha-emission stars and nebulae in the Magellanic Clouds, 1956 (ApJS 2, 315); positions, sizes and cross-identifications from SIMBAD (CDS)",
+      "records": 300,
+      "added": 267,
+      "merged": 33
     },
     {
       "key": "ced",
       "title": "Cederblad bright diffuse nebulae",
       "cite": "Cederblad S., Catalog of Bright Diffuse Galactic Nebulae, 1946 (VizieR VII/231)",
       "records": 330,
-      "added": 157,
-      "merged": 173
+      "added": 155,
+      "merged": 175
     },
     {
       "key": "lbn",
       "title": "Lynds bright nebulae (LBN)",
       "cite": "Lynds B.T., Catalogue of Bright Nebulae, 1965 (VizieR VII/9)",
       "records": 1125,
-      "added": 731,
-      "merged": 394
+      "added": 729,
+      "merged": 396
     },
     {
       "key": "vdb",
@@ -89,6 +113,22 @@
       "records": 158,
       "added": 82,
       "merged": 76
+    },
+    {
+      "key": "vdbh",
+      "title": "van den Bergh & Herbst southern reflection nebulae (vdBH)",
+      "cite": "van den Bergh S., Herbst W., Southern stars embedded in nebulosity, 1975 (AJ 80, 208; VizieR VII/218)",
+      "records": 136,
+      "added": 122,
+      "merged": 14
+    },
+    {
+      "key": "magakian",
+      "title": "Reflection nebulae (Magakian merged catalogue: DG, vdBH, Bernes, RK, GN)",
+      "cite": "Magakian T.Yu., Merged catalogue of reflection nebulae, 2003 (A&A 399, 141; VizieR J/A+A/399/141)",
+      "records": 913,
+      "added": 508,
+      "merged": 405
     },
     {
       "key": "barnard",
@@ -107,28 +147,68 @@
       "merged": 254
     },
     {
+      "key": "hartley",
+      "title": "Southern dark clouds (Hartley et al.)",
+      "cite": "Hartley M., Manchester R.N., Smith R.M., Tritton S.B., Goss W.M., A catalogue of southern dark clouds, 1986 (A&AS 63, 27; VizieR VII/191)",
+      "records": 1101,
+      "added": 1070,
+      "merged": 31
+    },
+    {
+      "key": "fest",
+      "title": "Southern dark nebulae (Feitzinger & Stüwe, FeSt)",
+      "cite": "Feitzinger J.V., Stüwe J.A., Dark nebulae, globules and cometary globules in the southern Milky Way, 1984 (A&AS 58, 365; VizieR VII/68A)",
+      "records": 489,
+      "added": 382,
+      "merged": 107
+    },
+    {
       "key": "rc3",
       "title": "Galaxies (RC3, Third Reference Catalogue of Bright Galaxies)",
       "cite": "de Vaucouleurs G. et al., Third Reference Catalogue of Bright Galaxies, 1991 (VizieR VII/155)",
       "records": 23011,
-      "added": 15654,
-      "merged": 7357
+      "added": 15648,
+      "merged": 7363
     },
     {
       "key": "pgc",
       "title": "Galaxies (Principal Galaxies Catalogue, PGC/LEDA)",
       "cite": "Paturel C. et al., Principal Galaxies Catalogue and LEDA, 2003 (A&A 412, 45; VizieR VII/119B)",
       "records": 52953,
-      "added": 28687,
-      "merged": 24266
+      "added": 28680,
+      "merged": 24273
+    },
+    {
+      "key": "leda",
+      "title": "Galaxies (HyperLEDA: D25 sizes and UGC, ESO, MCG, CGCG, Mrk, DDO… designations)",
+      "cite": "Paturel G. et al., HYPERLEDA. I. Identification and designation of galaxies, 2003 (A&A 412, 45; VizieR VII/237)",
+      "records": 163207,
+      "added": 2420,
+      "merged": 47268
+    },
+    {
+      "key": "lg",
+      "title": "Local Group dwarf galaxies (McConnachie 2012)",
+      "cite": "McConnachie A.W., The observed properties of dwarf galaxies in and around the Local Group, 2012 (AJ 144, 4; VizieR J/AJ/144/4)",
+      "records": 101,
+      "added": 41,
+      "merged": 60
+    },
+    {
+      "key": "ungc",
+      "title": "Galaxies within 11 Mpc (Updated Nearby Galaxy Catalog)",
+      "cite": "Karachentsev I.D., Makarov D.I., Kaisina E.I., Updated nearby galaxy catalog, 2013 (AJ 145, 101; VizieR J/AJ/145/101)",
+      "records": 869,
+      "added": 261,
+      "merged": 608
     },
     {
       "key": "arp",
       "title": "Arp peculiar galaxies",
       "cite": "Arp H., Atlas of Peculiar Galaxies, 1966 (VizieR VII/192)",
       "records": 338,
-      "added": 26,
-      "merged": 312
+      "added": 9,
+      "merged": 329
     },
     {
       "key": "hcg",
@@ -140,10 +220,10 @@
     },
     {
       "key": "aco",
-      "title": "Abell galaxy clusters (ACO, distance class ≤ 4)",
+      "title": "Abell galaxy clusters (ACO, distance class ≤ 4, with the supplementary southern clusters)",
       "cite": "Abell G.O., Corwin H.G., Olowin R.P., A catalog of rich clusters of galaxies, 1989 (VizieR VII/110A)",
-      "records": 408,
-      "added": 408,
+      "records": 696,
+      "added": 696,
       "merged": 0
     },
     {
@@ -161,6 +241,22 @@
       "records": 451,
       "added": 113,
       "merged": 338
+    },
+    {
+      "key": "regions",
+      "title": "Named regions without a catalog entry (Gum Nebula, Squid Nebula, Pipe Nebula, Virgo Cluster…)",
+      "cite": "Positions and sizes from SIMBAD (Wenger M. et al. 2000, A&AS 143, 9), CDS Strasbourg",
+      "records": 6,
+      "added": 6,
+      "merged": 0
+    },
+    {
+      "key": "simbad-names",
+      "title": "Common names and cross-identifications (SIMBAD)",
+      "cite": "Wenger M. et al., The SIMBAD astronomical database, 2000 (A&AS 143, 9), CDS Strasbourg",
+      "records": 440,
+      "added": 0,
+      "merged": 316
     }
   ]
 }

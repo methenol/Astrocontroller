@@ -54,5 +54,11 @@ export interface Source {
    * catalog's type (OpenNGC, Cederblad, LBN) is a label; see `resolveType`.
    */
   classifies?: boolean;
+  /**
+   * Which records may become new objects when they match nothing (all, when absent). The others
+   * only add their designations and names to objects already in the database: HyperLEDA's names
+   * for the galaxies another catalog listed, SIMBAD's common names.
+   */
+  create?: (rec: Rec) => boolean;
   load: () => Promise<Loaded>;
 }

@@ -122,11 +122,25 @@ const PREFIX_SYNONYMS: readonly (readonly [RegExp, string])[] = [
   [/^van\s*den\s*bergh\s*(?=\d)/, 'vdb'],
   [/^cederblad\s*(?=\d)/, 'ced'],
   [/^hickson\s*(?:compact\s*group\s*)?(?=\d)/, 'hcg'],
+  // Abell's supplementary southern clusters: "Abell S373", "ACO S 373"
+  [/^(?:abell|aco)\s*s\s*(?=\d)/, 'acos'],
   [/^(?:abell\s*cluster|aco)\s*(?=\d)/, 'aco'],
+  [/^markarian\s*(?=\d)/, 'mrk'],
+  [/^vorontsov-?\s*velyaminov\s*(?=\d)/, 'vv'],
+  // van den Bergh & Herbst's southern nebulae, written "vdBH 3", "vdB-Ha 3" or "vdBHa 3"
+  [/^vdb\s*-?\s*ha?\s*(?=\d)/, 'vdbh'],
+  [/^(?:leda)\s*(?=\d)/, 'pgc'],
+  // Minkowski's planetaries are written with a hyphenated number ("M 2-9"); Messier's are not
+  [/^minkowski\s*(?=\d+\s*-\s*\d)/, 'm '],
 ];
 const BAYER = /^(?:\d+\s*)?([a-zα-ω]+)[\s.-]*0*(\d?)\s+([a-z ]+)$/;
 const FLAMSTEED = /^(\d+)\s+([a-z ]+)$/;
-const NUMBERED = /^(m|ngc|ic|c|b|sh2-|ldn|lbn|vdb|mel|cr|tr|pgc|ugc|abell|aco|arp|rcw|ced|hcg|gum|hr|hd|hip|pal|stock|king|berkeley|czernik|dolidze)\s*0*(\d+)\s*([a-z]?)$/;
+const NUMBERED = /^(m|ngc|ic|c|b|sh2-|ldn|lbn|vdb|vdbh|mel|cr|tr|pgc|ugc|ugca|abell|aco|acos|arp|rcw|ced|hcg|gum|hr|hd|hip|pal|stock|king|berkeley|czernik|dolidze|ddo|kdg|kk|kkh|kkr|kks|mrk|vv|vcc|fcc|agc|dg|cg|rk|bernes|ou|kn|stdr|pa)\s*0*(\d+)\s*([a-z]?)$/;
+// Galaxy designations written many ways: "MCG +02-01-031" = "MCG 2-1-31" (no sign is north),
+// "ESO 351-G030" = "ESO351-30", "CGCG 382-014" = "CGCG 382-14".
+const MCG = /^mcg\s*([+-]?)\s*0*(\d+)\s*-\s*0*(\d+)\s*-\s*0*(\d+)\s*([a-z]?)$/;
+const ESO = /^eso\s*0*(\d+)\s*-\s*(?:g|ig|n|sc|pn|\?)?\s*0*(\d+)\s*([a-z]?)$/;
+const CGCG = /^cgcg\s*0*(\d+)\s*-\s*0*(\d+)\s*([a-z]?)$/;
 
 /** Lookup key for any designation or name: "M31", "m 31", "Messier 31" → "m31"; "NGC 0224" → "ngc224"; "α Lyr", "alpha Lyrae" → "alp lyr". */
 export function normalizeName(s: string): string {
@@ -139,6 +153,12 @@ export function normalizeName(s: string): string {
   }
   const m = NUMBERED.exec(t);
   if (m) return `${m[1]}${m[2]}${m[3]}`;
+  const mcg = MCG.exec(t);
+  if (mcg) return `mcg${mcg[1] || '+'}${mcg[2]}-${mcg[3]}-${mcg[4]}${mcg[5]}`;
+  const eso = ESO.exec(t);
+  if (eso) return `eso${eso[1]}-${eso[2]}${eso[3]}`;
+  const cgcg = CGCG.exec(t);
+  if (cgcg) return `cgcg${cgcg[1]}-${cgcg[2]}${cgcg[3]}`;
   // Bayer: "alpha lyrae", "alf lyr", "α2 cap", "alp-2 cap", with an optional Flamsteed number before it.
   const b = BAYER.exec(t);
   if (b) {
