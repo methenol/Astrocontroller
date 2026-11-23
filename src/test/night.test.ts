@@ -567,6 +567,63 @@ describe('night journal: the recorder', () => {
     assert.deepEqual(s[0].stats.priorStacks, { stacked: 82, rejected: 0, integrationS: 82 * 30 });
   });
 
+  test('a scope that carries its count on across a refocus is not counted twice (2026-11-22 IC 1848 on the Seestar: 151 min logged as 363)', () => {
+    const journal = new Journal({ dir: dir() });
+    const probe = new FakeProbe();
+    let t = t0;
+    const rec = new JournalRecorder({ journal, probe, site: () => SITE, now: () => t, settleMs: 0 });
+    rec.observe();
+    const step = (sec: number, f: (x: ScopeSnapshot) => void) => {
+      t += sec * 1000;
+      probe.set(f);
+      rec.observe();
+    };
+    // the Seestar reports integration as frames × exposure, so it carries on with the count
+    const count = (x: ScopeSnapshot, n: number) => (x.stack = { ...x.stack, stacked: n, integrationS: n * 60 });
+    step(1, (x) => (x.goto = { state: 'running', target: 'IC 1848' }));
+    step(50, (x) => (x.goto = { state: 'complete', target: 'IC 1848' }));
+    // the first stack starts showing the last target's 80 frames, then the scope starts from zero
+    step(5, (x) => (x.stack = { running: true, target: 'IC 1848', stacked: 80, rejected: 0, subS: 60, integrationS: 80 * 60 }));
+    step(300, (x) => count(x, 80));
+    step(300, (x) => count(x, 1));
+    step(4000, (x) => count(x, 69));
+    step(10, (x) => (x.stack = { ...x.stack, running: false }));
+    // refocus, then the scope carries on from 69
+    step(360, (x) => (x.stack = { ...x.stack, running: true, stacked: 69, integrationS: 69 * 60 }));
+    step(300, (x) => count(x, 73));
+    step(5000, (x) => count(x, 147));
+    step(10, (x) => (x.stack = { ...x.stack, running: false }));
+    step(500, (x) => (x.stack = { ...x.stack, running: true, stacked: 147, integrationS: 147 * 60 }));
+    step(300, (x) => count(x, 151));
+    step(10, (x) => (x.stack = { ...x.stack, running: false }));
+    const st = journal.night(night).sessions[0].stats;
+    assert.equal(st.stacked, 151);
+    assert.equal(st.integrationS, 151 * 60);
+    assert.ok(st.integrationS! <= st.stackS!, 'never more integration than stacking time');
+  });
+
+  test('a stack that begins on the last count and starts over from zero counts from zero', () => {
+    const journal = new Journal({ dir: dir() });
+    const probe = new FakeProbe();
+    let t = t0;
+    const rec = new JournalRecorder({ journal, probe, site: () => SITE, now: () => t, settleMs: 0 });
+    rec.observe();
+    const step = (sec: number, f: (x: ScopeSnapshot) => void) => {
+      t += sec * 1000;
+      probe.set(f);
+      rec.observe();
+    };
+    step(1, (x) => (x.stack = { running: true, target: 'C 20', stacked: 0, rejected: 0, subS: 30 }));
+    step(2500, (x) => (x.stack = { ...x.stack, stacked: 82 }));
+    step(10, (x) => (x.stack = { ...x.stack, running: false }));
+    step(600, (x) => (x.stack = { ...x.stack, running: true }));
+    step(60, (x) => (x.stack = { ...x.stack, stacked: 2 }));
+    step(540, (x) => (x.stack = { ...x.stack, stacked: 20 }));
+    const st = journal.night(night).sessions[0].stats;
+    assert.equal(st.stacked, 102);
+    assert.equal(st.integrationS, 102 * 30);
+  });
+
   describe('the Dwarf probe, on what the telescope really sends (wire log, 2026-11-08, C 34)', () => {
     const rig = () => {
       const st: Record<string, any> = { connected: true, released: false, goto: { state: 'idle' }, tracking: { state: 'idle' }, autofocus: { state: 'idle' }, stacking: { tele: { state: 'idle' } } };

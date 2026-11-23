@@ -256,10 +256,11 @@ export class JournalRecorder {
       if (!this.current || this.current.s.status !== 'active' || norm(this.current.s.target) !== norm(target)) this.open(night, target, t);
       const c = this.current!;
       const st = c.s.stats;
-      const own = (st.stacked ?? 0) - (st.priorStacks?.stacked ?? 0);
+      // the scope's count when the recorder last saw the running stack
+      const lastCount = (st.stacked ?? 0) - (st.priorStacks?.stacked ?? 0) + (st.scopeBase?.stacked ?? 0);
       // the recorder (re)started on a stack the session already holds open: the same stack, carried on
       // (unless the scope's count went back, a new stack begun while the recorder was not watching)
-      if (prev === null && this.openStack(c.s) && (cur.stack.stacked ?? 0) >= own) {
+      if (prev === null && this.openStack(c.s) && (cur.stack.stacked ?? 0) >= lastCount) {
         c.stackAt ??= t;
         c.idleSince = undefined;
         c.baseRejected = cur.stack.rejected ?? 0;
@@ -300,6 +301,11 @@ export class JournalRecorder {
   private beginStack(c: NonNullable<JournalRecorder['current']>, cur: ScopeSnapshot, prev: ScopeSnapshot | null, t: number): void {
     const st = c.s.stats;
     if (st.stacked) st.priorStacks = { stacked: st.stacked, rejected: st.rejected ?? 0, integrationS: st.integrationS ?? 0 };
+    // what the scope already counts at the start is not this stack's (scopeBase)
+    const n = cur.stack.stacked ?? 0;
+    const r = cur.stack.rejected ?? 0;
+    if (n > 0 || r > 0) st.scopeBase = { stacked: n, rejected: r, ...(cur.stack.integrationS !== undefined ? { integrationS: cur.stack.integrationS } : {}) };
+    else delete st.scopeBase;
     c.stackAt = t;
     c.idleSince = undefined;
     c.baseRejected = cur.stack.rejected ?? 0;
@@ -312,9 +318,12 @@ export class JournalRecorder {
   private stackStats(s: JournalSession, snap: ScopeSnapshot, t: number): void {
     const st = s.stats;
     const prior = st.priorStacks ?? { stacked: 0, rejected: 0, integrationS: 0 };
-    // the running stack's own counts (the scope's, from zero), then the session's: the prior stacks' plus these
-    const ownStacked = snap.stack.stacked ?? (st.stacked ?? prior.stacked) - prior.stacked;
-    const ownRejected = snap.stack.rejected ?? (st.rejected ?? prior.rejected) - prior.rejected;
+    // the scope's count went back below where the stack began: it started over from zero
+    if (st.scopeBase && snap.stack.stacked !== undefined && snap.stack.stacked < st.scopeBase.stacked) delete st.scopeBase;
+    const base = st.scopeBase;
+    // the running stack's own counts (what the scope added since it began), then the session's: the prior stacks' plus these
+    const ownStacked = snap.stack.stacked !== undefined ? snap.stack.stacked - (base?.stacked ?? 0) : (st.stacked ?? prior.stacked) - prior.stacked;
+    const ownRejected = snap.stack.rejected !== undefined ? Math.max(0, snap.stack.rejected - (base?.rejected ?? 0)) : (st.rejected ?? prior.rejected) - prior.rejected;
     const stacked = prior.stacked + ownStacked;
     const rejected = prior.rejected + ownRejected;
     st.stacked = stacked;
@@ -323,7 +332,18 @@ export class JournalRecorder {
     st.rejectionPct = st.framesTaken ? Math.round((rejected / st.framesTaken) * 1000) / 10 : 0;
     // the Dwarf only says its sub length in the progress of the first frames, after the stack has started
     st.subS = snap.stack.subS ?? st.subS;
-    const ownIntegration = snap.stack.integrationS ?? (st.subS ? Math.round(ownStacked * st.subS) : undefined);
+    const reported = snap.stack.integrationS;
+    const ownIntegration =
+      reported === undefined
+        ? st.subS
+          ? Math.round(ownStacked * st.subS)
+          : undefined
+        : !base?.stacked
+          ? reported
+          : base.integrationS !== undefined
+            ? Math.max(0, reported - base.integrationS)
+            : // the scope said no integration when the stack began: its share of what it reports now
+              Math.round((reported * ownStacked) / Math.max(1, snap.stack.stacked ?? ownStacked));
     if (ownIntegration !== undefined) st.integrationS = prior.integrationS + ownIntegration;
     const firstStack = s.marks.find((m) => m.kind === 'stack-start')?.at;
     if (firstStack) st.stackS = Math.round((t - firstStack) / 1000);

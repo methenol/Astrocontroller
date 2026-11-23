@@ -80,6 +80,14 @@ export interface SessionStats {
    * and integration are these plus the running stack's own, which the scope counts from zero.
    */
   priorStacks?: { stacked: number; rejected: number; integrationS: number };
+  /**
+   * The scope's own counters when the running stack began, when they did not start from zero: the
+   * Seestar carries its count on when a stack on the same target is stopped and started again (a
+   * refocus), and a scope may still show the last stack's count when the next begins. Only what the
+   * counters add past these is the running stack's; a count that goes back below them is the scope
+   * starting over from zero, and the base is dropped (2026-11-22 IC 1848: 151 min counted as 363).
+   */
+  scopeBase?: { stacked: number; rejected: number; integrationS?: number };
   /** integration per minute of stacking wall time, percent */
   efficiencyPct?: number;
   altStart?: number;
