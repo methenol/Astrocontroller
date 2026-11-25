@@ -6,6 +6,7 @@
  */
 import { errMsg, logger } from '../../log.js';
 import type { DarkFrameRef, FactsSource, LiveFacts } from '../../astro/acquisition/index.js';
+import { withKnownRig } from '../../astro/acquisition/known-rig.js';
 import { listDir } from './ftp.js';
 import { cardRoot, resolveShootingMode } from './http.js';
 import type { Dwarf } from './device.js';
@@ -31,8 +32,8 @@ export function dwarfFacts(dwarf: Dwarf): FactsSource {
       serial: st.device.serial ?? undefined,
       eqMode: st.bodyMode === 'eq' ? true : st.bodyMode === 'altaz' ? false : undefined,
     };
-    if (!st.connected) return { ...base, ...cache?.v };
-    if (cache && Date.now() - cache.at < FACTS_TTL_MS) return { ...base, ...cache.v };
+    if (!st.connected) return withKnownRig({ ...base, ...cache?.v });
+    if (cache && Date.now() - cache.at < FACTS_TTL_MS) return withKnownRig({ ...base, ...cache.v });
     const v: Partial<LiveFacts> = {};
     try {
       const dso = await resolveShootingMode('dso');
@@ -52,7 +53,7 @@ export function dwarfFacts(dwarf: Dwarf): FactsSource {
       log.debug(`dark list not read: ${errMsg(err)}`);
     }
     cache = { at: Date.now(), v };
-    return { ...base, ...v };
+    return withKnownRig({ ...base, ...v });
   };
 }
 

@@ -6,6 +6,7 @@
  */
 import { errMsg, logger } from '../../log.js';
 import type { FactsSource } from '../../astro/acquisition/index.js';
+import { withKnownRig } from '../../astro/acquisition/known-rig.js';
 import type { Seestar } from './device.js';
 
 const log = logger('seestar.acquisition');
@@ -25,7 +26,7 @@ export function seestarFacts(scope: Seestar): FactsSource {
         log.debug(`filter wheel not read: ${errMsg(err)}`);
       }
     }
-    return {
+    return withKnownRig({
       driver: 'seestar',
       model: d.model,
       serial: d.serial,
@@ -37,6 +38,6 @@ export function seestarFacts(scope: Seestar): FactsSource {
       gain: st.view.gain,
       moreExposure: setting?.exp_ms?.more_exposure,
       filterSlots: wheel?.slots,
-    };
+    });
   };
 }
