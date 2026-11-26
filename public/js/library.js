@@ -85,7 +85,7 @@ async function loadSessions() {
   try {
     const { sessions = [] } = await api('sessions?counts=1');
     $('#sessions').innerHTML = sessions.length
-      ? sessions.map((s) => `<div class="sess"><div><b>${esc(s.target)}</b> <span class="muted">${esc(s.camera)} · ${esc(s.exposureS)}s · gain ${esc(s.gain)} · ${esc(s.startedAt ?? '')} · ${esc(s.fitsCount ?? '?')} FITS · ${esc(s.sizeMB ?? '?')} MB</span></div>${s.transferred ? '<span class="muted">in library</span>' : ''}<button data-session="${esc(s.folder)}">Transfer</button> <button class="warn" data-del-session="${esc(s.folder)}" data-transferred="${s.transferred ? 1 : 0}" title="Delete from the telescope's SD card (the library copy stays)">Delete</button></div>`).join('')
+      ? sessions.map((s) => `<div class="sess"><div><b>${esc(s.target)}</b> <span class="muted">${esc(s.camera)} · ${esc(s.exposureS)}s · gain ${esc(s.gain)} · ${esc(s.startedAt ?? '')} · ${esc(s.fitsCount ?? '?')} FITS · ${esc(s.sizeMB ?? '?')} MB</span></div>${s.transferred ? '<span class="muted">in library</span>' : ''}<button data-session="${esc(s.folder)}">Transfer</button> <button type="button" data-tool="analyze_subs" data-args="${esc(JSON.stringify({ session: s.folder }))}" data-label="Check subs · ${esc(s.target)}" title="Focus, trailing, background and rejections of its newest raw subs">Check subs</button> <button class="warn" data-del-session="${esc(s.folder)}" data-transferred="${s.transferred ? 1 : 0}" title="Delete from the telescope's SD card (the library copy stays)">Delete</button></div>`).join('')
       : 'no sessions';
     const btn = $('#btn-sessions-del');
     btn.disabled = !sessions.some((s) => s.transferred);

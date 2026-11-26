@@ -1019,3 +1019,84 @@ button.np-mini { min-height: 26px; padding: 0 7px; font-size: 11px; }
 .snr-help-pop th, .snr-help-pop td { text-align: left; padding: 3px 6px 3px 0; border-bottom: 1px solid var(--line); }
 .snr-help-pop th { color: var(--muted); font-weight: 600; }
 .snr-help-pop p { margin: 0; }
+
+/* ================= the agent's tools in the UI (tools.js) =================
+   Forms: a row of short fields and their button that wraps on a phone; a field this driver's tool
+   does not take is hidden by the script. Results: inline in their card, or the results drawer. */
+.tool-form, .tool-form-plain { display: flex; flex-direction: column; gap: 6px; margin: 0; min-width: 0; }
+.tool-form.ctl-row { flex-direction: row; }
+.fld-row { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; min-width: 0; font-size: 12.5px; }
+.fld-row > label, .tool-form.ctl-row > label { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); }
+.fld-row > label input, .fld-row > label select, .fld-row > label textarea { color: var(--text); }
+.fld-row input, .fld-row select, .tool-form.ctl-row select, .tool-form.ctl-row input { min-height: 38px; font-size: 14px; padding: 0 8px; }
+.fld-row input[type=checkbox], .tool-form input[type=checkbox] { min-height: 0; width: 18px; height: 18px; padding: 0; accent-color: var(--accent-2); }
+.fld-row button { flex: 0 0 auto; }
+.fld-row .grow, .fld-row > label.grow { flex: 1 1 180px; min-width: 0; }
+.fld-row > label.grow input { flex: 1 1 auto; min-width: 0; width: 100%; }
+.num-sm { width: 4.6em; }
+.num-md { width: 6.4em; }
+label.fld { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+label.fld textarea { color: var(--text); font-family: var(--mono); font-size: 13px; padding: 6px 8px; min-height: 52px; resize: vertical; }
+.sub-h { margin: 4px 0 -2px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+details.sub { border-top: 1px dashed var(--line); padding-top: 6px; }
+details.sub > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); min-height: 30px; display: flex; align-items: center; }
+details.sub[open] > summary { margin-bottom: 6px; }
+.tool-card .row-head { margin-bottom: 6px; }
+.tool-card .row-head .muted { flex: 1 1 200px; }
+.tool-card .tool-form + .tool-form { margin-top: 6px; }
+.tool-out { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; }
+#panel-acq { padding: 8px; }
+
+/* a camera's settings, each with the control that fits its value */
+.cam-settings { display: flex; flex-direction: column; gap: 4px; }
+.cam-settings:empty { display: none; }
+.cs-sec { margin: 8px 0 2px; font-size: 12px; color: var(--accent); font-weight: 600; }
+.cs-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.cs-label { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-ctl { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 60%; }
+.cs-ctl input, .cs-ctl select { min-height: 36px; font-size: 14px; padding: 0 8px; width: 9em; max-width: 100%; }
+
+/* results: what a tool answered, readable */
+.td-item { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; }
+.td-item + .td-item { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+.td-item.err .td-meta b { color: var(--err); }
+.td-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.td-meta .muted { display: inline-flex; align-items: center; gap: 5px; }
+.td-lead { margin: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+.td-lead b { color: var(--accent); font-weight: 600; margin-right: 4px; text-transform: capitalize; }
+.td-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 var(--mono); max-height: 50vh; overflow: auto; }
+.td-code { font: 11.5px var(--mono); overflow-wrap: anywhere; }
+.td-imgs { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
+.td-imgs img { width: 100%; border-radius: 8px; border: 1px solid var(--line); cursor: zoom-in; background: #000; }
+.kv { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 2px 10px; margin: 0; min-width: 0; }
+.kv dt { color: var(--muted); text-transform: capitalize; overflow-wrap: anywhere; }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.kv .kv { padding-left: 8px; border-left: 2px solid var(--line); }
+.td-ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.td-scroll { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
+.td-table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.td-table th, .td-table td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.td-table th { color: var(--muted); font-weight: 600; text-transform: capitalize; }
+
+/* the drawer: a sheet over the tab bar on a phone, a floating panel at desk widths */
+.tool-drawer { position: fixed; left: 0; right: 0; bottom: calc(var(--nav-h) + var(--safe-b)); z-index: 43; max-height: min(70vh, calc(100% - 120px)); display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--line-2); border-radius: 16px 16px 0 0; box-shadow: 0 -18px 44px rgba(0, 0, 0, .65); }
+.tool-drawer[hidden] { display: none; }
+.td-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--line); }
+.td-items { overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 10px 14px 14px; }
+.chip-results { cursor: pointer; color: var(--accent); border-color: var(--accent-2); }
+.chip-results[hidden] { display: none; }
+.chip-results.busy { color: var(--warn); border-color: var(--warn); }
+body.view-full .tool-drawer { display: none; }
+@media (min-width: 1000px) {
+  .tool-drawer { left: auto; right: 84px; bottom: 12px; width: min(480px, 40vw); max-height: 70vh; border: 1px solid var(--line-2); border-radius: var(--radius); }
+}
+
+/* drawing the box of an object to track on the main view */
+.pick-layer { position: absolute; inset: 0; z-index: 6; cursor: crosshair; touch-action: none; background: rgba(0, 0, 0, .12); }
+.pick-box { position: absolute; border: 2px dashed var(--ok); background: rgba(74, 222, 128, .12); pointer-events: none; }
+.pick-hint { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); padding: 4px 10px; border-radius: 8px; font-size: 12px; background: rgba(0, 0, 0, .7); white-space: nowrap; pointer-events: none; }
+#view-main.picking .view-buttons { display: none; }
+/* a phone: a nested table or list takes the whole width under its key, not a squeezed column */
+@media (max-width: 699px) {
+  .kv > dd:has(> .td-scroll, > .kv, > .td-ol) { grid-column: 1 / -1; padding-left: 8px; }
+}

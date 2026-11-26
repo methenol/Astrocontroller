@@ -577,3 +577,111 @@ test('the Research tab lists the packages, searches them and opens one with its 
   click('#rs-close');
   assert.ok(!ui.$('.research-layout').classList.contains('reading'));
 });
+
+// ---- the agent's tools in the UI (tools.js and the screens built on it)
+
+const SEESTAR_TOOLS = [
+  { name: 'move_motors', schema: { type: 'object', properties: { azimuth_deg: { type: 'number' }, altitude_deg: { type: 'number' }, relative: { type: 'boolean' } } } },
+  { name: 'focus_position', schema: { type: 'object', properties: { action: { type: 'string', enum: ['get', 'infinity', 'goto'] }, position: { type: 'integer' } }, required: ['action'] } },
+  { name: 'dark_frames', schema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'status', 'ensure_auto'] } } } },
+  { name: 'sentry_mode', schema: { type: 'object', properties: { action: { type: 'string', enum: ['start', 'stop'] } } } },
+  { name: 'set_camera_setting', schema: { type: 'object', properties: { camera: { type: 'string', enum: ['tele', 'wide'] }, setting: { type: 'string' }, value: {} } } },
+  { name: 'get_camera_settings', schema: { type: 'object', properties: { camera: { type: 'string', enum: ['tele', 'wide'] } } } },
+  { name: 'start_stacking', schema: { type: 'object', properties: { restart: { type: 'boolean' } } } },
+];
+const toolBody = (name: string) => calls.filter((c) => c.method === 'POST' && c.path === `tools/${name}`).map((c) => c.body);
+const hiddenField = (form: string, name: string) => !!ui.$(`form[data-tool="${form}"] [name="${name}"]`).closest('[hidden]');
+
+test("the tool forms follow the driver's schemas: its fields, its actions, its options and what it lacks", async () => {
+  openTab('view');
+  route('GET tools', () => ({ tools: SEESTAR_TOOLS }));
+  stateSocket().push({ type: 'config', config: { driver: 'seestar', driverLabel: 'ZWO Seestar', capabilities: { trackObject: false, sentry: false } } });
+  await until(() => hiddenField('move_motors', 'rotation_deg'), 'the Dwarf-only fields hidden');
+  // the Seestar moves by azimuth/altitude, not the Dwarf's rotation/pitch
+  assert.equal(hiddenField('move_motors', 'azimuth_deg'), false);
+  assert.equal(hiddenField('move_motors', 'pitch_deg'), true);
+  // an action its tool does not take, and a select's options its enum lacks
+  assert.ok(ui.$('form[data-tool="focus_position"] button[value="save_infinity"]').hidden);
+  assert.equal(ui.$('form[data-tool="focus_position"] button[value="infinity"]').hidden, false);
+  const darks = [...(ui.$('form[data-tool="dark_frames"] select[name="action"]') as HTMLSelectElement).options].map((o) => o.value);
+  assert.deepEqual(darks, ['list', 'status', 'ensure_auto']);
+  // a tool this driver has not registered: the form is gone; one it has but cannot carry out (capabilities): hidden too
+  assert.ok(ui.$('form[data-tool="goto_target"]').hidden);
+  assert.ok(ui.$('form[data-tool="sentry_mode"]').hidden);
+  assert.ok(ui.$('#btn-track-pick').closest('[hidden]'));
+  // the Dwarf's stacking fields are not offered to the Seestar
+  assert.ok(ui.$('#stack-form [name="frames"]').closest('[hidden]'));
+  assert.equal(!!ui.$('#stack-form [name="restart"]').closest('[hidden]'), false);
+});
+
+test('a tool form posts its fields typed by the schema, and the answer opens in the results drawer', async () => {
+  route('POST tools/move_motors', () => ({ tool: 'move_motors', text: '{}', json: { verdict: 'slew complete', pointing: { azDeg: 92.5, altDeg: 40 } }, images: ['captures/agent/2026_move.jpg'] }));
+  calls.length = 0;
+  const form = ui.$('form[data-tool="move_motors"]');
+  (ui.$('form[data-tool="move_motors"] [name="azimuth_deg"]') as HTMLInputElement).value = '92.5';
+  (ui.$('form[data-tool="move_motors"] [name="relative"]') as HTMLInputElement).checked = true;
+  form.querySelector('button')!.click();
+  await until(() => !ui.$('#tool-drawer').hidden, 'the drawer open');
+  // empty fields are left out; the number is a number; the checkbox is true
+  assert.deepEqual(toolBody('move_motors')[0], { azimuth_deg: 92.5, relative: true });
+  assert.match(text('#td-list .td-lead'), /verdict\s+slew complete/);
+  assert.match(text('#td-list .kv'), /az Deg\s*92\.5/);
+  assert.equal(ui.$('#td-list .td-imgs img').getAttribute('src'), 'captures/agent/2026_move.jpg');
+  click('#td-close');
+  assert.ok(ui.$('#tool-drawer').hidden);
+  // closed with results kept: the chip reopens it
+  assert.equal(ui.$('#chip-results').hidden, false);
+});
+
+test('a refused tool shows its error in the drawer and a toast', async () => {
+  route('POST tools/focus_position', () => {
+    throw new Error('the focuser is busy');
+  });
+  ui.$('form[data-tool="focus_position"] button[value="infinity"]').click();
+  await until(() => /the focuser is busy/.test(text('#td-list')), 'the error in the drawer');
+  assert.deepEqual(toolBody('focus_position').at(-1), { action: 'infinity' });
+  assert.match(toastText(), /the focuser is busy/);
+  assert.equal(ui.$('#tool-drawer').hidden, false);
+});
+
+test("the camera's settings list: a row per setting with the control that fits it, applied when changed", async () => {
+  route('POST tools/get_camera_settings', () => ({
+    text: '{}',
+    json: { camera: 'tele', exposure: { stackSubS: 10, liveS: 0.5 }, gain: 80, filterWheel: { position: 1, name: 'IRCUT', slots: ['Dark', 'IRCUT', 'LP'] }, settings: { auto_af: true, stack_dither: { pix: 50, interval: 5, enable: true }, exp_ms: {} } },
+  }));
+  route('POST tools/set_camera_setting', () => ({ text: 'ok', json: { result: 'ok' } }));
+  calls.length = 0;
+  click('#btn-cam-settings');
+  await until(() => ui.document.querySelectorAll('#cam-settings .cs-row').length > 0, 'the settings rows');
+  const labels = [...ui.document.querySelectorAll('#cam-settings .cs-label')].map((e) => e.textContent?.trim());
+  assert.deepEqual(labels, ['Stack sub length', 'Live exposure', 'Gain', 'Filter', 'auto af', 'stack dither']);
+  // a number set as a number, under the Seestar's own name for it
+  const gain = ui.document.querySelectorAll<HTMLInputElement>('#cam-settings [data-cs]')[2]!;
+  gain.value = '120';
+  gain.dispatchEvent(new ui.window.Event('change', { bubbles: true }));
+  await until(() => toolBody('set_camera_setting').length === 1, 'the gain set');
+  assert.deepEqual(toolBody('set_camera_setting')[0], { camera: 'tele', setting: 'gain', value: 120 });
+  // a switch: its Off pressed
+  click('#cam-settings .sw-seg button[data-v="false"]');
+  await until(() => toolBody('set_camera_setting').length === 2, 'the switch set');
+  assert.deepEqual(toolBody('set_camera_setting')[1], { camera: 'tele', setting: 'auto_af', value: false });
+});
+
+test('stacking on the Seestar sets the sub length and gain the way the agent does, then starts', async () => {
+  route('POST tools/start_stacking', () => ({ text: 'stacking', json: { stacking: true } }));
+  calls.length = 0;
+  const f = ui.$('#stack-form') as HTMLFormElement;
+  (f.elements.namedItem('exposure') as HTMLInputElement).value = '20';
+  (f.elements.namedItem('gain') as HTMLInputElement).value = '80';
+  (f.elements.namedItem('restart') as HTMLInputElement).checked = true;
+  click('#btn-stack-go');
+  await until(() => toolBody('start_stacking').length === 1, 'the stack started');
+  assert.deepEqual(
+    calls.filter((c) => c.path.startsWith('tools/') && c.path !== 'tools/get_camera_settings').map((c) => [c.path, c.body]),
+    [
+      ['tools/set_camera_setting', { camera: 'tele', setting: 'exposure', value: '20' }],
+      ['tools/set_camera_setting', { camera: 'tele', setting: 'gain', value: 80 }],
+      ['tools/start_stacking', { restart: true }],
+    ],
+  );
+});

@@ -47,10 +47,12 @@ function create({ agent }: DriverDeps): DriverRuntime {
     facts: dwarfFacts(dwarf),
   });
 
+  const mcp = dwarfMcpSpec({ dwarf, hub, duty, night });
+
   return {
     device: dwarf,
-    mcp: dwarfMcpSpec({ dwarf, hub, duty, night }),
-    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: dwarfWeb(dwarf, hub), agent, duty, night }),
+    mcp,
+    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: dwarfWeb(dwarf, hub), agent, duty, night, tools: mcp }),
     start() {
       dwarf.start();
       travelGuard.start();

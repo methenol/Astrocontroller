@@ -251,8 +251,10 @@ describe('Seestar behind the shared web UI', () => {
     assert.deepEqual(Object.keys(web.capabilities).filter((k) => k !== 'singleView').sort(), Object.keys(dwarf.capabilities).sort());
     assert.equal(web.capabilities.singleView, true);
     assert.deepEqual(web.capabilities.video, ['tele', 'wide', 'stack']);
-    // parity: the Seestar does everything the Dwarf does
-    for (const [k, v] of Object.entries(web.capabilities)) if (k !== 'video') assert.equal(v, true, k);
+    // parity: the Seestar does everything the Dwarf does, but follow an object by a drawn box or run
+    // sentry: its tracking takes an object id from its own detection, which it does not report
+    const lacks = ['sentry', 'trackObject'];
+    for (const [k, v] of Object.entries(web.capabilities)) if (k !== 'video') assert.equal(v, !lacks.includes(k), k);
     web.hub.shutdown();
   });
 });

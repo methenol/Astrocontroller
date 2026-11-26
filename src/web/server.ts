@@ -21,6 +21,7 @@ import { stellariumRoutes } from './routes/stellarium.js';
 import { researchRoutes } from './routes/research.js';
 import { weatherRoutes } from './routes/weather.js';
 import { nightRoutes } from './routes/night.js';
+import { toolRoutes } from './routes/tools.js';
 import { RainGuard } from '../astro/weather/guard.js';
 import { observerSite } from './context.js';
 import { escapeHtml } from '../hub/html.js';
@@ -60,6 +61,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(researchRoutes());
   api.use(weatherRoutes(ctx, guard));
   api.use(nightRoutes(ctx));
+  api.use(toolRoutes(ctx));
   // the driver's own API (the Seestar's tunnel and raw RPC)
   if (deps.scope.routes) api.use(deps.scope.routes());
   api.use((req, res) => res.status(404).json({ error: `no such API route: ${req.method} ${req.path}` }));

@@ -3,6 +3,10 @@ import { layoutBoot } from './shell.js';
 import { startVideo } from './video.js';
 import './telescope.js';
 import './controls.js';
+import './tools.js';
+import './camera-settings.js';
+import './stacking.js';
+import './pointing.js';
 import './switches.js';
 import './duty.js';
 import './chat.js';
@@ -17,6 +21,7 @@ import './research.js';
 import './research-library.js';
 import './album.js';
 import './library.js';
+import './acquisition.js';
 import './skills.js';
 import './logs.js';
 // after every screen: its 'telescope' listener runs last and keeps unsupported controls off

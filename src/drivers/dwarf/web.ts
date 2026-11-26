@@ -35,6 +35,8 @@ const CAPABILITIES: Capabilities = {
   starFocus: true,
   starTune: true,
   polarAlign: true,
+  trackObject: true,
+  sentry: true,
   modes: true,
   exposure: true,
   gain: true,

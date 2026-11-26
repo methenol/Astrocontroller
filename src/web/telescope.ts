@@ -34,6 +34,10 @@ export interface Capabilities {
   /** the focus sweep on the stars */
   starTune: boolean;
   polarAlign: boolean;
+  /** following an object by a box drawn on the frame (track_object) */
+  trackObject: boolean;
+  /** automatic detection and tracking (sentry_mode) */
+  sentry: boolean;
   modes: boolean;
   exposure: boolean;
   gain: boolean;

@@ -60,10 +60,11 @@ function create({ agent }: DriverDeps): DriverRuntime {
     facts: seestarFacts(scope),
   });
   const web = seestarWeb(scope, media, nights);
+  const mcp = seestarMcpSpec(scope, duty, media, nights, night);
   return {
     device: scope,
-    mcp: seestarMcpSpec(scope, duty, media, nights, night),
-    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: web, agent, duty, night }),
+    mcp,
+    mountWeb: (app: Express, server: http.Server) => mountWeb(app, server, { scope: web, agent, duty, night, tools: mcp }),
     start: () => {
       scope.start();
       nights?.start();

@@ -25,7 +25,7 @@ const CONTROLS = [
   ['#inp-gain', 'gain', 'Gain'],
   ['[data-act="sync"]', 'sync', 'Time and location sync'],
   ['[data-act="liveview"]', 'liveView', 'Waking the live view'],
-  ['[data-act="stack_stop"], #btn-stack', 'stack', 'Live stacking'],
+  ['[data-act="stack_stop"], #btn-stack, #stack-form button, #btn-stack-image', 'stack', 'Live stacking'],
   ['[data-power="reboot"]', 'reboot', 'Reboot'],
   ['[data-power="shutdown"]', 'shutdown', 'Shut down'],
   ['#btn-photo', 'photo', 'Photos'],

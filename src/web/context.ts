@@ -5,6 +5,7 @@ import type { NightServices } from '../night/index.js';
 import { config, observerLocation, telescopeHostInfo } from '../config.js';
 import { withoutCredentials } from '../util/url.js';
 import type { WebTelescope } from './telescope.js';
+import type { McpSpec } from '../drivers/types.js';
 
 export interface WebContext {
   /** the telescope, through its driver's adapter */
@@ -13,6 +14,8 @@ export interface WebContext {
   duty: DutyLoop;
   /** the night plan, the program and the journal */
   night?: NightServices | null;
+  /** the agent's tools (the driver's MCP server), which the web UI runs too: /api/tools */
+  tools?: McpSpec;
   /** Send a message to every connected UI over the state socket. */
   broadcast(msg: unknown): void;
 }

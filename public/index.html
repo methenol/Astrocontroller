@@ -44,6 +44,7 @@
     <symbol id="i-log" viewBox="0 0 24 24"><path d="M5 7l4 4-4 4M11 17h8"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
     <symbol id="i-gear" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"/><rect x="3.5" y="14" width="17" height="6" rx="1.5"/><circle cx="7" cy="7" r=".9"/><circle cx="7" cy="17" r=".9"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 13.5l4-5"/><circle cx="12" cy="14" r="1.4"/><path d="M7 11.5l-1-.6M12 7.5V6.3M17 11.5l1-.6"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 8.5h3l1.5-2.5h9L18 8.5h3v11H3z"/><circle cx="12" cy="14" r="3.5"/></symbol>
   </defs></svg>
 
@@ -65,6 +66,7 @@
       <span class="chip" id="chip-mount" title="Mount mode and motor angles">mount –</span>
       <span class="chip" id="chip-sd" title="SD card free">SD –</span>
       <span class="chip" id="chip-wx" title="Weather now / tonight">☁ –</span>
+      <button type="button" class="chip chip-results" id="chip-results" title="Open the results of what you ran" hidden>⧉ results</button>
       <button type="button" class="chip chip-guard" id="chip-guard" title="Rain Guard: open the Weather tab" hidden>☔ guard</button>
     </div>
     <div class="top-actions">
@@ -90,6 +92,7 @@
       <button class="tab" data-tab="calendar" role="tab" aria-selected="false" aria-controls="panel-calendar"><svg class="i" aria-hidden="true"><use href="#i-calendar"/></svg><span>Calendar</span></button>
       <button class="tab" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather"><svg class="i" aria-hidden="true"><use href="#i-rain"/></svg><span>Weather</span></button>
       <button class="tab" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium"><svg class="i" aria-hidden="true"><use href="#i-sky"/></svg><span>Stellarium</span></button>
+      <button class="tab" data-tab="acq" role="tab" aria-selected="false" aria-controls="panel-acq"><svg class="i" aria-hidden="true"><use href="#i-gauge"/></svg><span>Acquire</span></button>
       <button class="tab" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><svg class="i" aria-hidden="true"><use href="#i-db"/></svg><span>Database</span></button>
       <button class="tab" data-tab="research" role="tab" aria-selected="false" aria-controls="panel-research"><svg class="i" aria-hidden="true"><use href="#i-research"/></svg><span>Research</span></button>
       <button class="tab" data-tab="album" role="tab" aria-selected="false" aria-controls="panel-album"><svg class="i" aria-hidden="true"><use href="#i-album"/></svg><span>Album</span></button>
@@ -160,6 +163,60 @@
             </div>
           </details>
 
+          <details class="group" id="grp-point">
+            <summary>Pointing<span class="grp-hint">GoTo · solve · move · track</span></summary>
+            <div class="group-body">
+              <form class="tool-form" data-tool="goto_target" data-label="GoTo" autocomplete="off">
+                <div class="fld-row">
+                  <input name="name" class="grow" enterkeyhint="go" placeholder="M 31, Jupiter, Vega…" aria-label="Target name">
+                  <button type="submit" class="primary">GoTo</button>
+                </div>
+                <div class="fld-row">
+                  <label>RA <input name="ra_hours" type="number" min="0" max="24" step="any" inputmode="decimal" placeholder="h" class="num-md"></label>
+                  <label>Dec <input name="dec_deg" type="number" min="-90" max="90" step="any" inputmode="decimal" placeholder="°" class="num-md"></label>
+                  <label title="Plate-solve first (one-click GoTo)"><input type="checkbox" name="one_click" checked data-unchecked="false"> calibrate first</label>
+                  <label title="The light-pollution (duo-band) filter for this target"><input type="checkbox" name="lp_filter"> LP filter</label>
+                  <label><input type="checkbox" name="stack"> stack on arrival</label>
+                </div>
+              </form>
+              <div class="ctl-row">
+                <button type="button" data-tool="calibrate" data-driver="dwarf" title="Plate-solve the sky to learn the pointing (1-3 min; needs stars, DSO mode, homed motors)">Calibrate</button>
+                <button type="button" data-tool="plate_solve" title="Plate-solve the view: where the scope really points and how far the target is from the centre">Plate solve</button>
+                <button type="button" data-tool="motor_position" data-label="Pointing" title="Read where the mount points">Where?</button>
+                <button type="button" data-tool="mark_blocked" data-confirm="Record that the tele's view is blocked here (a wall, a roof, a tree)? The planner learns when the target clears it." title="The view is blocked here: record the patch of sky and when the target clears it">Blocked here</button>
+              </div>
+              <form class="tool-form" data-tool="move_motors" data-label="Move" autocomplete="off">
+                <div class="fld-row">
+                  <label>rotation <input name="rotation_deg" type="number" step="any" inputmode="decimal" placeholder="°" class="num-md"></label>
+                  <label>pitch <input name="pitch_deg" type="number" step="any" inputmode="decimal" placeholder="°" class="num-md"></label>
+                  <label>az <input name="azimuth_deg" type="number" step="any" inputmode="decimal" placeholder="°" class="num-md"></label>
+                  <label>alt <input name="altitude_deg" type="number" step="any" inputmode="decimal" placeholder="°" class="num-md"></label>
+                  <label>speed <input name="speed" type="number" min="0.1" max="30" step="any" inputmode="decimal" placeholder="10" class="num-sm"> °/s</label>
+                  <label><input type="checkbox" name="relative"> by</label>
+                  <button type="submit" title="Slew to (or by) these angles without plate solving">Move</button>
+                </div>
+              </form>
+              <h4 class="sub-h">Tracking</h4>
+              <form class="tool-form ctl-row" data-tool="track_sun_moon" data-label="Sun/Moon tracking">
+                <select name="body" aria-label="Body"><option value="moon">Moon</option><option value="sun">Sun (solar filter!)</option></select>
+                <button type="submit" name="action" value="start">Track</button>
+                <button type="submit" name="action" value="stop" class="warn">Stop</button>
+              </form>
+              <div class="ctl-row" data-cap="trackObject">
+                <button type="button" id="btn-track-pick" title="Draw a box round the object on the main view (tele or wide); the telescope follows it">Track object…</button>
+                <button type="button" class="warn" id="btn-track-stop" data-tool="track_object" data-args='{"action":"stop"}' data-label="Stop tracking">Stop tracking</button>
+              </div>
+              <form class="tool-form ctl-row" data-tool="sentry_mode" data-label="Sentry" data-cap="sentry">
+                <select name="object_type" aria-label="What to watch for"><option value="0">anything</option><option value="2">birds</option><option value="3">people</option><option value="4">animals</option><option value="5">vehicles</option><option value="6">flying objects</option><option value="7">boats</option></select>
+                <button type="submit" name="action" value="start" title="Watch with the wide camera and track what appears">Sentry</button>
+                <button type="submit" name="action" value="stop" class="warn">Stop</button>
+              </form>
+              <div class="ctl-row">
+                <button type="button" data-tool="astro_recover" data-label="Astro recovery" data-confirm="Release a stuck astro service? Every astro operation is stopped and the live view restarted (for commands refused although nothing runs)." title="Release a stuck astro service without a power cycle">Recover astro</button>
+              </div>
+            </div>
+          </details>
+
           <details class="group" id="grp-focus">
             <summary>Focus<span class="grp-hint">autofocus · stars · manual</span></summary>
             <div class="group-body">
@@ -177,6 +234,35 @@
                 </select>
               </div>
               <p class="small muted" id="focus-note">AF ★ finds focus on the stars over the whole range; <strong>Tune ★</strong> then searches ± the chosen range and stops on the sharpest. <strong>Sharpness ★</strong> only measures the current focus.</p>
+              <form class="tool-form ctl-row" data-tool="focus_position" data-label="Focuser" autocomplete="off">
+                <input name="position" type="number" min="0" step="1" inputmode="numeric" placeholder="position" aria-label="Focuser position" class="num-md">
+                <button type="submit" name="action" value="goto" title="Drive the focuser to this position">Go</button>
+                <button type="submit" name="action" value="infinity" title="Drive to the stored infinity focus: the starting point for sky work without stars">∞</button>
+                <button type="submit" name="action" value="get" title="Read the focuser and the stored infinity position">Read</button>
+                <button type="submit" name="action" value="save_infinity" data-confirm="Store the current focuser position as the infinity reference? Only after a verified-good star focus." title="Store the current position as the infinity reference">Save ∞</button>
+              </form>
+              <details class="sub">
+                <summary>Sweep and measure options</summary>
+                <form class="tool-form" data-tool="star_focus" data-label="Star focus sweep" data-confirm="Run a star focus sweep with these options? It takes a tele still at every position (minutes) and refuses while stacking.">
+                  <div class="fld-row">
+                    <label>centre <input name="center" type="number" min="0" step="1" inputmode="numeric" placeholder="now" class="num-sm"></label>
+                    <label>± <input name="range" type="number" min="5" step="1" inputmode="numeric" placeholder="10" class="num-sm"></label>
+                    <label>step <input name="step" type="number" min="1" step="1" inputmode="numeric" placeholder="1" class="num-sm"></label>
+                    <label>exp <input name="exposure_s" type="number" min="0.05" step="any" inputmode="decimal" placeholder="auto" class="num-sm"> s</label>
+                    <label>gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" placeholder="as is" class="num-sm"></label>
+                    <label>repeats <input name="repeats" type="number" min="1" max="3" step="1" inputmode="numeric" placeholder="1" class="num-sm"></label>
+                    <label><input type="checkbox" name="apply" checked data-unchecked="false"> leave on the best</label>
+                    <button type="submit">Sweep</button>
+                  </div>
+                </form>
+                <form class="tool-form" data-tool="star_sharpness" data-label="Star sharpness">
+                  <div class="fld-row">
+                    <label>exp <input name="exposure_s" type="number" min="0.05" step="any" inputmode="decimal" placeholder="auto" class="num-sm"> s</label>
+                    <label>gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" placeholder="as is" class="num-sm"></label>
+                    <button type="submit">Measure</button>
+                  </div>
+                </form>
+              </details>
             </div>
           </details>
 
@@ -192,19 +278,116 @@
           </details>
 
           <details class="group" id="grp-mode">
-            <summary>Mode &amp; exposure<span class="grp-hint">shooting mode · camera settings</span></summary>
+            <summary>Camera<span class="grp-hint">mode · exposure · filter · all settings</span></summary>
             <div class="group-body">
               <div class="ctl-row">
                 <select id="sel-mode" title="Shooting mode" aria-label="Shooting mode">
                   <option>Normal</option><option>DSO</option><option>Sun</option><option>Moon</option><option>Planet</option>
                   <option>Milky Way</option><option>Star Trail</option><option>Auto Tracking</option><option>Panorama</option>
                 </select>
+                <select id="sel-filter" title="The tele filter: the focuser keeps the focus by the measured filter offset" aria-label="Tele filter"><option value="">filter…</option></select>
               </div>
               <div class="ctl-row">
                 <input id="inp-exp" placeholder="exp: 1/250 or auto" size="10" inputmode="decimal" autocomplete="off" aria-label="Exposure">
                 <input id="inp-gain" placeholder="gain" size="4" inputmode="numeric" autocomplete="off" aria-label="Gain">
                 <button id="btn-apply">Apply</button>
               </div>
+              <form class="tool-form ctl-row" data-tool="start_live_view" data-label="Live view">
+                <label title="The light-pollution (duo-band) filter in the view"><input type="checkbox" name="lp_filter"> LP filter</label>
+                <button type="submit" title="A live view without a target (no GoTo), e.g. to check the sky or focus">Start live view</button>
+              </form>
+              <h4 class="sub-h">Timelapse</h4>
+              <form class="tool-form ctl-row" data-tool="timelapse" data-label="Timelapse">
+                <select name="camera" aria-label="Timelapse camera"><option value="tele">tele</option><option value="wide">wide</option></select>
+                <label>every <input name="interval_s" type="number" min="0" step="1" inputmode="numeric" placeholder="5" class="num-sm"> s</label>
+                <label>for <input name="total_s" type="number" min="0" step="1" inputmode="numeric" placeholder="∞" class="num-sm"> s</label>
+                <button type="submit" name="action" value="start">Start</button>
+                <button type="submit" name="action" value="stop" class="warn">Stop</button>
+                <button type="submit" name="action" value="status">Status</button>
+              </form>
+              <h4 class="sub-h">All settings</h4>
+              <div class="ctl-row">
+                <select id="cs-cam" aria-label="Camera whose settings to show"><option value="tele">tele</option><option value="wide">wide</option></select>
+                <button type="button" id="btn-cam-settings" title="Every setting the camera reports, with its current value; change one and it is applied">Show settings</button>
+              </div>
+              <div class="cam-settings" id="cam-settings"></div>
+            </div>
+          </details>
+
+          <details class="group" id="grp-stack">
+            <summary>Stacking<span class="grp-hint">sub length · gain · filter · frames · dither</span></summary>
+            <div class="group-body">
+              <form id="stack-form" class="tool-form-plain" autocomplete="off">
+                <div class="fld-row">
+                  <label>sub <input name="exposure" inputmode="decimal" placeholder="as is" class="num-sm" aria-label="Sub length in seconds"> s</label>
+                  <label>gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" placeholder="as is" class="num-sm"></label>
+                  <label>filter <select name="filter" id="stack-filter"><option value="">as is</option></select></label>
+                  <label data-driver="dwarf">frames <input name="frames" type="number" min="1" max="999" step="1" inputmode="numeric" placeholder="999" class="num-sm"></label>
+                  <label data-driver="dwarf" title="Start even if the telescope thinks calibration or the GoTo is missing"><input type="checkbox" name="force"> force</label>
+                  <label data-driver="seestar" title="Begin a new stack instead of adding to the current one"><input type="checkbox" name="restart"> new stack</label>
+                </div>
+                <div class="ctl-row">
+                  <button type="submit" class="primary" id="btn-stack-go">▶ Start stacking</button>
+                  <button type="button" class="warn" id="btn-stack-halt">Stop</button>
+                  <button type="button" class="warn" id="btn-stack-fast" data-driver="dwarf" title="Stop without waiting for the final stack">Fast stop</button>
+                </div>
+              </form>
+              <div class="ctl-row">
+                <button type="button" data-tool="stacking_status" data-label="Stacking status">Status</button>
+                <button type="button" id="btn-stack-image" title="The stacked image so far">Stacked image</button>
+              </div>
+              <form class="tool-form" data-tool="set_dither" data-label="Dither">
+                <div class="fld-row">
+                  <label><input type="checkbox" name="enable" checked data-unchecked="false"> dither</label>
+                  <label>by <input name="pixels" type="number" min="1" max="200" step="1" inputmode="numeric" placeholder="px" class="num-sm"> px</label>
+                  <label>every <input name="interval" type="number" min="1" max="100" step="1" inputmode="numeric" placeholder="n" class="num-sm"> subs</label>
+                  <button type="submit">Set</button>
+                </div>
+              </form>
+              <p class="small muted">Empty fields keep what the telescope has. Point at the target with GoTo first.</p>
+            </div>
+          </details>
+
+          <details class="group" id="grp-measure">
+            <summary>Measure<span class="grp-hint">sky · visibility · images</span></summary>
+            <div class="group-body">
+              <form class="tool-form" data-tool="sky_check" data-label="Sky check">
+                <div class="fld-row">
+                  <label>exp <input name="exposure_s" type="number" min="0.2" max="15" step="any" inputmode="decimal" placeholder="2.5" class="num-sm"> s</label>
+                  <label>gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" placeholder="60" class="num-sm"></label>
+                  <button type="submit" title="A wide still where the scope points: star count, background and a clear / cloudy verdict">Sky check</button>
+                </div>
+              </form>
+              <form class="tool-form" data-tool="tele_visibility" data-label="Tele visibility">
+                <div class="fld-row">
+                  <label>exp <input name="exposure_s" type="number" min="1" max="60" step="any" inputmode="decimal" placeholder="10" class="num-sm"> s</label>
+                  <button type="submit" title="Is the target really in the tele frame? Stars measured at infinity focus: VISIBLE or BLOCKED">Tele visible?</button>
+                </div>
+              </form>
+              <form class="tool-form" data-tool="analyze_image" data-label="Analyze">
+                <div class="fld-row">
+                  <select name="source" aria-label="Image to analyze"><option value="tele">tele</option><option value="wide">wide</option><option value="stack">stack</option></select>
+                  <label>exp <input name="exposure_s" type="number" min="0.01" max="60" step="any" inputmode="decimal" placeholder="live" class="num-sm"> s</label>
+                  <button type="submit" title="Background, noise, saturation, stars, HFR/FWHM, roundness and colour, with an assessment">Analyze</button>
+                </div>
+              </form>
+              <form class="tool-form" data-tool="view_camera" data-label="Look">
+                <div class="fld-row">
+                  <select name="source" aria-label="Camera to look through"><option value="tele">tele</option><option value="wide">wide</option><option value="stack">stack</option></select>
+                  <select name="camera" aria-label="Camera to look through"><option value="tele">tele</option><option value="wide">wide</option></select>
+                  <label>exp <input name="exposure_s" type="number" min="0.01" max="60" step="any" inputmode="decimal" placeholder="live" class="num-sm"> s</label>
+                  <label><input type="checkbox" name="stretch"> stretch</label>
+                  <label><input type="checkbox" name="full_resolution"> full res</label>
+                  <button type="submit" title="One frame (or a still at this exposure, the camera restored after)">Look</button>
+                </div>
+              </form>
+              <form class="tool-form" data-tool="get_image" data-label="Seestar image">
+                <div class="fld-row">
+                  <select name="kind" aria-label="Which image"><option value="stacked">stack</option><option value="preview">live sub</option></select>
+                  <select name="camera" aria-label="Camera"><option value="tele">tele</option><option value="wide">wide</option></select>
+                  <button type="submit" title="The stacked image or one live sub, with stars, HFR/FWHM and an assessment">Get image</button>
+                </div>
+              </form>
             </div>
           </details>
 
@@ -228,6 +411,45 @@
                 <button class="warn" data-power="reboot" title="Reboot the telescope (fixes a hung camera service); it reconnects in about a minute">Reboot</button>
                 <button class="warn" data-power="shutdown" title="Shut the telescope down">Shut down</button>
               </div>
+              <div class="ctl-row">
+                <button type="button" data-tool="telescope_reconnect" data-label="Reconnect" title="Re-open the control link if it is not working (a healthy one is only checked)">Reconnect</button>
+                <button type="button" data-tool="telescope_status" data-label="Telescope status" title="Everything the telescope reports, in full">Full status</button>
+                <button type="button" data-tool="telescope_device_info" data-label="Device info" title="Model, serial, firmware, optics, storage">Device info</button>
+              </div>
+              <div class="ctl-row">
+                <button type="button" data-tool="tunnel_status" data-label="ZWO tunnel" title="The ZWO Telescope Network tunnel: phase, port, reconnects, the supervisor's report">Tunnel</button>
+                <button type="button" data-tool="tunnel_restart" data-label="Restart tunnel" data-confirm="Restart the ZWO tunnel? The remote session is released and taken again (minutes)." class="warn">Restart tunnel</button>
+                <button type="button" data-tool="zwo_devices" data-label="ZWO devices" title="The telescopes on the ZWO account and their network state">ZWO devices</button>
+                <button type="button" data-tool="starfront_roof" data-args='{"action":"status"}' data-label="Starfront roof" title="The roof over the scope as Starfront reports it, and tonight's window">Roof</button>
+              </div>
+              <details class="sub">
+                <summary>Location for this session</summary>
+                <form class="tool-form" data-tool="sync_time_and_location" data-label="Sync time and location" autocomplete="off">
+                  <div class="fld-row">
+                    <label>lat <input name="latitude" type="number" min="-90" max="90" step="any" inputmode="decimal" class="num-md"></label>
+                    <label>lon <input name="longitude" type="number" min="-180" max="180" step="any" inputmode="decimal" class="num-md"></label>
+                    <label>elev <input name="elevation_m" type="number" step="any" inputmode="decimal" class="num-sm"> m</label>
+                    <button type="submit">Sync</button>
+                  </div>
+                  <p class="small muted">Pushes the clock and this location to the telescope for this session; empty uses the site in .env.</p>
+                </form>
+              </details>
+              <details class="sub">
+                <summary>Expert: raw command</summary>
+                <form class="tool-form" data-tool="raw_command" data-label="Raw command" data-confirm="Send this raw command to the telescope? Nothing checks what it does." autocomplete="off">
+                  <div class="fld-row">
+                    <label>cmd <input name="cmd" type="number" step="1" inputmode="numeric" class="num-md"></label>
+                    <label>method <input name="method" placeholder="get_device_state" spellcheck="false" autocapitalize="off"></label>
+                    <label>timeout <input name="timeout_s" type="number" min="1" max="600" step="1" inputmode="numeric" placeholder="15" class="num-sm"> s</label>
+                  </div>
+                  <label class="fld">params (JSON) <textarea name="params" rows="2" spellcheck="false" autocapitalize="off" placeholder='{"key": "value"}'></textarea></label>
+                  <div class="fld-row">
+                    <label>request type <input name="request_type" spellcheck="false" autocapitalize="off" placeholder="from the registry"></label>
+                    <label>response type <input name="response_type" spellcheck="false" autocapitalize="off" placeholder="from the registry"></label>
+                    <button type="submit" class="warn">Send</button>
+                  </div>
+                </form>
+              </details>
               <form class="ctl-row host-row" id="host-form">
                 <label for="inp-host" class="small muted">Telescope IP</label>
                 <input id="inp-host" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" placeholder="192.168.88.1" title="IP address or host name of the telescope. Leave empty to use the address in .env (DWARF_HOST or SEESTAR_HOST)." aria-label="Telescope IP address">
@@ -389,6 +611,42 @@
           <button class="primary" type="submit">Add</button>
         </form>
         <div id="np-program"></div>
+      </div>
+      <div class="card tool-card" id="np-mosaic-card">
+        <div class="row-head"><h3>Mosaics</h3><span class="muted small">panels for a program target bigger than the frame</span></div>
+        <form class="tool-form" data-tool="plan_mosaic" data-label="Mosaic layout" autocomplete="off">
+          <div class="fld-row">
+            <input name="target" class="grow" placeholder="program target: M 31, NGC 7000…" aria-label="Program target" required>
+            <button type="submit" title="Show the panels it needs (nothing is kept)">Layout</button>
+            <button type="submit" data-args='{"create":true}' data-confirm="Keep this layout as the target's mosaic project? Its panels are fixed from then on and the goal becomes per panel." title="Keep the layout as the target's project">Create</button>
+            <button type="submit" data-args='{"create":true,"replace":true}' data-confirm="Choose the layout again? Only for a project with nothing collected yet." class="warn">Replace</button>
+          </div>
+          <details class="sub">
+            <summary>Area, overlap and angle</summary>
+            <div class="fld-row">
+              <label>width <input name="width_arcmin" type="number" min="0" step="any" inputmode="decimal" placeholder="catalog" class="num-sm">′</label>
+              <label>height <input name="height_arcmin" type="number" min="0" step="any" inputmode="decimal" placeholder="catalog" class="num-sm">′</label>
+              <label>overlap <input name="overlap_pct" type="number" min="5" max="50" step="1" inputmode="numeric" placeholder="auto" class="num-sm"> %</label>
+              <label title="The sensor's width axis, degrees from east through north, if measured (EQ mode)">angle <input name="camera_angle_deg" type="number" min="-180" max="180" step="any" inputmode="decimal" class="num-sm">°</label>
+            </div>
+          </details>
+        </form>
+        <form class="tool-form" data-tool="process_mosaic" data-label="Mosaic" autocomplete="off">
+          <div class="fld-row">
+            <input name="project" class="grow" placeholder="project or target (empty: every project)" aria-label="Mosaic project">
+          </div>
+          <div class="ctl-row">
+            <button type="submit" data-tool="get_mosaic_progress" data-label="Mosaic progress" title="The integration accepted per panel and what is left">Progress</button>
+            <button type="submit" data-tool="get_next_mosaic_panel" data-label="Next panel" title="The panel to shoot now, its position and how long to stack it">Next panel</button>
+            <button type="button" id="btn-mosaic-goto" hidden title="GoTo the panel just shown, under its own name (how its sessions are counted)">GoTo panel</button>
+            <button type="submit" data-tool="start_native_mosaic" data-label="Native mosaic" data-confirm="Start the telescope's own mosaic for this project?">Native mosaic</button>
+          </div>
+          <div class="fld-row">
+            <label class="grow">processing profile <input name="profile" placeholder="the configured one"></label>
+            <button type="submit" data-label="Process mosaic" title="Stack every panel and assemble them in AstroPhoto Studio">Process</button>
+          </div>
+        </form>
+        <div class="tool-out" hidden></div>
       </div>
       <div class="card" id="np-find-card">
         <div class="row-head"><h3>Find targets</h3><span class="muted small">one pool for the plan's fillers and this list, ranked by the plan's own scoring for tonight: what it scheduled first</span><span class="spacer"></span><label class="small"><input type="checkbox" id="np-f-fillers"> fill free time with these</label></div>
@@ -615,7 +873,16 @@
         <div class="row-head"><h3>Processing</h3><span class="spacer"></span><button class="ghost" id="btn-proc-refresh">Refresh</button></div>
         <div id="proc-head" class="muted small">–</div>
         <div id="proc-items" class="muted">no processing items</div>
-        <details id="proc-queue-box"><summary class="muted small">Server queue</summary><div id="proc-queue" class="muted small">–</div></details>
+        <details id="proc-queue-box"><summary class="muted small">Server queue</summary><div id="proc-queue" class="muted small">–</div>
+          <form class="tool-form" data-tool="processing_job" data-label="Processing job" autocomplete="off">
+            <div class="fld-row">
+              <input name="id" class="grow" placeholder="item or job id" aria-label="Processing item or job id" required spellcheck="false" autocapitalize="off">
+              <label>to # <input name="position" type="number" min="1" step="1" inputmode="numeric" class="num-sm"></label>
+              <button type="submit" name="action" value="move" title="Move it to this place in the server queue (1 = next)">Move</button>
+              <button type="submit" name="action" value="get">Details</button>
+            </div>
+          </form>
+        </details>
       </div>
       <div class="card" id="sessions-card">
         <div class="row-head"><h3>Sessions on the telescope</h3><span class="spacer"></span><button class="ghost warn" id="btn-sessions-del" disabled title="Delete every session already transferred to the library from the SD card">Delete transferred</button><button class="ghost" id="btn-sessions">Refresh</button></div>
@@ -623,6 +890,137 @@
       </div>
       <div class="card"><h3>Library <span class="muted small" id="lib-root"></span></h3><div id="library" class="muted">–</div></div>
       <div class="card"><h3>Agent captures</h3><div class="grid" id="captures"></div></div>
+    </section>
+
+    <!-- ========== Acquisition: exposure advice, measurements of this rig and its sky, darks, filter offsets ========== -->
+    <section class="panel" id="panel-acq" role="tabpanel" aria-label="Acquisition">
+      <datalist id="acq-sessions"><option value="latest"></datalist>
+      <div class="card tool-card" id="acq-plan">
+        <div class="row-head"><h3>Exposure advice</h3><span class="muted small">filter, gain, sub length and frames for a target under tonight's sky</span></div>
+        <form class="tool-form" data-tool="acquisition_plan" data-label="Exposure advice" autocomplete="off">
+          <div class="fld-row">
+            <select name="action" aria-label="What to work out"><option value="advise">advise a target</option><option value="device">this telescope's numbers</option><option value="devices">every known model</option></select>
+            <input name="target" data-for="advise" class="grow" enterkeyhint="go" placeholder="M 31, NGC 7000, Sh2-155…" aria-label="Target">
+          </div>
+          <details class="sub" data-for="advise">
+            <summary>Window, position and settings to hold</summary>
+            <div class="fld-row">
+              <label>from <input name="from" placeholder="21:30" class="num-md"></label>
+              <label>until <input name="until" placeholder="02:00" class="num-md"></label>
+              <label>RA <input name="ra_hours" type="number" min="0" max="24" step="any" inputmode="decimal" placeholder="h" class="num-md"></label>
+              <label>Dec <input name="dec_deg" type="number" min="-90" max="90" step="any" inputmode="decimal" placeholder="°" class="num-md"></label>
+              <label>light <select name="emission"><option value="">from the catalog</option><option value="broadband">broadband</option><option value="Ha_dominant">mostly Hα</option><option value="OIII_dominant">mostly OIII</option></select></label>
+              <label>filter <input name="filter" placeholder="plan's choice" class="num-md" list="np-filters"></label>
+              <label>gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" placeholder="plan's" class="num-sm"></label>
+              <label>sub <input name="sub_s" type="number" min="0" step="any" inputmode="decimal" placeholder="plan's" class="num-sm"> s</label>
+            </div>
+          </details>
+          <div class="ctl-row"><button type="submit" class="primary">Work it out</button></div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
+
+      <div class="card tool-card" id="acq-measure">
+        <div class="row-head"><h3>Sensor and sky</h3><span class="muted small">measure this unit's sensor (darks) and the sky (lights), for the advice above</span></div>
+        <form class="tool-form" data-tool="acquisition_measure" data-label="Sensor and sky" autocomplete="off">
+          <div class="fld-row">
+            <select name="action" aria-label="Measurement"><option value="sensor">sensor, from darks</option><option value="sky">sky, from lights</option><option value="check">check a session</option><option value="show">show what is stored</option><option value="forget">forget…</option></select>
+            <input name="session" data-for="sensor sky check" list="acq-sessions" class="grow" placeholder="session folder or latest" aria-label="Session" spellcheck="false" autocapitalize="off">
+          </div>
+          <div class="fld-row">
+            <label data-for="sensor sky check">frames <input name="count" type="number" min="1" step="1" inputmode="numeric" placeholder="auto" class="num-sm"></label>
+            <label data-for="sensor sky check" class="grow">or files <input name="files" placeholder="library paths, comma-separated" spellcheck="false" autocapitalize="off"></label>
+            <label data-for="forget">forget <select name="forget"><option value="gain">one gain</option><option value="device">the sensor</option><option value="sky">the sky</option><option value="seeing">the seeing</option></select></label>
+            <label data-for="forget">gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" class="num-sm"></label>
+          </div>
+          <div class="ctl-row"><button type="submit">Run</button></div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
+
+      <div class="card tool-card" id="acq-sublength">
+        <div class="row-head"><h3>Sub length</h3><span class="muted small">is the sky noise swamping the read noise? From real subs</span></div>
+        <form class="tool-form" data-tool="sub_length" data-label="Sub length" autocomplete="off">
+          <div class="fld-row">
+            <select name="action" aria-label="Sub length action"><option value="analyze">analyze subs</option><option value="show">show the analyses</option><option value="forget">forget them</option></select>
+            <input name="session" data-for="analyze" list="acq-sessions" class="grow" placeholder="session folder or latest" aria-label="Session" spellcheck="false" autocapitalize="off">
+          </div>
+          <div class="fld-row" data-for="analyze">
+            <label>subs <input name="count" type="number" min="1" step="1" inputmode="numeric" placeholder="1" class="num-sm"></label>
+            <label>swamp × <input name="swamp" type="number" min="1" max="100" step="any" inputmode="decimal" placeholder="plan's" class="num-sm"></label>
+            <label>channel <select name="channel"><option value="">auto</option><option value="L">all pixels</option><option value="R">R</option><option value="G">G</option><option value="B">B</option></select></label>
+            <label>narrowband <select name="narrowband"><option value="">by the filter</option><option value="true">yes</option><option value="false">no</option></select></label>
+            <label>exposure <input name="duration_s" type="number" min="0" step="any" inputmode="decimal" placeholder="header" class="num-sm"> s</label>
+            <label class="grow">or files <input name="files" placeholder="library paths, comma-separated" spellcheck="false" autocapitalize="off"></label>
+            <label class="grow">bias/darks <input name="reference" placeholder="default: the matching dark" spellcheck="false" autocapitalize="off"></label>
+          </div>
+          <div class="ctl-row"><button type="submit">Run</button></div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
+
+      <div class="card tool-card" id="acq-quality">
+        <div class="row-head"><h3>Quality probe</h3><span class="muted small">shoot a few settings on the target and keep the one with the best signal-to-noise per hour</span></div>
+        <form class="tool-form" data-tool="acquisition_quality" data-label="Quality probe" autocomplete="off">
+          <div class="fld-row">
+            <select name="action" aria-label="Quality probe action"><option value="status">status</option><option value="plan">plan the points</option><option value="measure">measure on the sky</option><option value="cancel">cancel</option><option value="submit">submit subs</option><option value="show">show samples</option><option value="forget">forget samples</option></select>
+            <input name="target" data-for="plan measure submit show forget" class="grow" placeholder="target (default: the plan's current one)" aria-label="Target">
+          </div>
+          <div class="fld-row">
+            <label data-for="measure" title="Re-measure even when the settings are established"><input type="checkbox" name="refresh"> again</label>
+            <label data-for="measure" title="Shoot without a focus recorded on this target since its GoTo"><input type="checkbox" name="force"> without a focus</label>
+            <input name="session" data-for="submit" list="acq-sessions" placeholder="session folder or latest" aria-label="Session" spellcheck="false" autocapitalize="off">
+            <label data-for="submit">subs <input name="count" type="number" min="1" step="1" inputmode="numeric" placeholder="2" class="num-sm"></label>
+            <label data-for="submit" class="grow">or files <input name="files" placeholder="library paths, comma-separated" spellcheck="false" autocapitalize="off"></label>
+          </div>
+          <div class="ctl-row"><button type="submit">Run</button></div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
+
+      <div class="card tool-card" id="acq-subs">
+        <div class="row-head"><h3>Check subs</h3><span class="muted small">focus, trailing, background and rejections of a session's newest raw subs</span></div>
+        <form class="tool-form" data-tool="analyze_subs" data-label="Check subs" autocomplete="off">
+          <div class="fld-row">
+            <input name="session" list="acq-sessions" class="grow" placeholder="session on the telescope (default: the newest)" aria-label="Session" spellcheck="false" autocapitalize="off">
+            <label>subs <input name="count" type="number" min="1" max="6" step="1" inputmode="numeric" placeholder="3" class="num-sm"></label>
+            <button type="submit">Check</button>
+          </div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
+
+      <div class="card tool-card" id="acq-darks">
+        <div class="row-head"><h3>Dark library</h3><span class="muted small">the telescope's master darks</span></div>
+        <form class="tool-form" data-tool="dark_frames" data-label="Darks" autocomplete="off">
+          <div class="fld-row">
+            <select name="action" aria-label="Dark library action"><option value="list">list masters</option><option value="status">status</option><option value="capture">capture a master…</option><option value="stop">stop the capture</option><option value="ensure_auto">turn automatic darks on</option></select>
+            <label data-for="capture">exp <input name="exposure_s" type="number" min="0" step="any" inputmode="decimal" class="num-sm"> s</label>
+            <label data-for="capture">gain <input name="gain" type="number" min="0" step="1" inputmode="numeric" class="num-sm"></label>
+            <label data-for="capture">frames <input name="frames" type="number" min="5" max="20" step="1" inputmode="numeric" placeholder="20" class="num-sm"></label>
+          </div>
+          <div class="ctl-row"><button type="submit" id="btn-darks-run">Run</button></div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
+
+      <div class="card tool-card" id="acq-offsets">
+        <div class="row-head"><h3>Filter focus offsets</h3><span class="muted small">how far each filter's focus lies from the reference filter's; applied on every filter change</span></div>
+        <form class="tool-form" data-tool="focus_offsets" data-label="Focus offsets" autocomplete="off">
+          <div class="fld-row">
+            <select name="action" aria-label="Focus offsets action"><option value="status">status</option><option value="calibrate">calibrate now…</option><option value="convert">convert a position</option><option value="skip">skip tonight's calibration</option><option value="cancel">cancel the calibration</option><option value="show">show every bracket</option><option value="forget">forget…</option></select>
+            <input name="reason" data-for="skip" class="grow" placeholder="why: cloud, the field blocked" aria-label="Why it is skipped">
+            <label data-for="calibrate" class="grow">filters <input name="filters" placeholder="all but the reference" spellcheck="false"></label>
+            <label data-for="calibrate">field <input name="field" placeholder="the star field" class="num-md"></label>
+            <label data-for="convert">position <input name="position" type="number" step="1" inputmode="numeric" class="num-sm"></label>
+            <label data-for="convert">from <input name="from_filter" class="num-md" list="np-filters"></label>
+            <label data-for="convert">to <input name="to_filter" class="num-md" list="np-filters"></label>
+            <label data-for="forget">filter <input name="filter" placeholder="all" class="num-md" list="np-filters"></label>
+          </div>
+          <div class="ctl-row"><button type="submit">Run</button></div>
+        </form>
+        <div class="tool-out" hidden></div>
+      </div>
     </section>
 
     <!-- ========== Research: the agent's target packages ========== -->
@@ -694,6 +1092,7 @@
       <button class="tab sheet-item" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel-journal"><b>Journal</b><small>each night's targets, timelines, stats and notes</small></button>
       <button class="tab sheet-item" data-tab="weather" role="tab" aria-selected="false" aria-controls="panel-weather"><b>Weather</b><small>Rain Guard alarm, tonight's safety report, radar</small></button>
       <button class="tab sheet-item" data-tab="stellarium" role="tab" aria-selected="false" aria-controls="panel-stellarium"><b>Stellarium</b><small>the sky at the site: find, frame, GoTo</small></button>
+      <button class="tab sheet-item" data-tab="acq" role="tab" aria-selected="false" aria-controls="panel-acq"><b>Acquisition</b><small>exposure advice, sensor and sky measurements, sub length, darks, filter offsets</small></button>
       <button class="tab sheet-item" data-tab="database" role="tab" aria-selected="false" aria-controls="panel-database"><b>Database</b><small>search 45,000 objects, filter by what is up</small></button>
       <button class="tab sheet-item" data-tab="research" role="tab" aria-selected="false" aria-controls="panel-research"><b>Research</b><small>the agent's target packages, with reference images</small></button>
       <button class="tab sheet-item" data-tab="library" role="tab" aria-selected="false" aria-controls="panel-library"><b>Library</b><small>transfers, processing, sessions, captures</small></button>
@@ -702,6 +1101,11 @@
       <button class="ghost sheet-close" data-close>Close</button>
     </div>
   </div>
+
+  <aside class="tool-drawer" id="tool-drawer" aria-label="Results" hidden>
+    <div class="td-head"><b>Results</b><span class="spacer"></span><button type="button" class="ghost" id="td-clear">Clear</button><button type="button" class="ghost icon-btn" id="td-close" aria-label="Close the results"><svg class="i" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <div class="td-items" id="td-list"></div>
+  </aside>
 
   <div class="night-tint" aria-hidden="true"></div>
   <div class="lightbox" id="lightbox" hidden><img alt=""><div class="lb-caption"></div></div>
