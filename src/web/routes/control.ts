@@ -9,10 +9,11 @@ import { z } from 'zod';
 import * as sky from '../../astro/sky.js';
 import { findObject, gotoLabel } from '../../astro/catalog.js';
 import { resolveSkyTarget } from '../../astro/sky-target.js';
-import { body, notFound, badRequest, route } from '../http.js';
+import { body, notFound, badRequest, route, HttpError } from '../http.js';
 import { requireSite, type WebContext } from '../context.js';
 import { unsupported, type Capabilities } from '../telescope.js';
 import { estop } from '../../safety/estop.js';
+import { DEW_SWITCH, type DewAuto } from '../dew-auto.js';
 
 /** GoTo from the UI refuses targets lower than this (the firmware would fail them anyway). */
 const MIN_GOTO_ALTITUDE_DEG = 5;
@@ -79,8 +80,22 @@ const NEEDS: Record<ControlAction['action'], [keyof Capabilities, string]> = {
   rgb: ['rgb', 'The ring light'],
 };
 
-export function controlRoutes({ scope, duty }: WebContext): Router {
+export function controlRoutes({ scope, duty }: WebContext, dew?: DewAuto): Router {
   const api = express.Router();
+
+  // the dew heater's Auto mode (dew-auto.ts): on by default, it keeps the heater on while dew is possible
+  if (dew) {
+    api.get('/dew-auto', route(async () => dew.status()));
+    api.post(
+      '/dew-auto',
+      route(async (req) => {
+        const { auto } = body(req, z.object({ auto: z.boolean() }));
+        const s = await dew.setAuto(auto);
+        duty.event(`the user turned the dew heater's Auto ${auto ? 'on' : 'off'} from the web UI`, true);
+        return s;
+      }),
+    );
+  }
 
   api.post(
     '/control',
@@ -123,6 +138,8 @@ export function controlRoutes({ scope, duty }: WebContext): Router {
           if (b.action === 'switches') return { switches: await sw.list() };
           const known = (await sw.list()).find((s) => s.id === b.id);
           if (!known) throw notFound(`the ${scope.label} has no switch "${b.id}"`);
+          const held = b.id === DEW_SWITCH ? dew?.holds() : null;
+          if (held && held.hold !== b.on) throw new HttpError(409, `Auto is keeping the dew heater ${held.hold ? 'on' : 'off'} (${held.reason}): turn Auto off first to switch it ${b.on ? 'on' : 'off'}`);
           const r = await sw.set(b.id, b.on);
           duty.event(`the user turned the ${known.label.toLowerCase()} ${b.on ? 'on' : 'off'} from the web UI`, true);
           return r;

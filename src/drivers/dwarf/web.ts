@@ -13,6 +13,7 @@ import type { TelescopeState } from './controller/state.js';
 import type { PowerAction } from './controller/system.js';
 import type { ControlAction } from '../../web/routes/control.js';
 import { dwarfModel, MODEL_LABEL } from './controller/model.js';
+import { PARK } from './controller/motors.js';
 
 const LEVEL_PITCH_DEG = 90;
 /** the web UI's Burst button takes at least this many frames */
@@ -55,6 +56,21 @@ const CAPABILITIES: Capabilities = {
 };
 
 type SwitchKey = keyof NonNullable<TelescopeState['switches']>;
+
+/** within this of the park pitch is parked (the park move's own tolerance) */
+const PARKED_PITCH_TOLERANCE_DEG = 3;
+
+/**
+ * The Dwarf reports no parked state: it is parked when it sits in the park pose (pitch down, as
+ * park and the agent's move_motors pitch_deg=2.5 leave it) and is not tracking. Unknown while the
+ * motors are unhomed or unread.
+ */
+export function dwarfParked(st: Pick<TelescopeState, 'connected' | 'motors' | 'tracking'>): boolean | null {
+  const m = st.motors;
+  if (!st.connected || m.pitchDeg == null || m.homed === false) return null;
+  if (st.tracking.state === 'running') return false;
+  return Math.abs(m.pitchDeg - PARK.pitchDeg) <= PARKED_PITCH_TOLERANCE_DEG;
+}
 
 /** The Dwarf's switches: the two lights (the power commands) and the device switches (extras.ts). */
 export function dwarfSwitches(dwarf: Dwarf): DeviceSwitches {
@@ -198,6 +214,7 @@ export function dwarfWeb(dwarf: Dwarf, hub: StreamHub): WebTelescope {
     control,
     goto,
     switches: dwarfSwitches(dwarf),
+    parked: () => dwarfParked(dwarf.state),
     horizonSurvey: {
       start: (o) => surveyObstructions({ dwarf, hub }, o),
       stop: () => stopSurvey(dwarf),

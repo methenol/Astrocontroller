@@ -490,6 +490,18 @@ export function seestarWeb(scope: Seestar, { hub, capture, survey, liveFrame }: 
     control,
     goto,
     switches: seestarSwitches(scope),
+    // the arm closed (the Seestar reports it)
+    parked: () => (scope.state.connected ? (scope.state.mount.parked ?? null) : null),
+    // Starfront's autonomous nights: the roof decides the dew heater (only while the mode is on)
+    roof: nights
+      ? {
+          open: () => (nights.enabled ? nights.roofOpen() : null),
+          onChange: (fn) => {
+            nights.on('status', fn);
+            return () => void nights.off('status', fn);
+          },
+        }
+      : undefined,
     routes,
     wireLines: (n, o) => scope.link.wireLines(n, o),
     horizonSurvey: {

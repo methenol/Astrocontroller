@@ -119,6 +119,14 @@ export interface WebTelescope {
   goto(t: GotoTarget): Promise<unknown>;
   /** the device switches, where the driver has any (capabilities.switches) */
   switches?: DeviceSwitches;
+  /**
+   * An observatory roof over the telescope (Starfront's autonomous nights), which decides the dew
+   * heater's Auto (dew-auto.ts): open → on, closed → off. open() is null outside that mode or while
+   * the roof status is unknown; onChange is told on every roof report and returns its unsubscribe.
+   */
+  roof?: { open(): boolean | null; onChange(fn: () => void): () => void };
+  /** whether the telescope sits parked (null: it cannot say); parked, the dew heater's Auto turns the heater off */
+  parked?(): boolean | null;
   /** the obstruction survey, where the driver can run one */
   /** rehearsal (the Seestar's): everything but the sky, and no mask saved — for checking the mechanics */
   horizonSurvey?: { start(o: { calibrate?: boolean; rehearsal?: boolean }): Promise<{ summary: string }>; stop(): Promise<unknown>; assertAllowed(o?: { rehearsal?: boolean }): void };

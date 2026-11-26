@@ -70,6 +70,7 @@ const HANDLERS = {
   stellarium: onStellariumMessage,
   guard: (m) => renderGuardState(m.guard),
   estop: (m) => renderEStop(m.estop),
+  dewAuto: (m) => emit('dew-auto', m.dewAuto),
 };
 
 function handle(raw) {

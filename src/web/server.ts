@@ -23,6 +23,8 @@ import { weatherRoutes } from './routes/weather.js';
 import { nightRoutes } from './routes/night.js';
 import { toolRoutes } from './routes/tools.js';
 import { RainGuard } from '../astro/weather/guard.js';
+import * as weather from '../astro/weather.js';
+import { DewAuto } from './dew-auto.js';
 import { observerSite } from './context.js';
 import { escapeHtml } from '../hub/html.js';
 
@@ -39,10 +41,22 @@ export interface Web {
 export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContext, 'broadcast'>): Web {
   // The Rain Guard lives with the server, not a browser tab: it keeps watching when no page is open.
   const guard = new RainGuard({ site: () => observerSite(deps.scope), tz: () => config.observer.timezone, units: () => config.units, file: path.join(config.paths.data, 'rain-guard.json') });
+  // so is the dew heater's Auto: the lens fogs whether or not a page is open
+  const dew = new DewAuto({
+    scope: deps.scope,
+    site: () => observerSite(deps.scope),
+    tz: () => config.observer.timezone,
+    units: () => config.units,
+    forecast: (site, tz) => weather.forecast(site, tz),
+    file: path.join(config.paths.data, 'dew-auto.json'),
+    event: (text) => deps.duty.event(text, true),
+  });
   const sockets = mountSockets(server, deps, guard);
+  dew.on('state', (s: unknown) => sockets.broadcast({ type: 'dewAuto', dewAuto: s }));
   const ctx: WebContext = { ...deps, broadcast: sockets.broadcast };
   const thumbs = new ThumbCache();
   guard.start();
+  dew.start();
   if (estop.engaged) {
     log.warn('starting with the E-Stop engaged (CONTROL_ENABLED_ON_STARTUP=false): no telescope control until Enable Control is pressed');
     deps.duty.pause('E-Stop');
@@ -55,7 +69,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   api.use(horizonRoutes(ctx));
   api.use(mediaRoutes(ctx, thumbs));
   api.use(estopRoutes(ctx));
-  api.use(controlRoutes(ctx));
+  api.use(controlRoutes(ctx, dew));
   api.use(agentRoutes(ctx));
   api.use(stellariumRoutes());
   api.use(researchRoutes());
@@ -87,6 +101,7 @@ export function mountWeb(app: Express, server: http.Server, deps: Omit<WebContex
   return {
     close: () => {
       guard.close();
+      dew.close();
       sockets.close();
     },
   };
