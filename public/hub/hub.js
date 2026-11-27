@@ -100,8 +100,21 @@ function renderSwitcher() {
 // ---- the telescope UI in the frame asks for the switcher; only same-origin messages from it count
 const toFrame = (msg) => {
   const w = $('#frame').contentWindow;
-  if (w && frameFor) w.postMessage({ source: 'astro-hub', ...msg }, location.origin);
+  if (w && frameFor && frameIsCurrent()) w.postMessage({ source: 'astro-hub', ...msg }, location.origin);
 };
+/**
+ * Whether the document in the frame is the selected profile's. Right after a switch the frame still
+ * holds the previous profile's page until the new one loads; that page must be neither labelled with
+ * the new name nor taken for its boot.
+ */
+function frameIsCurrent() {
+  if (!frameFor) return false;
+  try {
+    return $('#frame').contentWindow.location.pathname.startsWith(new URL(frameUrl(), location.href).pathname);
+  } catch {
+    return false;
+  }
+}
 let postedProfile = '';
 function postProfile(force = false) {
   const p = byId(frameFor);
@@ -115,6 +128,11 @@ function postProfile(force = false) {
 window.addEventListener('message', (e) => {
   if (e.origin !== location.origin || e.source !== $('#frame').contentWindow || e.data?.source !== 'astro-app') return;
   document.body.classList.toggle('night', !!e.data.night);
+  // a page of another profile than the selected one (left in the frame by a switch that has not loaded): load the right one
+  if (frameFor && e.data.id && e.data.id !== frameFor) {
+    if (e.data.type === 'hello' || e.data.type === 'stale') navigateFrame();
+    return;
+  }
   if (e.data.type === 'hello') postProfile(true);
   else if (e.data.type === 'open-switcher') {
     const f = $('#frame').getBoundingClientRect();
@@ -237,15 +255,18 @@ function checkBoot() {
     return;
   }
   const root = new URL(frameUrl(), location.href).pathname;
-  if (doc?.documentElement?.dataset.booted) {
+  // the previous profile's page, still in the frame after a switch: a booted app, but not this
+  // profile's — retried like a failed boot, never accepted (2026-11-26: the Dwarf 3's UI under the Mini's name)
+  const mine = path.startsWith(root);
+  if (mine && doc?.documentElement?.dataset.booted) {
     frameRetries = 0;
     return;
   }
-  if (doc?.querySelector('meta[name="astro-hub-wait"]')) return armBootCheck(FRAME_LOAD_TIMEOUT_MS);
+  if (mine && doc?.querySelector('meta[name="astro-hub-wait"]')) return armBootCheck(FRAME_LOAD_TIMEOUT_MS);
   // somewhere else inside this profile (an image opened in the frame): not a failed boot
-  if (path.startsWith(root) && path !== root && path !== `${root}index.html`) return;
+  if (mine && path !== root && path !== `${root}index.html`) return;
   frameRetries++;
-  console.warn(`hub: the telescope UI did not start (attempt ${frameRetries}); loading it again`);
+  console.warn(`hub: the telescope UI did not start (attempt ${frameRetries}${mine ? '' : `: the frame still shows ${path}`}); loading it again`);
   setTimeout(
     () => frameFor && navigateFrame(),
     Math.min(1000 * 2 ** (frameRetries - 1), FRAME_RETRY_MAX_MS),

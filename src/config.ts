@@ -1,5 +1,7 @@
 import type { Rig } from './astro/exposure.js';
 import { plateScaleArcsecPerPx } from './media/image/types.js';
+import { pickDevice } from './astro/acquisition/devices.js';
+import { withKnownRig } from './astro/acquisition/known-rig.js';
 import path from 'node:path';
 import { Env } from './config/env.js';
 import { HostOverride } from './config/host.js';
@@ -324,6 +326,21 @@ export function planDefaults(): {
    readNoise: config.plan.readNoiseE ?? undefined,
    mount: config.plan.mount,
    guided: config.plan.guided,
+   effectiveFlMm: planFocalLengthMm(),
   },
  };
+}
+
+/**
+ * The focal length of this profile's rig: what the scope last reported (known-rig.json), else its
+ * device spec's. The unguided-equatorial trailing cap is sized from it; without it the cap fell to
+ * its 15 s floor on every rig (2026-11-26, the Dwarf Mini's first night).
+ */
+function planFocalLengthMm(): number | undefined {
+ try {
+  const facts = withKnownRig({ driver: config.telescope.driver });
+  return facts.focalLengthMm ?? pickDevice(facts).spec.optics.focalLengthMm;
+ } catch {
+  return undefined;
+ }
 }

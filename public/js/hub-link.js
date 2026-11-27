@@ -9,7 +9,9 @@ import { $ } from './dom.js';
 const btn = $('#btn-profile');
 const inFrame = window.parent !== window;
 const night = () => document.body.classList.contains('night');
-const send = (msg) => window.parent.postMessage({ source: 'astro-app', night: night(), ...msg }, location.origin);
+/** The profile this page is, from its own URL (/p/<id>/): never the hub's word for it. */
+const myId = decodeURIComponent(location.pathname.match(/\/p\/([^/]+)\//)?.[1] ?? '');
+const send = (msg) => window.parent.postMessage({ source: 'astro-app', id: myId, night: night(), ...msg }, location.origin);
 
 function show(p) {
   $('#brand').hidden = true;
@@ -26,7 +28,13 @@ function show(p) {
 if (inFrame && btn) {
   window.addEventListener('message', (e) => {
     if (e.source !== window.parent || e.origin !== location.origin || e.data?.source !== 'astro-hub') return;
-    if (e.data.type === 'profile') show(e.data);
+    if (e.data.type === 'profile') {
+      // the hub has moved on to another profile while this page is still in its frame (the new one
+      // not loaded yet, or stalled): wearing that name would pass this telescope's UI off as the other's
+      // (2026-11-26: the Dwarf 3's SD-card sessions under the Dwarf Mini's name)
+      if (myId && e.data.id && e.data.id !== myId) return send({ type: 'stale' });
+      show(e.data);
+    }
     else if (e.data.type === 'switcher-closed') {
       btn.setAttribute('aria-expanded', 'false');
       if (e.data.refocus) btn.focus();

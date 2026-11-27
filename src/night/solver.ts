@@ -211,6 +211,8 @@ export interface TargetAdvice {
     line: string;
     /** the tool calls that apply the settings on this driver */
     apply: string;
+    /** the dark master these settings still need, shot by the scope itself before the stack (the Dwarf Mini) */
+    dark?: { exposureS: number; gain: number; frames: number; minutes: number } | null;
     /**
      * The collection quality engine (astro/acquisition/quality.ts): whether these settings were
      * measured on this target or are the model's stand-in until it is, and what to measure.

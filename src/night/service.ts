@@ -625,6 +625,7 @@ export class PlanService extends SafeEmitter {
         efficiencyPct: rec.subLength.efficiencyPct,
         line: q.measured ? a.why.slice(1, 3).join('; ') : rec.why.slice(0, 2).join('; '),
         apply: rec.apply,
+        dark: rec.dark,
         quality: { status: a.status, source: q.measured ? 'measured' : 'model', line: qLine, points: pts, aboutMin, measuredAt: a.set?.at },
       };
     } catch (e) {
@@ -1056,7 +1057,7 @@ export class PlanService extends SafeEmitter {
       const acq = b.target!.advice?.acquisition;
       const q = acq?.quality;
       const measure = q && (q.status === 'needed' || q.status === 'more' || q.status === 'refresh') ? q.status : undefined;
-      return driverSteps().target(b.target!.gotoName, { filter: b.target!.filter, subS: acq?.subS, gain: acq?.gain, gainFixed: config.telescope.driver === 'seestar', measure, name: b.target!.name });
+      return driverSteps().target(b.target!.gotoName, { filter: b.target!.filter, subS: acq?.subS, gain: acq?.gain, gainFixed: config.telescope.driver === 'seestar', measure, name: b.target!.name, dark: acq?.dark ?? undefined });
     };
     let instruction: string;
     if (phase === 'before') {

@@ -5,6 +5,7 @@
  * Seestar tools and skip its own steps.
  */
 import { config } from '../config.js';
+import { darkStep } from '../astro/acquisition/advise.js';
 
 /** What the block says to collect with, and whether the target's settings still need measuring. */
 export interface TargetSettings {
@@ -17,12 +18,20 @@ export interface TargetSettings {
   measure?: 'needed' | 'more' | 'refresh';
   /** the target's catalog name, for acquisition_quality */
   name?: string;
+  /** a dark master the settings still need, which the scope shoots itself (the Dwarf Mini) */
+  dark?: { exposureS: number; gain: number; frames: number; minutes: number };
 }
+
+/**
+ * The dark capture before the stack, when the block's settings have no master yet. Not when the
+ * settings are still to be measured: the measurement's own apply line says whether a dark is needed.
+ */
+const darkFirst = (o: TargetSettings | undefined): string => (o?.dark && !o.measure ? `${darkStep(o.dark)}, ` : '');
 
 /** The quality step between the focus and the stack. */
 export const measureStep = (o: TargetSettings | undefined): string =>
   o?.measure
-    ? `acquisition_quality action=measure target=${o.name ?? '<its name>'}${o.measure === 'refresh' ? ' refresh=true' : ''} (the target's settings are ${o.measure === 'needed' ? 'not measured yet' : o.measure === 'more' ? 'not settled' : 'measured under another sky'}: it shoots a few test cohorts without a dataset; poll action=status until done and collect with the settings it returns, not the ones below), `
+    ? `acquisition_quality action=measure target=${o.name ?? '<its name>'}${o.measure === 'refresh' ? ' refresh=true' : ''} (the target's settings are ${o.measure === 'needed' ? 'not measured yet' : o.measure === 'more' ? 'not settled' : 'measured under another sky'}: it shoots a few test cohorts without a dataset; poll action=status until done and collect with the settings it returns, not the ones below — run its apply line as given, a dark capture first when it has one), `
     : '';
 
 export interface DriverSteps {
@@ -45,7 +54,7 @@ const CAL_TAIL = (field: string) =>
   `focus_offsets action=calibrate field=${field} (bracketed sweeps through every filter, in the background); poll focus_offsets action=status until done — no stack, GoTo or focus meanwhile; the plan then moves on by itself. Clouded or blocked: focus_offsets action=skip reason=<why> (collection goes on without it; the planner tries another night)`;
 
 const DWARF: DriverSteps = {
-  target: (n, o) => `run P2 on it: goto_target name=${n} one_click=true, tele_visibility, autofocus mode=astro, star_sharpness, star_focus, star_sharpness, ${measureStep(o)}live_stacking action=start${o?.subS ? ` exposure=${o.subS}` : ''}${o?.gain !== undefined && !o.gainFixed ? ` gain=${o.gain}` : ''}${o?.filter ? ` filter=${o.filter}` : ''} (every step, in order)`,
+  target: (n, o) => `run P2 on it: goto_target name=${n} one_click=true, tele_visibility, autofocus mode=astro, star_sharpness, star_focus, star_sharpness, ${measureStep(o)}${darkFirst(o)}live_stacking action=start${o?.subS ? ` exposure=${o.subS}` : ''}${o?.gain !== undefined && !o.gainFixed ? ` gain=${o.gain}` : ''}${o?.filter ? ` filter=${o.filter}` : ''} (every step, in order)`,
   stop: 'live_stacking action=stop',
   refocus: 'live_stacking action=stop, then P2 steps 4–8 (autofocus mode=astro, star_sharpness, star_focus, star_sharpness, live_stacking action=start)',
   blockedBy: 'tele_visibility says BLOCKED, or the owner says so',

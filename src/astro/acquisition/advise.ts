@@ -160,6 +160,8 @@ export interface Candidate {
   maxBackgroundFrac: number;
   coreClips: boolean;
   frames: number;
+  /** no dark master of this exposure and gain on a scope that takes its own: one is shot first */
+  darkNeeded?: boolean;
   why: string[];
 }
 
@@ -167,6 +169,8 @@ export interface Recommendation {
   device: { id: string; name: string; why: string; serial?: string };
   target: { name: string; type?: string; emission: Emission; sb: number | null; sbSource: 'catalog' | 'estimated' | 'nominal' };
   settings: { filter: string; gain: number; gainNote: string; subS: number; frames: number; ditherEverySubs: number };
+  /** the dark master these settings still need (a scope that shoots its own), else null */
+  dark: { exposureS: number; gain: number; frames: number; minutes: number } | null;
   apply: string;
   why: string[];
   overexposure: {
@@ -282,9 +286,16 @@ const r1 = (n: number) => Math.round(n * 10) / 10;
 const r2 = (n: number) => Math.round(n * 100) / 100;
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 
-function darkCovered(rig: Rig, subS: number, gain: number): boolean {
-  if (!rig.spec.exposure.requiresMatchingDarks || !rig.darks) return true;
-  return rig.darks.some((d) => Math.abs(d.exposureS - subS) < 0.01 && (d.gain === undefined || d.gain === gain));
+/** Whether a sub can be stacked: its dark master is there (or none is needed), the scope can shoot one first, or neither. */
+export function darkStatus(rig: Pick<Rig, 'spec' | 'darks'>, subS: number, gain: number): 'covered' | 'shootable' | 'missing' {
+  if (!rig.spec.exposure.requiresMatchingDarks || !rig.darks) return 'covered';
+  if (rig.darks.some((d) => Math.abs(d.exposureS - subS) < 0.01 && (d.gain === undefined || d.gain === gain))) return 'covered';
+  return rig.spec.exposure.selfDarks ? 'shootable' : 'missing';
+}
+
+/** Frames for a master the scope shoots itself: 20 (the firmware's maximum) up to ~10 min, then fewer, never under 5. */
+export function selfDarkFrames(subS: number): number {
+  return Math.max(5, Math.min(20, Math.floor(600 / subS)));
 }
 
 /** The plan. Throws only on an empty window; a target nothing can be shot of gets the least-bad answer and says so. */
@@ -329,7 +340,8 @@ export function advise(input: AdviseInput): Recommendation {
       const skyScale = measured?.skyNoiseScale !== null && measured?.skyNoiseScale !== undefined && Number.isFinite(measured.skyNoiseScale) ? Math.min(SKY_SCALE_MAX, Math.max(SKY_SCALE_MIN, measured.skyNoiseScale)) : 1;
       for (const t of subs) {
         const why: string[] = [];
-        if (!darkCovered(rig, t, gain)) continue;
+        const dark = darkStatus(rig, t, gain);
+        if (dark === 'missing') continue;
         const { cycleS, ditherEvery } = subCycle(rig, t);
         const keep = input.keepBySubS?.[String(t)] ?? DEFAULT_KEEP;
         const duty = t / cycleS;
@@ -370,7 +382,8 @@ export function advise(input: AdviseInput): Recommendation {
         const frames = Math.floor((usableS * heldFrac) / cycleS);
         if (usableS > 0 && frames < MIN_FRAMES) merit *= FEW_FRAMES_KEEP;
         if (maxBg > BG_MAX_FRAC) why.push(`the sky fills ${Math.round(maxBg * 100)}% of the range at its brightest`);
-        candidates.push({ filter: f.name, gain, subS: t, merit, heldFrac, maxBackgroundFrac: maxBg, coreClips, frames, why, detail: { eSky: eSkyAll, eT: eTAll, sensor, keep, duty, ditherEvery, corePct: coreSb !== null ? Math.round(coreMax * 100) : null, bgAdu: maxBgAdu, skyScale, measured } });
+        if (dark === 'shootable') why.push(`no dark master of ${t}s / gain ${gain} yet: the scope shoots one first (~${Math.ceil((selfDarkFrames(t) * t) / 60) + 1} min)`);
+        candidates.push({ filter: f.name, gain, subS: t, merit, heldFrac, maxBackgroundFrac: maxBg, coreClips, frames, darkNeeded: dark === 'shootable', why, detail: { eSky: eSkyAll, eT: eTAll, sensor, keep, duty, ditherEvery, corePct: coreSb !== null ? Math.round(coreMax * 100) : null, bgAdu: maxBgAdu, skyScale, measured } });
       }
     }
   }
@@ -381,7 +394,7 @@ export function advise(input: AdviseInput): Recommendation {
   // among near-ties: the most headroom (lowest background, no core clipping, the largest well), then the shorter sub
   const ties = candidates.filter((c) => bestMerit > 0 && c.merit >= TIE * bestMerit);
   const pool = ties.length ? ties : [...candidates].sort((a, b) => b.heldFrac - a.heldFrac || a.subS - b.subS).slice(0, 1);
-  pool.sort((a, b) => Number(a.coreClips) - Number(b.coreClips) || b.detail.sensor.fullWellE - a.detail.sensor.fullWellE || a.subS - b.subS);
+  pool.sort((a, b) => Number(a.coreClips) - Number(b.coreClips) || Number(!!a.darkNeeded) - Number(!!b.darkNeeded) || b.detail.sensor.fullWellE - a.detail.sensor.fullWellE || a.subS - b.subS);
   const best = pool[0];
   const d = best.detail;
   const sensor = d.sensor;
@@ -493,7 +506,8 @@ export function advise(input: AdviseInput): Recommendation {
     .slice(0, 4)
     .map((c) => ({ filter: c.filter, gain: c.gain, subS: c.subS, relative: r2(c.relative ?? 0), note: c.why.join('; ') || (c.heldFrac < 1 ? `holds ${Math.round(c.heldFrac * 100)}% of the window` : c.subS < best.subS ? 'shorter: more frames, more read noise' : '') }));
 
-  const apply = applyLine(rig, best.filter, best.gain, best.subS, best.frames);
+  const dark = best.darkNeeded ? { exposureS: best.subS, gain: best.gain, frames: selfDarkFrames(best.subS), minutes: Math.ceil((selfDarkFrames(best.subS) * best.subS) / 60) + 1 } : null;
+  const apply = `${dark ? `${darkStep(dark)}, then ` : ''}${applyLine(rig, best.filter, best.gain, best.subS, best.frames)}`;
   const transIdx = slices.map((s) => s.transparencyIdx).filter((x): x is number => x !== undefined);
   const winds = slices.map((s) => s.windKmh).filter((x): x is number => x !== undefined);
 
@@ -501,6 +515,7 @@ export function advise(input: AdviseInput): Recommendation {
     device: { id: rig.spec.id, name: rig.spec.name, why: rig.why, serial: rig.serial },
     target: { name: target.displayName ?? target.name, type: target.type, emission: target.emission, sb: sbKnown ? r2(sb) : null, sbSource },
     settings: { filter: best.filter, gain: best.gain, gainNote: rig.gainSettable ? 'set it' : 'the firmware sets it', subS: best.subS, frames: best.frames, ditherEverySubs: d.ditherEvery },
+    dark,
     apply,
     why,
     overexposure: {
@@ -543,6 +558,11 @@ export function advise(input: AdviseInput): Recommendation {
     },
     missing: rig.missing,
   };
+}
+
+/** The tool call that shoots a missing dark master on a scope with its own dark filter, and the wait for it. */
+export function darkStep(d: { exposureS: number; gain: number; frames: number; minutes: number }): string {
+  return `dark_frames action=capture exposure_s=${d.exposureS} gain=${d.gain} frames=${d.frames} (no master of this pair yet; the scope closes its own dark filter, ~${d.minutes} min: wait for its event)`;
 }
 
 /** How the agent applies the settings, in the running driver's tool calls. */

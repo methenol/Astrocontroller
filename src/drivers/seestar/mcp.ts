@@ -441,7 +441,7 @@ export function registerSeestarTools(tool: ToolFn, scope: Seestar): void {
         // the scope's own glass, as the night plan and its fillers judge it: through "none" alone the LP filter's emission targets ranked low here and high there
         filter: a.filter ?? (defaults.filter || undefined),
         filters: defaults.filters,
-        rig: { ...defaults.rig, plateScaleArcsecPerPx: plateScale(scope.state.device.chipSize?.[1] ?? 1920), apertureMm: scope.state.device.focalLengthMm && scope.state.device.fNumber ? scope.state.device.focalLengthMm / scope.state.device.fNumber : defaults.rig.apertureMm, mount: scope.state.mount.eqMode ? 'eq' : 'alt-az', guided: false },
+        rig: { ...defaults.rig, plateScaleArcsecPerPx: plateScale(scope.state.device.chipSize?.[1] ?? 1920), apertureMm: scope.state.device.focalLengthMm && scope.state.device.fNumber ? scope.state.device.focalLengthMm / scope.state.device.fNumber : defaults.rig.apertureMm, mount: scope.state.mount.eqMode ? 'eq' : 'alt-az', guided: false, effectiveFlMm: scope.state.device.focalLengthMm || defaults.rig.effectiveFlMm },
         applyRest: a.ignore_rest ? false : undefined,
         horizon: a.ignore_horizon ? undefined : horizonFor(s),
       });

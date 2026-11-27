@@ -24,9 +24,10 @@
   "gain": { "settable": true, "default": 60, "min": 40, "max": 240, "options": [40, 60, 80, 100, 120] },
   "exposure": {
     "altAzS": [5, 10, 15],
-    "eqS": [15, 30, 60, 90],
+    "eqS": [15, 30, 60, 90, 120],
     "eqExtendedS": [],
     "requiresMatchingDarks": true,
+    "selfDarks": true,
     "perSubOverheadS": 0.5
   },
   "dither": { "everySubs": 6, "costS": 0, "costSubs": 1, "longFromS": 60, "everySubsLong": 10 },
@@ -36,7 +37,7 @@
     { "name": "Duo-Band", "aliases": ["duo-band", "duo band", "dual-band", "duoband"], "band": "duo_wide", "passband": "OIII 500.7 + Hα 656.3 nm" }
   ],
   "sources": [
-    "optics and sensor: digitalcameraworld.com, astrobackyard.com and skyatnightmagazine.com reviews (30 mm f/5, 150 mm, IMX662 1080p 2.9 µm; exposures up to 90 s; Astro, Duo-Band and dark filters)",
+    "optics and sensor: digitalcameraworld.com, astrobackyard.com and skyatnightmagazine.com reviews (30 mm f/5, 150 mm, IMX662 1080p 2.9 µm; exposures up to 90 s per launch reviews, 120 s in EQ per the owner (2026-11-26); Astro, Duo-Band and dark filters)",
     "IMX662: ZWO ASI662MC page (full well 38.2 ke⁻, read noise 0.8 e⁻ in HCG)",
     "data format, gain scale, dither and dark rules: assumed the same as the Dwarf 3 (same firmware family)",
     "black level: dark master 1 s / gain 60 / 37 °C of this unit, median 200 ADU (2026-11-21); tele exposures up to 180 s (camera schema, fw 1.1.4.19)"

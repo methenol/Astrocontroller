@@ -36,6 +36,12 @@ async function astronomyFolders(): Promise<string[]> {
   return (await listDir('/Astronomy')).filter((f) => f.isDir).map((f) => f.name);
 }
 
+/** The exposure a Dwarf session folder is named for (…_EXP_15_GAIN_60_…), seconds; null when it says none. */
+export function sessionExposureS(folder: string): number | null {
+  const v = Number(folder.match(/_EXP_([\d.]+)_GAIN_/)?.[1]);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
 /** Until a session folder new since `before`, of this point's exposure and gain, holds `frames` subs. */
 async function waitForSubs(before: Set<string>, o: ProbeShot, frames: number): Promise<void> {
   const re = new RegExp(`^DWARF_RAW_TELE_.*_EXP_${String(o.subS).replace('.', '\\.')}_GAIN_${o.gain}_`);
@@ -107,6 +113,13 @@ export function dwarfProbeDriver(dwarf: Dwarf): ProbeDriver {
       const s = await deviceLibrary().resolveSession('latest');
       const began = s.startedAt ? Date.parse(s.startedAt) : NaN;
       if (Number.isFinite(began) && began < startedAt - 120_000) throw new Error(`the newest session on the card (${s.folder}) is older than the probe: the stack saved no subs`);
+      // the firmware can acknowledge an exposure and stack at another: the Mini's 1 s points were shot
+      // at 15 s (session EXP_15) and recorded as 1 s, their sky 15× too bright (2026-11-26)
+      const shotAt = sessionExposureS(s.folder);
+      if (shotAt !== null && Math.abs(shotAt - o.subS) > 0.01 * o.subS) {
+        await deviceLibrary().deleteSession(s).catch(() => undefined);
+        throw new Error(`the scope stacked at ${shotAt}s, not the ${o.subS}s asked for (session ${s.folder}): the point is not measured`);
+      }
       const subs = (await dwarfSessionSubs(s.folder)).slice(-o.count);
       const files: string[] = [];
       try {

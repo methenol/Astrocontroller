@@ -30,7 +30,7 @@
  *   around the current answer; the settings meanwhile are the measured ones rescaled.
  */
 import type { Site } from '../sky.js';
-import { BG_MAX_FRAC, electronRate, subCycle, targetKeep, trailCap, starFwhm, type Recommendation, type SkySlice, type TargetInfo } from './advise.js';
+import { BG_MAX_FRAC, darkStatus, electronRate, subCycle, targetKeep, trailCap, starFwhm, type Recommendation, type SkySlice, type TargetInfo } from './advise.js';
 import { findFilter, type Rig } from './devices.js';
 import { extinctionFor, skyBrightness, transmission, type MoonGeometry } from './skyglow.js';
 import type { QualityConditions, QualitySample } from './store.js';
@@ -209,10 +209,12 @@ export function validate(set: QualitySample[], rig: Rig): Array<QualitySample & 
   return out;
 }
 
-/** The sub lengths a filter/gain may use (the device's, and on a dark-bound device those with a master). */
+/**
+ * The sub lengths a filter/gain may use: the device's, and on a dark-bound device those with a master
+ * — or all of them on one that shoots its own (the probe stacks forced; collection takes the dark first).
+ */
 function offered(rig: Rig, gain: number): number[] {
-  if (!rig.spec.exposure.requiresMatchingDarks || !rig.darks) return rig.subsS;
-  return rig.subsS.filter((t) => rig.darks!.some((d) => Math.abs(d.exposureS - t) < 0.01 && (d.gain === undefined || d.gain === gain)));
+  return rig.subsS.filter((t) => darkStatus(rig, t, gain) !== 'missing');
 }
 
 const neighbours = (list: number[], t: number) => {

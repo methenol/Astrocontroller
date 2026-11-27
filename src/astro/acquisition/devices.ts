@@ -80,6 +80,8 @@ export const DeviceSpecSchema = z.object({
     eqExtendedS: z.array(pos).default([]),
     /** the firmware refuses a sub without a dark master of its exposure and gain */
     requiresMatchingDarks: z.boolean().default(false),
+    /** it shoots its own darks whenever it is idle (the Dwarf Mini's built-in dark filter): a missing master is taken, not avoided */
+    selfDarks: z.boolean().default(false),
     perSubOverheadS: z.number().min(0).default(1),
   }),
   dither: z.object({
@@ -355,7 +357,10 @@ export function resolveRig(facts: Partial<LiveFacts> & { driver: LiveFacts['driv
   if (facts.exposureOptionsS?.length) {
     // the device's own list, cut to what this mount mode allows
     const ceiling = Math.max(...(mount === 'eq' ? [...spec.exposure.eqS, ...spec.exposure.eqExtendedS] : spec.exposure.altAzS));
-    subsS = facts.exposureOptionsS.filter((s) => s >= 1 && s <= ceiling);
+    // and no shorter than any sub the spec lists: a Dwarf offers 1 s, which is a bias, not a deep-sky
+    // sub (the Mini's quality probe spent its read-noise point on 1 s, 2026-11-26)
+    const floor = Math.min(...spec.exposure.altAzS, ...spec.exposure.eqS);
+    subsS = facts.exposureOptionsS.filter((s) => s >= floor && s <= ceiling);
     expSource = 'device';
   } else {
     subsS = mount === 'eq' ? [...spec.exposure.eqS, ...(facts.moreExposure ? spec.exposure.eqExtendedS : [])] : spec.exposure.altAzS;
