@@ -164,14 +164,17 @@ describe('night plan: the solver', () => {
     assert.doesNotMatch(gap!.reason, /below the limits, the Moon, holds, or every goal met/);
   });
 
-  test('a gap before and after the blocks says tonight already covers the goals, not that the targets are too short', () => {
+  test('goals covered early do not leave the rest of the night empty: what is up fills it', () => {
     const r = solve([cand('M 42', { goalMin: 150 }), cand('M 31', { goalMin: 120 })]);
     const gaps = r.blocks.filter((b) => b.kind === 'gap');
-    assert.ok(gaps.length >= 2, 'idle before and after the blocks');
     for (const g of gaps) {
-      assert.match(g.reason, /nothing left to shoot then: 2 get all they still need in tonight's other blocks/);
-      assert.doesNotMatch(g.reason, /shorter than the/);
+      // only where neither is up at all may the sky be empty
+      for (const name of ['M 42', 'M 31']) {
+        const o = findObject(name)!;
+        assert.ok(sky.altAz(SITE, o.raHours, o.decDeg, new Date((g.start + g.end) / 2)).altitude < SETTINGS.minAltitude + 3, `${name} is up in the gap ${new Date(g.start).toISOString()}: ${g.reason}`);
+      }
     }
+    assert.ok(targetBlocks(r).some((b) => /past what it needed tonight|fills a stretch/.test(b.reason)), 'the free hours are filled');
   });
   test('blocks cover the window in order, without overlap', () => {
     const r = solve([cand('M 31'), cand('M 42'), cand('M 33')]);
@@ -192,7 +195,10 @@ describe('night plan: the solver', () => {
     const r = solve([cand('M 31', { goalMin: 60, priority: 5 }), cand('M 33', { goalMin: 600, collectedMin: 600 }), cand('M 42')]);
     const m31 = targetBlocks(r).filter((b) => b.target!.displayName === 'M 31');
     assert.ok(m31.length >= 1);
-    assert.ok(m31.reduce((a, b) => a + b.expectedMin, 0) <= 60 + 10 * 0.75);
+    // a gap fill may carry it on where nothing else is up; it is not planned past its goal otherwise
+    const planned = m31.filter((b) => !/past what it needed tonight|fills a stretch/.test(b.reason));
+    // (a fill just before its block saves that block's switch: up to the overhead more)
+    assert.ok(planned.reduce((a, b) => a + b.expectedMin, 0) <= 60 + (10 + 8) * 0.75, m31.map((b) => `${b.expectedMin}: ${b.reason}`).join(' | '));
     assert.equal(targetBlocks(r).filter((b) => b.target!.displayName === 'M 33').length, 0);
     assert.equal(r.outlook.find((o) => o.displayName === 'M 33')!.status, 'complete');
   });
@@ -225,16 +231,36 @@ describe('night plan: the solver', () => {
     const long = { ...SETTINGS, minBlockMin: 120 };
     for (const goalMin of [4, 14, 47]) {
       const r = solve([cand('M 42', { goalMin, priority: 2 }), cand('M 76', { goalMin, priority: 3 })], { settings: long, overheadMin: 26.6, mount: 'eq' });
-      for (const b of targetBlocks(r)) assert.ok(b.end - b.start >= 120 * 60e3, `goal ${goalMin}: ${b.target!.displayName} ${(b.end - b.start) / 60e3} min`);
+      for (const b of targetBlocks(r).filter((x) => !/fills a stretch/.test(x.reason))) assert.ok(b.end - b.start >= 120 * 60e3, `goal ${goalMin}: ${b.target!.displayName} ${(b.end - b.start) / 60e3} min`);
     }
   });
 
-  test('no new target starts with less than a minimum block of the night left', () => {
+  test("the night's last hour, shorter than a minimum block, is filled rather than left empty", () => {
     const long = { ...SETTINGS, minBlockMin: 120 };
-    // the night's last 60 min, held free of everything else: only a short block could use them
     const end = W.end.getTime();
     const r = solve([cand('M 42', { goalMin: 30 })], { settings: long, from: new Date(end - 60 * 60e3), mount: 'eq' });
-    for (const b of targetBlocks(r)) assert.ok(b.end - b.start >= 120 * 60e3, `${b.target!.displayName} ${(b.end - b.start) / 60e3} min`);
+    const t = targetBlocks(r);
+    assert.equal(t.length, 1, r.blocks.map((b) => `${b.kind} ${b.reason}`).join(' | '));
+    assert.match(t[0].reason, /fills a stretch no 120-min block fits/);
+    assert.equal(r.blocks.filter((b) => b.kind === 'gap').length, 0);
+  });
+
+  test('temporary holds never leave a gap: whatever is up fills the time, however short of a minimum block', () => {
+    const long = { ...SETTINGS, minBlockMin: 120 };
+    const cands = [cand('M 31'), cand('M 33'), cand('M 42'), cand('M 45'), cand('NGC 7000'), cand('IC 1805')];
+    const free = solve(cands, { settings: long, mount: 'eq' });
+    const at = W.start.getTime() + 3 * 3600e3;
+    // the agent's cloud holds on what is planned, 15 min each: the plan must still use what is up around them
+    const holds: Hold[] = targetBlocks(free).slice(0, 6).map((b, k) => ({ id: `h${k}`, kind: 'hold', target: b.target!.key, from: at, until: at + 15 * 60e3, reason: 'cloud', by: 'agent', cause: 'cloud', createdAt: at }));
+    const r = solve(cands, { settings: long, mount: 'eq', holds });
+    for (const g of r.blocks.filter((b) => b.kind === 'gap')) {
+      const up = cands.filter((c) => {
+        const o = findObject(c.name)!;
+        const mid = new Date((g.start + g.end) / 2);
+        return sky.altAz(SITE, o.raHours, o.decDeg, mid).altitude >= SETTINGS.minAltitude + 3 && !holds.some((h) => h.target === c.key && mid.getTime() < h.until!);
+      });
+      assert.deepEqual(up.map((c) => c.displayName), [], `a gap ${new Date(g.start).toISOString()}–${new Date(g.end).toISOString()} with targets up: ${g.reason}`);
+    }
   });
 
   test('a running target whose need is covered still keeps its minimum block', () => {
@@ -363,7 +389,8 @@ describe('night plan: fillers', () => {
 
   test('a filler in progress stops at its goal and the night goes on with a new one', () => {
     const r = solve([filler('M 33', { goalMin: 130, collectedMin: 100 }), filler('M 31')], { settings: on });
-    assert.ok(minutes(r, 'M 33') <= 30 + 10 * 0.75, `M 33 ${minutes(r, 'M 33')} min`);
+    const planned = targetBlocks(r).filter((b) => b.target!.displayName === 'M 33' && !/past what it needed tonight|fills a stretch/.test(b.reason)).reduce((a, b) => a + b.expectedMin, 0);
+    assert.ok(planned <= 30 + 10 * 0.75, `M 33 ${planned} min`);
     assert.ok(minutes(r, 'M 31') > 0);
   });
 
@@ -409,6 +436,16 @@ describe('night plan: a program target is collected at its best', () => {
 describe('the catalog planner: a list that spans the night', () => {
   const opts = { start: W.start, end: W.end, now: NOON, minAltitude: 25, fovArcmin: { w: 177, h: 100 }, timezone: 'America/Chicago', applyRest: false } as const;
   const quadrants = (t: { raHours: number; decDeg: number }[], at: Date) => new Set(t.map((x) => sky.altAz(SITE, x.raHours, x.decDeg, at)).filter((a) => a.altitude >= 25).map((a) => quadrantOf(a.azimuth)));
+
+  test('"emission" covers the Lynds and Cederblad bright nebulae (2026-11-26: the Dwarf mini\'s fillers were 42 without them)', () => {
+    // the Dwarf mini's frame and filler filter: emission and planetaries filling at least 25% of a 177' frame
+    const p = planNight(SITE, { ...opts, limit: Infinity, types: ['galaxy', 'emission', 'planetary'], minFovPercent: 25 });
+    const neb = p.targets.filter((t) => /^(LBN|Ced) /.test(t.name) || t.name === 'IC 405');
+    assert.ok(p.targets.some((t) => t.name === 'IC 405'), 'the Flaming Star Nebula (IC 405, a Neb) is on the list');
+    assert.ok(neb.length >= 100, `${neb.length} LBN/Ced rows of ${p.targets.length}`);
+    // the size floor still holds: nothing smaller than 25% of the frame width
+    for (const t of p.targets) assert.ok((findObject(t.name)?.majorArcmin ?? 0) >= 0.25 * 177, `${t.name} ${findObject(t.name)?.majorArcmin}'`);
+  });
 
   test('every hour of the night has targets in at least three quadrants', () => {
     const { targets } = planNight(SITE, { ...opts, limit: 120, spanNight: { blockMin: 45 } });
@@ -918,7 +955,7 @@ describe('night plan: obstruction holds follow the sky', () => {
     assert.equal(west.hold.until, null);
     assert.match(west.hold.note ?? '', /setting/);
     const cloud = await svc.obscured('M 31', { cause: 'cloud', by: 'agent' });
-    assert.equal(cloud.hold.until, now + 45 * 60e3);
+    assert.equal(cloud.hold.until, now + 15 * 60e3);
     assert.equal(svc.holds().length, 3);
   });
 
@@ -927,10 +964,17 @@ describe('night plan: obstruction holds follow the sky', () => {
     const site = { lat: SITE.lat + 3, lon: SITE.lon, elev: SITE.elev }; // a site of its own: no other test's blocked views
     const svc = new PlanService({ site: () => site, fovArcmin: () => ({ w: 83, h: 147 }), journal: new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-j-')) }), now: () => now, conditions: async () => null, forecastStamp: async () => null, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-')) });
     const cloud = await svc.obscured('M 31', { cause: 'cloud', by: 'agent' });
-    assert.equal(cloud.hold.until, now + 45 * 60e3, 'held for a while');
+    assert.equal(cloud.hold.until, now + 15 * 60e3, 'held 15 min');
     const unsaid = await svc.obscured('M 45', { by: 'agent' });
     assert.equal(unsaid.hold.cause, 'other');
-    assert.equal(unsaid.hold.until, now + 45 * 60e3, 'held for a while, like a cloud');
+    assert.equal(unsaid.hold.until, now + 15 * 60e3, 'held 15 min, like a cloud');
+    // the agent never holds a cloud longer, whatever it asks; the owner's own hold is what they asked
+    const long = await svc.obscured('M 33', { cause: 'cloud', minutes: 90, by: 'agent' });
+    assert.equal(long.hold.until, now + 15 * 60e3, 'agent cloud hold capped');
+    const skyH = await svc.skyHold('E', { minutes: 60, by: 'agent' });
+    assert.equal(skyH.until, now + 15 * 60e3, 'agent sky hold capped');
+    const owner = await svc.obscured('M 42', { cause: 'cloud', minutes: 90, by: 'user' });
+    assert.equal(owner.hold.until, now + 90 * 60e3, "the owner's hold is theirs");
     assert.equal(sightingsFor(site, new Date(now)).length, 0, 'nothing filed for the horizon');
     await svc.obscured('NGC 7000', { cause: 'obstruction', by: 'user' });
     assert.equal(sightingsFor(site, new Date(now)).length, 1, 'only the obstruction is');

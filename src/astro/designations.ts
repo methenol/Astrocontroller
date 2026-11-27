@@ -33,7 +33,10 @@ export const TYPE_GROUPS: Readonly<Record<string, readonly string[]>> = Object.f
   galaxy: ['G', 'GPair', 'GTrpl', 'GGroup'],
   galaxy_cluster: ['GClstr', 'GGroup'],
   nebula: ['HII', 'EmN', 'Neb', 'RfN', 'Cl+N', 'SNR', 'DrkN'],
-  emission: ['HII', 'EmN', 'Cl+N', 'SNR', 'PN'],
+  // 'Neb' is the bright-nebula class of the Lynds (LBN) and Cederblad catalogues and OpenNGC's
+  // generic nebulae: emission regions for the most part (IC 405, IC 1831, the Ced and LBN Hα
+  // regions). Left out, "emission" dropped 356 large ones the catalog has.
+  emission: ['HII', 'EmN', 'Neb', 'Cl+N', 'SNR', 'PN'],
   planetary: ['PN'],
   cluster: ['OCl', 'GCl', 'Cl+N', '*Ass'],
   globular: ['GCl'],

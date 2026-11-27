@@ -78,6 +78,8 @@ const TRANS_GOOD = 3;
 const TRANS_BAD = 7;
 const SEEING_MAX_COST = 0.3;
 const TRANS_MAX_COST = 0.3;
+/** a gap fill starts a new target only if it yields at least this many minutes after its switch */
+const GAP_FILL_MIN_YIELD = 5;
 /** a filler gets at most this much of one night */
 const FILLER_CAP_MIN = 240;
 /** how much a filler's value rises as it nears its goal (at the goal: this much more) */
@@ -626,6 +628,10 @@ interface Run {
   pinned: boolean;
   /** slots it has already run before this solve (the running target's), towards its minimum block */
   ranSlots?: number;
+  /** placed by the gap fill: a stretch no minimum block fitted */
+  gapFill?: boolean;
+  /** the slot from which the gap fill carried it on past where the plan ended it */
+  extendedFrom?: number;
 }
 
 export function solveNight(input: SolveInput): Solved {
@@ -926,6 +932,68 @@ export function solveNight(input: SolveInput): Solved {
     st.cur = { cv: best.cv, startIdx: i, endIdx: i + 1, overheadMin: contiguous ? 0 : switchCost(best.cv, i), expectedMin: 0, pinned: false };
   }
   close();
+  fillGaps();
+
+  /**
+   * The minimum block is there to keep the night from being cut into many short sessions, never to
+   * leave the sky empty: a stretch nothing could take for a whole minimum block (a temporary hold, the
+   * night's last hour, targets crossing the limits) goes to whatever is usable in it, however short,
+   * whatever its goal or window. The target just shot goes on when it can (no switch); otherwise the
+   * one that covers the most of the stretch at the best value. Only a stretch where no candidate at
+   * all clears the limits, the Moon and the holds stays a gap.
+   */
+  function fillGaps() {
+    const covered = new Uint8Array(n);
+    for (const r of runs) covered.fill(1, r.startIdx, r.endIdx);
+    if (cal) covered.fill(1, cal.a, cal.b);
+    const fillOk = (cv: Curve, j: number) => j < n && !covered[j] && !calAt(j) && usable(cv, j);
+    const runEnd = (cv: Curve, i: number) => {
+      let j = i;
+      while (fillOk(cv, j)) j++;
+      return j;
+    };
+    const added: Run[] = [];
+    let i = firstIdx;
+    while (i < n) {
+      if (covered[i] || calAt(i)) {
+        i++;
+        continue;
+      }
+      // the run ending here (planned, or just filled) may go on: no GoTo, no new focus, so it wins by the margin
+      const prev = [...runs, ...added].find((r) => !r.pinned && r.endIdx === i);
+      let best: { cv: Curve; end: number; v: number } | null = null;
+      for (const cv of cvs) {
+        if (!fillOk(cv, i)) continue;
+        const e = runEnd(cv, i);
+        const goesOn = !!prev && prev.cv === cv;
+        // a stretch its own GoTo and centring would eat is not worth starting
+        if (!goesOn && yieldOf({ cv, startIdx: i, endIdx: e, overheadMin: switchCost(cv, i), expectedMin: 0, pinned: false }, e - i) < GAP_FILL_MIN_YIELD) continue;
+        let sum = 0;
+        for (let j = i; j < e; j++) sum += cv.merit[j];
+        // what is already done tonight or met its goal still beats an empty sky
+        const value = Math.max(base(cv), settings.fillerWeight * clamp01((cv.c.fillerScore ?? 50) / 100), 0.05);
+        const v = value * (sum / (e - i)) * Math.min(1, (e - i) / minBlockSlots) * (goesOn ? 1 + settings.switchHysteresis : 1);
+        if (!best || v > best.v) best = { cv, end: e, v };
+      }
+      if (!best) {
+        i++;
+        continue;
+      }
+      if (prev && prev.cv === best.cv) {
+        prev.extendedFrom ??= i;
+        prev.endIdx = best.end;
+      }
+      else added.push({ cv: best.cv, startIdx: i, endIdx: best.end, overheadMin: switchCost(best.cv, i), expectedMin: 0, pinned: false, gapFill: true });
+      covered.fill(1, i, best.end);
+      i = best.end;
+    }
+    runs.push(...added);
+    runs.sort((a, b) => a.startIdx - b.startIdx);
+    // a fill right before its own target's next block: the scope is already there, no second switch
+    for (let k = 1; k < runs.length; k++) if (runs[k].cv === runs[k - 1].cv && runs[k].startIdx === runs[k - 1].endIdx && !runs[k].pinned) runs[k].overheadMin = 0;
+    // expected minutes for what was extended or added
+    for (const r of runs) r.expectedMin = yieldOf(r, r.endIdx - r.startIdx);
+  }
 
   // ---- blocks: the runs, and what is between them
   const prefix = input.idPrefix ?? 'b';
@@ -968,7 +1036,7 @@ export function solveNight(input: SolveInput): Solved {
       why.moon && `${why.moon} too close to the Moon`,
       why.held && `${why.held} held`,
       why.waiting && `${why.waiting} kept for ${why.waiting === 1 ? 'its' : 'their'} best hours (from ${hhmm(opensFirst)}), with nothing else to shoot before then`,
-      why.short && `${why.short} up only for runs shorter than the ${settings.minBlockMin}-min minimum block`,
+      why.short && `${why.short} up only for runs a target change would eat (the switch is ${Math.round(input.overheadMin)} min of GoTo, centring and focus, and leaves less than ${GAP_FILL_MIN_YIELD} min to collect)`,
     ].filter(Boolean);
     const met = [
       goalsMet && `${goalsMet} program target${goalsMet === 1 ? ' has' : 's have'} met ${goalsMet === 1 ? 'its goal' : 'their goals'}`,
@@ -1066,6 +1134,8 @@ export function solveNight(input: SolveInput): Solved {
       if (cv.season && cv.season.urgency >= 0.5) why.push(`its season is closing${cv.season.endsAround ? ` (usable until about ${cv.season.endsAround})` : ''}`);
     } else if (fillerInProgress(c)) why.push(`filler in progress (${Math.round(c.collectedMin ?? 0)} of ${c.goalMin} min collected, planner score ${Math.round(c.fillerScore ?? 0)})`);
     else why.push(`filler (planner score ${Math.round(c.fillerScore ?? 0)})`);
+    if (r.extendedFrom !== undefined) why.push(`goes on from ${hhmm(allSlots[r.extendedFrom].t)} past what it needed tonight: nothing else fits a ${settings.minBlockMin}-min block then, and the sky is not left empty`);
+    if (r.gapFill) why.push(`fills a stretch no ${settings.minBlockMin}-min block fits (a hold, the limits or the night's end), rather than leave it empty`);
     why.push(`alt ${Math.round(alts[0])}°→${Math.round(alts[alts.length - 1])}° (max ${Math.round(Math.max(...alts))}°), ${q}`);
     if (moonUp) why.push(`Moon up ${moonUp} min, ≥${Math.round(minSep)}° away`);
     const clouds = cloudsOf(a, b, c.displayName);

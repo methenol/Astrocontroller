@@ -58,8 +58,14 @@ const DEBOUNCE_MS = 5_000;
 const PREPARE_HOUR = 12;
 /** the night counts as under way this long before the plan starts (time to open the arm and connect) */
 const LEAD_MS = 15 * 60_000;
-/** an obscured target with no end given is held this long when it is setting or the cause is cloud */
-const HOLD_DEFAULT_MIN = 45;
+/**
+ * A cloud (or other passing) hold with no end given lasts this long, and one the agent files never
+ * lasts longer: clouds move, and a long hold only leaves the plan with holes to lift by hand. Still
+ * clouded after it: the agent files it again.
+ */
+const HOLD_DEFAULT_MIN = 15;
+/** the longest cloud / sky hold the agent may file (the owner's own holds keep what they ask for) */
+const AGENT_WEATHER_HOLD_MAX_MIN = 15;
 /** an obstruction's top is taken to be this much above where the target was seen blocked */
 const CLEAR_RISE_DEG = 4;
 /** the azimuth half-width an obstruction hold covers at the horizon (it widens with 1/cos alt, as a frame does) */
@@ -414,7 +420,10 @@ export class PlanService extends SafeEmitter {
     const candidates: Candidate[] = [];
     const rows = new Map<string, (typeof p.targets)[number]>();
     for (const r of p.targets) {
-      if (r.gated) continue;
+      // "too small" and "larger than the frame" only keep a row from being the hero: as a filler its
+      // framing already lowers its score, and it beats an empty sky. Only what tonight's sky and glass
+      // cannot bring up at all stays out.
+      if (r.gated && r.detectBucket === 'SKIP_TONIGHT') continue;
       const key = targetKey(r.name);
       if (rows.has(key)) continue;
       // the wider pool must not bring back what the owner rested
@@ -979,12 +988,18 @@ export class PlanService extends SafeEmitter {
       } else note = soon.altitude < aa.altitude ? `setting (${side}): it only sinks further behind the obstruction, out for the rest of the night` : 'does not clear the obstruction before the plan ends';
       if (given === null) until = clear ? clear.getTime() : null;
     } else {
-      until ??= now + HOLD_DEFAULT_MIN * 60e3;
+      until = this.weatherHoldUntil(now, until, o.by);
       note = `${cause === 'cloud' ? 'cloud' : 'held'}: tried again at ${hm(until)}`;
     }
     const hold = this.addHold({ kind: 'hold', target: t.key, displayName: t.displayName, from: now, until, reason: o.reason ?? `obscured (${cause})`, note, by: o.by, cause, markedAlt: Math.round(aa.altitude * 10) / 10, markedAz: Math.round(aa.azimuth) });
     await this.replan(`${t.displayName} obscured`);
     return { hold, now: await this.nowView() };
+  }
+
+  /** when a cloud / sky hold ends: what was asked, else the default; the agent's never past its cap */
+  private weatherHoldUntil(now: number, asked: number | null, by: 'user' | 'agent'): number {
+    const until = asked ?? now + HOLD_DEFAULT_MIN * 60e3;
+    return by === 'agent' ? Math.min(until, now + AGENT_WEATHER_HOLD_MAX_MIN * 60e3) : until;
   }
 
   async skip(ref: string, o: { reason?: string; by: 'user' | 'agent' }): Promise<Hold> {
@@ -1014,7 +1029,8 @@ export class PlanService extends SafeEmitter {
 
   async skyHold(quadrant: Quadrant, o: { minutes?: number; until?: number; reason?: string; by: 'user' | 'agent' }): Promise<Hold> {
     const now = this.now();
-    const hold = this.addHold({ kind: 'sky', quadrant, from: now, until: o.until ?? now + (o.minutes ?? HOLD_DEFAULT_MIN) * 60e3, reason: o.reason ?? `the ${quadrant} sky is out (cloud)`, by: o.by, cause: 'cloud' });
+    const until = this.weatherHoldUntil(now, o.until ?? (o.minutes ? now + o.minutes * 60e3 : null), o.by);
+    const hold = this.addHold({ kind: 'sky', quadrant, from: now, until, reason: o.reason ?? `the ${quadrant} sky is out (cloud)`, by: o.by, cause: 'cloud' });
     await this.replan(`the ${quadrant} sky held`);
     return hold;
   }
