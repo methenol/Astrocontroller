@@ -53,6 +53,22 @@ describe('Dwarf stack start with settings (agent and web UI path)', () => {
     assert.equal(dwarf.stackControl.tele.startedBy, 'agent');
   });
 
+  test('the scope switching the exposure at the start (the Dwarf Mini) is read back: the stall timing and the agent get the real one', async () => {
+    // the set is acknowledged and notified (30 s = 170); the start switches it to 15 s (156), as fw 1.1.4.19 did on 2026-11-26
+    fake.on(Cmd.PARAM_SET_EXPOSURE, async (req, f) => {
+      // with the reply, as the Mini sends it
+      await f.notify('intParam', { paramId: '101', mode: 1, value: req.data.value });
+      return { code: 0 };
+    });
+    fake.on(Cmd.ASTRO_START_CAPTURE_RAW_LIVE_STACKING, async (_req, f) => {
+      await f.notify('intParam', { paramId: '101', mode: 1, value: 156 });
+      setTimeout(() => void f.notify('teleStackingState', { state: 1 }), 60);
+      return { code: 0 };
+    });
+    const r = await dwarf.startStackingWith('tele', { exposure: 30, gain: 60, startedBy: 'agent' });
+    assert.match(r, /it stacks at 15 s, not the 30 s set/);
+  });
+
   test('right after a stop: waits out the settle time before sending settings', async () => {
     // a tele stack that has just ended (as reported over the wire)
     await fake.notify('teleStackingState', { state: 1 });

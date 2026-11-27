@@ -153,7 +153,24 @@ export class StackingControl {
       throw new Error(`the telescope neither acknowledged the ${camera} live-stacking start nor reported stacking within ${s} s. Check stacking_status before retrying (it may still start).`);
     }
     if (reply && this.state.stacking[camera].state !== 'running') this.core.stacks.confirmRunning(camera);
-    return `${what} started${reply ? '' : "; confirmed from the telescope's stacking notifications (fw 1.5.3 often does not acknowledge this command)"}`;
+    const switched = await this.exposureAfterStart(camera);
+    return `${what} started${reply ? '' : "; confirmed from the telescope's stacking notifications (fw 1.5.3 often does not acknowledge this command)"}${switched}`;
+  }
+
+  /**
+   * The exposure the stack really runs at. The Dwarf Mini (fw 1.1.4.19) acknowledges an exposure and,
+   * on a start without force, switches it itself within a fraction of a second — to 15 s, where it had
+   * dark masters only for 1 s and 15 s (2026-11-26: 60 s set, 15 s stacked). The stall timing then
+   * took the faster frames for impossible ones and stopped a working stack as stalled. The
+   * notification of the switch has arrived by the time the stack runs: read it, and say so.
+   */
+  private async exposureAfterStart(camera: CameraName): Promise<string> {
+    const asked = this.exposureAtStart[camera];
+    const now = (await this.camera.exposureSeconds(camera).catch(() => null)) ?? undefined;
+    if (now === undefined || asked === undefined || Math.abs(now - asked) <= 0.01 * asked) return '';
+    this.exposureAtStart[camera] = now;
+    log.warn(`${camera} stack: the telescope switched the exposure from ${asked} s to ${now} s at the start`);
+    return `\nWARNING: the telescope switched the exposure itself: it stacks at ${now} s, not the ${asked} s set. On a scope that needs dark masters this usually means none exists of ${asked} s at this gain (dark_frames action=list): take one (dark_frames action=capture exposure_s=${asked}), then stop and restart the stack — or collect at ${now} s.`;
   }
 
   /**

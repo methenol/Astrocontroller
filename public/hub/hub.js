@@ -133,7 +133,10 @@ window.addEventListener('message', (e) => {
     if (e.data.type === 'hello' || e.data.type === 'stale') navigateFrame();
     return;
   }
-  if (e.data.type === 'hello') postProfile(true);
+  if (e.data.type === 'hello') {
+    revealIfCurrent();
+    postProfile(true);
+  }
   else if (e.data.type === 'open-switcher') {
     const f = $('#frame').getBoundingClientRect();
     const r = e.data.rect ?? {};
@@ -236,8 +239,15 @@ let frameRetries = 0;
 const frameUrl = () => `p/${encodeURIComponent(frameFor)}/`;
 
 function navigateFrame() {
+  // hidden until the selected profile's own page is in it: until then the frame still holds the
+  // previous profile's page, and nothing of it may be seen or used under the new name
+  $('#frame').style.visibility = 'hidden';
   $('#frame').src = frameUrl();
   armBootCheck(FRAME_LOAD_TIMEOUT_MS);
+}
+/** Show the frame once its document is the selected profile's (its app, or the hub's "starting" page). */
+function revealIfCurrent() {
+  if (frameIsCurrent()) $('#frame').style.visibility = '';
 }
 function armBootCheck(ms) {
   clearTimeout(bootTimer);
@@ -251,7 +261,8 @@ function checkBoot() {
     doc = $('#frame').contentDocument;
     path = $('#frame').contentWindow.location.pathname;
   } catch {
-    /* not ours to look into: leave it */
+    /* not ours to look into (the browser's own error page): show it, leave it */
+    $('#frame').style.visibility = '';
     return;
   }
   const root = new URL(frameUrl(), location.href).pathname;
@@ -273,7 +284,11 @@ function checkBoot() {
   );
 }
 // every load of the frame (the first, the "starting" page's own reloads): the app has booted by now
-$('#frame').addEventListener('load', () => frameFor && armBootCheck(FRAME_BOOT_GRACE_MS));
+$('#frame').addEventListener('load', () => {
+  if (!frameFor) return;
+  revealIfCurrent();
+  armBootCheck(FRAME_BOOT_GRACE_MS);
+});
 
 function renderStage() {
   const frame = $('#frame');

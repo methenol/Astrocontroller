@@ -289,3 +289,47 @@ describe('StackTracker camera ownership', () => {
     assert.ok(tr.owns('wide'));
   });
 });
+
+describe('StackTracker when the scope stacks at another exposure than assumed', () => {
+  /**
+   * The Dwarf Mini, 2026-11-26 03:38: 60 s set, the firmware switched it to 15 s at the start. With
+   * 60 s assumed, every count past elapsed/60 s + 2 was taken for a replay of an old stack and dropped:
+   * "15 stacked of 3 taken", stalled after 4 min, stopped after 10 — while it stacked a frame every 15 s.
+   */
+  const run = (assumedS: number, frames: number, everyS: number) => {
+    let now = 1_000_000;
+    const tr = new StackTracker(() => now, () => assumedS);
+    const seen: string[] = [];
+    tr.on('health', (_c: CameraName, h: StackHealth) => seen.push(h.verdict));
+    tr.startSent('tele');
+    tr.onNotification('teleStackingState', { state: 1 }, now);
+    for (let i = 1; i <= frames; i++) {
+      now += everyS * 1000;
+      tr.onNotification('teleStackingProgress', { currentCount: i, expIndex: 156 }, now);
+      tr.onNotification('teleStackingProgress', { updateType: 1, stackedCount: i - 1, expIndex: 156 }, now + 1000);
+      tr.tick();
+    }
+    // the next minutes: frames keep coming every 15 s
+    return { tr, seen };
+  };
+
+  test('15 s frames under an assumed 60 s are counted after a few rises, and the stack is never stalled', () => {
+    const { tr, seen } = run(60, 40, 15);
+    assert.equal(tr.info.tele.currentCount, 40);
+    assert.ok(!seen.includes('stalled'), seen.join(' → '));
+    assert.equal(tr.info.tele.health?.verdict, 'ok');
+    assert.equal(tr.info.tele.health?.frameIntervalS, 15);
+  });
+
+  test('a single replayed count of an old stack is still dropped', () => {
+    let now = 1_000_000;
+    const tr = new StackTracker(() => now, () => 60);
+    tr.startSent('tele');
+    tr.onNotification('teleStackingState', { state: 1 }, now);
+    now += 13_000;
+    // the previous stack's last progress, repeated on a state read
+    tr.onNotification('teleStackingProgress', { currentCount: 18, stackedCount: 17 }, now);
+    tr.onNotification('teleStackingProgress', { currentCount: 18, stackedCount: 17 }, now + 2000);
+    assert.ok(!tr.info.tele.currentCount, `currentCount ${tr.info.tele.currentCount}`);
+  });
+});

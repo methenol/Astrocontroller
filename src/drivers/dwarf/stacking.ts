@@ -77,6 +77,12 @@ export const OK_FROM = 0.5;
 const MIN_INTERVALS = 3;
 /** frame marks kept per camera: a few windows' worth */
 const MARKS_KEPT = WINDOW_FRAMES * 3;
+/**
+ * A replay of an old stack's last count is one number, repeated; a count that rises this many times
+ * in a row beyond what the assumed exposure allows is a stack running at a shorter exposure than
+ * assumed (the Dwarf Mini switches it itself at the start, 2026-11-26): it is believed.
+ */
+const BEYOND_RISES_BELIEVED = 3;
 /** progress this soon after a stop is a straggler of the stopped stack */
 const STRAGGLER_MS = 15_000;
 /** a start sent this recently makes its camera the owner of stack notifications */
@@ -132,6 +138,8 @@ interface Frames {
   marks: Array<{ taken: number; stacked: number; t: number }>;
   lastTaken: number;
   lastStacked: number;
+  /** counts refused as more than the stack can have taken, in a row, each above the one before */
+  beyond: number[];
 }
 
 /**
@@ -146,6 +154,8 @@ export class StackTracker extends SafeEmitter {
   private owner: CameraName = 'tele';
   private startSentAt: Record<CameraName, number> = { tele: 0, wide: 0 };
   private frames: Record<CameraName, Frames> = { tele: emptyFrames(), wide: emptyFrames() };
+  /** the assumed exposure proved too long for this stack: its counts are no longer bounded by it */
+  private unboundedFrames: Record<CameraName, boolean> = { tele: false, wide: false };
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -251,9 +261,16 @@ export class StackTracker extends SafeEmitter {
     if (d.currentCount !== undefined && d.currentCount > this.frames[cam].lastTaken && d.currentCount > this.possibleFrames(cam, ts)) {
       // A repeat of an earlier stack's last progress (the firmware repeats it on a state read).
       // 2026-10-13 00:58: 13 s into a 60 s stack, {currentCount:18, expIndex:75} → judged "rejecting".
-      log.debug(`${cam}: ignored progress ${d.currentCount} frames: more than the stack can have taken yet`);
-      return;
+      const beyond = this.frames[cam].beyond;
+      if (!beyond.length || d.currentCount > beyond[beyond.length - 1]) beyond.push(d.currentCount);
+      if (beyond.length <= BEYOND_RISES_BELIEVED) {
+        log.debug(`${cam}: ignored progress ${d.currentCount} frames: more than the stack can have taken yet`);
+        return;
+      }
+      log.warn(`${cam}: frame counts keep rising faster than the assumed exposure allows (${beyond.join(', ')}): the stack runs at a shorter exposure; counting them`);
+      this.unboundedFrames[cam] = true;
     }
+    if (d.currentCount !== undefined && d.currentCount <= this.possibleFrames(cam, ts)) this.frames[cam].beyond = [];
     if (d.currentCount !== undefined && d.currentCount < this.frames[cam].lastTaken - 1) {
       // counts went back: a new stack began without a state notification reaching us
       this.resetFrames(cam);
@@ -305,12 +322,13 @@ export class StackTracker extends SafeEmitter {
   private possibleFrames(cam: CameraName, ts: number): number {
     const sent = this.startSentAt[cam];
     const exposureS = this.exposureS(cam);
-    if (!sent || !exposureS || ts < sent) return Infinity;
+    if (!sent || !exposureS || ts < sent || this.unboundedFrames[cam]) return Infinity;
     return Math.floor((ts - sent) / (exposureS * 1000)) + 2;
   }
 
   private resetFrames(cam: CameraName): void {
     this.frames[cam] = emptyFrames();
+    this.unboundedFrames[cam] = false;
     const i = this.info[cam];
     this.info[cam] = { state: i.state, startedAt: i.startedAt };
   }
@@ -367,6 +385,6 @@ export class StackTracker extends SafeEmitter {
 }
 
 function emptyFrames(): Frames {
-  return { marks: [], lastTaken: 0, lastStacked: 0 };
+  return { marks: [], lastTaken: 0, lastStacked: 0, beyond: [] };
 }
 
