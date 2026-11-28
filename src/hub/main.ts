@@ -22,7 +22,8 @@ import { z } from 'zod';
 import { errMsg, logger } from '../log.js';
 import { body, jsonErrors, notFound, rejectCrossSite, route } from '../web/http.js';
 import { Instance, type InstanceSpec } from './instances.js';
-import { childEnv, editorSettings, seestarKeyPath, seestarKeyProblem, usesSeestarKey, legacyProfile, ProfileInput, ProfileStore, profileDataDir, publicProfile, type HubPaths, type Profile } from './profiles.js';
+import { usesLibraryRoot, moveOffLibraryRoot } from './library-migration.js';
+import { childEnv, editorSettings, seestarKeyPath, seestarKeyProblem, usesSeestarKey, legacyProfile, ProfileInput, ProfileStore, profileDataDir, profileLibraryDir, publicProfile, type HubPaths, type Profile } from './profiles.js';
 import { guard, proxyRequest, proxyUpgrade, refuseUpgrade, splitPrefixed, type UpstreamFailure } from './proxy.js';
 import { TunnelManager } from './tunnels.js';
 
@@ -64,6 +65,23 @@ if (!store.exists()) {
   log.info(`first start of the profile hub: the .env setup is now profile "${p.name}" (its data stays in ${profileDataDir(p, paths)})`);
 }
 store.load((m) => log.warn(m));
+// the migrated setup's library moves off the shared root into its own folder, like every other profile's
+for (const p of store.all().filter((x) => usesLibraryRoot(x, paths))) {
+  const others = store
+    .all()
+    .filter((x) => x.id !== p.id)
+    .map((x) => profileLibraryDir(x, paths))
+    .filter((d) => path.dirname(path.resolve(d)) === path.resolve(paths.library))
+    .map((d) => path.basename(d));
+  try {
+    const r = moveOffLibraryRoot(p, paths, others);
+    if (!r) continue;
+    store.setLibraryDir(p.id, r.to);
+    log.info(`profile "${p.name}": library moved from ${r.from} to ${r.to} (${r.moved} entries${r.skipped.length ? `; left at the root, already in the folder: ${r.skipped.join(', ')}` : ''}${r.records.length ? `; paths repointed in ${r.records.join(', ')}` : ''})`);
+  } catch (e) {
+    log.warn(`profile "${p.name}": its library stays at ${paths.library}, the move into its own folder failed: ${(e as Error).message}`);
+  }
+}
 
 // ---- processes ---------------------------------------------------------------------------------
 

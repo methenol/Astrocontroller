@@ -28,7 +28,8 @@ services:
       # (DATA_PATH=./data-seestar for the Seestar) so the two agents do not mix.
       - ${DATA_PATH:-./data}:/data
       # Your imagery library (FITS lights, stacks, calibration frames). Each profile gets its own
-      # folder in it (/library/<profile id>); the migrated single-telescope setup keeps /library itself.
+      # folder in it (/library/<profile id>); the migrated single-telescope setup's library is moved
+      # into a folder named after it (/library/dwarf-3 for "Dwarf 3") at the hub's start like the others (src/hub/library-migration.ts).
       - ${LIBRARY_PATH:-./library}:/library
       # The ZWO Telescope Network handshake key: the official Seestar app's key, extracted from the APK,
       # one for every ZWO connection (a Seestar on the LAN does not use it). SEESTAR_KEY_PATH=/keys/seestar.pem in .env.

@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { filterId, sameFilter } from '../astro/acquisition/devices.js';
 import { filterFromNames, librarySessionsLike, sessionDevice, sessionFilter } from '../library/sessions.js';
 import { collected } from '../night/progress.js';
+import { targetKey } from '../astro/rest.js';
 import type { Journal } from '../night/journal.js';
 
 const D_DUO_1 = 'DWARF_RAW_TELE_NGC 281_EXP_120_GAIN_40_2026-10-01-22-00-00-100';
@@ -75,28 +76,47 @@ describe('session filters and pooling', () => {
     assert.deepEqual(librarySessionsLike(S_IR), [S_IR]);
   });
 
-  test('collected time counts only the wanted filter', () => {
+  test('collected time counts only the wanted filter, from the library', () => {
     const journal = {
       recentSessions: () => [
-        // the Dwarf's journal has no filter: counted only on a night the library has nothing from
+        // earlier nights: the library is the record, whatever the journal says
         { target: 'NGC 281', night: '2026-10-01', stats: { integrationS: 99 * 60 } },
         { target: 'NGC 281', night: '2026-10-09', stats: { integrationS: 30 * 60 } },
-        // the Seestar's names it
-        { target: 'NGC 281', night: '2026-10-10', stats: { integrationS: 20 * 60, filter: 'IRCUT' } },
-        { target: 'NGC 281', night: '2026-10-11', stats: { integrationS: 10 * 60, filter: 'Duo-Band' } },
+        // tonight, not transferred yet: the Dwarf's journal has no filter, the Seestar's names it
+        { target: 'NGC 281', night: '2026-10-12', stats: { integrationS: 7 * 60 } },
+        { target: 'NGC 281', night: '2026-10-12', stats: { integrationS: 5 * 60, filter: 'IRCUT' } },
       ],
     } as unknown as Pick<Journal, 'recentSessions'>;
-    const key = [...collected(null).keys()][0]!;
-    const all = collected(journal).get(key)!;
-    const duo = collected(journal, { filterOf: () => 'Duo-Band' }).get(key)!;
-    const astro = collected(journal, { filterOf: () => 'Astro' }).get(key)!;
-    const auto = collected(journal, { filterOf: () => 'auto' }).get(key)!;
+    const o = { tonight: '2026-10-12', device: null };
+    const key = [...collected(null, o).keys()][0]!;
+    const all = collected(journal, o).get(key)!;
+    const duo = collected(journal, { ...o, filterOf: () => 'Duo-Band' }).get(key)!;
+    const astro = collected(journal, { ...o, filterOf: () => 'Astro' }).get(key)!;
+    const auto = collected(journal, { ...o, filterOf: () => 'auto' }).get(key)!;
     // library (sub length from the folder): Duo-Band tele 4×2 + 2×2 min, wide 2×2 min; Astro 3×1 min; LP 2×1 min; IRCUT 1 min
     assert.equal(duo.libraryMin, 8 + 4 + 4);
-    assert.equal(duo.totalMin, 16 + 30 + 10);
+    assert.equal(duo.totalMin, 16 + 7, 'tonight from the journal; the IRCUT session is not Duo-Band');
+    assert.equal(duo.journalOnlyMin, 7);
     assert.equal(astro.libraryMin, 3);
-    assert.equal(astro.totalMin, 3 + 30);
+    assert.equal(astro.totalMin, 3 + 7);
     assert.equal(auto.totalMin, all.totalMin);
-    assert.ok(all.totalMin > duo.totalMin);
+    assert.equal(all.totalMin, 16 + 3 + 3 + 12);
+    assert.equal(all.nights, 6);
+  });
+
+  test('a night deleted from the library no longer counts, whatever the journal recorded', () => {
+    const journal = {
+      recentSessions: () => [{ target: 'IC 1848', night: '2026-10-05', stats: { integrationS: 185 * 60, filter: 'LP' } }],
+    } as unknown as Pick<Journal, 'recentSessions'>;
+    assert.equal(collected(journal, { tonight: '2026-10-12' }).get(targetKey('IC 1848')), undefined);
+    assert.equal(collected(journal, { tonight: '2026-10-05' }).get(targetKey('IC 1848'))?.totalMin, 185, 'until transferred, tonight is the journal');
+  });
+
+  test('only this telescope\'s sessions count', () => {
+    const key = [...collected(null, { device: null }).keys()][0]!;
+    const dwarf = collected(null, { device: 'dwarf', tonight: '2026-10-12' }).get(key)!;
+    const seestar = collected(null, { device: 'seestar', tonight: '2026-10-12' }).get(key)!;
+    assert.equal(dwarf.libraryMin, 8 + 4 + 4 + 3);
+    assert.equal(seestar.libraryMin, 2 + 1);
   });
 });

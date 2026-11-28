@@ -74,7 +74,7 @@ export const ProfileSchema = z.object({
   dataDir: z.string().optional(),
   /** absolute; default <LIBRARY_DIR>/<id> */
   libraryDir: z.string().optional(),
-  /** migrated from the single-telescope setup: its data, library and tunnel state stay where they were */
+  /** migrated from the single-telescope setup: its data and tunnel state stay where they were (its library moves into a folder named after it, library-migration.ts) */
   legacy: z.boolean().optional(),
   createdAt: z.number().default(() => Date.now()),
 });
@@ -221,6 +221,16 @@ export class ProfileStore {
     if (!p) throw new Error(`no profile ${id}`);
     if (active) validate(p);
     p.active = active;
+    this.save();
+    return structuredClone(p);
+  }
+
+  /** Point a profile at another library folder (undefined: <library>/<id>). */
+  setLibraryDir(id: string, dir: string | undefined): Profile {
+    const p = this.list.find((x) => x.id === id);
+    if (!p) throw new Error(`no profile ${id}`);
+    if (dir === undefined) delete p.libraryDir;
+    else p.libraryDir = dir;
     this.save();
     return structuredClone(p);
   }
@@ -409,6 +419,12 @@ export function childEnv(p: Profile, base: NodeJS.ProcessEnv, o: ChildEnvOptions
     env.SEESTAR_CONNECTION = 'local';
     if (p.host) env.SEESTAR_HOST = p.host;
   }
+  // AstroPhoto Studio sees the hub's library root (ASTROPHOTO_LIBRARY_PATH, relative to its images
+  // folder): a profile's sessions are in its own folder there
+  const lib = path.resolve(profileLibraryDir(p, o.paths));
+  const sub = path.relative(path.resolve(o.paths.library), lib);
+  const studio = (base.ASTROPHOTO_LIBRARY_PATH ?? '').trim();
+  if (sub && !sub.startsWith('..') && !path.isAbsolute(sub) && !path.posix.isAbsolute(studio)) env.ASTROPHOTO_LIBRARY_PATH = path.posix.join(studio, ...sub.split(path.sep));
   // the profile's own variables have the last word
   for (const [k, v] of Object.entries(p.env)) if (ENV_NAME.test(k)) env[k] = v;
   // the one ZWO handshake key: only ZWO profiles get it, and it is not a profile's to change

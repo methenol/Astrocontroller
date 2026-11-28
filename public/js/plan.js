@@ -323,7 +323,7 @@ function progressBar(t) {
   const goal = Math.max(1, t.goalMin);
   const done = Math.min(100, (t.collectedMin / goal) * 100);
   const tonight = Math.min(100 - done, ((t.tonight?.plannedMin ?? 0) / goal) * 100);
-  return `<div class="np-prog" title="${esc(dur(t.collectedMin))} collected${t.journalOnlyMin ? ` (${dur(t.journalOnlyMin)} not transferred yet)` : ''} of ${esc(dur(t.goalMin))}${t.goalMode === 'snr' ? ` (the estimate for SNR ${t.snrGoal})` : ''}; tonight's plan adds ~${esc(dur(t.tonight?.plannedMin ?? 0))}"><div class="done" style="width:${done}%"></div><div class="tonight" style="width:${tonight}%"></div></div>`;
+  return `<div class="np-prog" title="${esc(dur(t.collectedMin))} collected${t.journalOnlyMin ? ` (${dur(t.journalOnlyMin)} from tonight, not transferred yet)` : ''} of ${esc(dur(t.goalMin))}${t.goalMode === 'snr' ? ` (the estimate for SNR ${t.snrGoal})` : ''}; tonight's plan adds ~${esc(dur(t.tonight?.plannedMin ?? 0))}"><div class="done" style="width:${done}%"></div><div class="tonight" style="width:${tonight}%"></div></div>`;
 }
 
 /** Under the goal: what an SNR goal works out to on this rig, or what an hours goal reaches. */

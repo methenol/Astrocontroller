@@ -116,7 +116,7 @@ export interface Candidate {
   programId?: string;
   priority?: number;
   goalMin?: number;
-  /** minutes already collected (library + journal, tonight's included) */
+  /** minutes already collected (the library, plus tonight's journal until it is transferred) */
   collectedMin?: number;
   keepCollecting?: boolean;
   minAltitude?: number;

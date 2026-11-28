@@ -1,16 +1,19 @@
 /**
  * What has been collected so far, per target, and what the journal has learned about the rig.
  *
- * Two records of a capture exist: the library (sessions transferred off the scope, counted from
- * their kept subs, library/sessions.ts) and the journal (what the scope stacked, recorded live).
- * A night not transferred yet is only in the journal; a night shot before the journal existed is
- * only in the library; a night in both is counted once, from whichever saw more of it.
+ * The library is the record of what was collected (sessions transferred off the scope, counted
+ * from their kept subs, library/sessions.ts): a session the owner deleted from it, or subs they
+ * threw out, no longer count, and the plan goes back to collecting them. The journal (what the
+ * scope stacked, recorded live) only stands in for the night in progress, whose sessions are still
+ * on the scope until the end-of-night transfer: without it a target that reached its goal tonight
+ * would be planned again at the next replan. Every earlier night is the library's alone.
  *
- * With a filter wanted for a target, only what was shot through it counts: a target asked for in
- * Duo-Band has collected nothing towards it from an Astro night. The library knows every session's
- * filter (sessions.ts sessionFilter); the journal knows the Seestar's but not the Dwarf's, so a
- * journal session with no filter counts towards it only on a night the library has nothing of the
- * target from (not transferred yet), where it is the only record there is.
+ * Only this profile's telescope counts (its library holds its own sessions; one migrated from the
+ * shared root can still hold the other maker's), and with a filter wanted for a target, only what
+ * was shot through it: a target asked for in Duo-Band has collected nothing towards it from an
+ * Astro night. The library knows every session's filter (sessions.ts sessionFilter); the journal
+ * knows the Seestar's but not the Dwarf's, so tonight's journal session with no filter counts
+ * towards a filter goal (it is the only record there is yet).
  *
  * The learned numbers close the loop: a GoTo plus focus that takes 9 minutes at this site, or a
  * stacker that keeps 70 % of the wall time, makes the plan's blocks honest about what they yield.
@@ -18,14 +21,15 @@
 import { captureLog } from '../library/sessions.js';
 import { targetKey } from '../astro/rest.js';
 import type { Journal } from './journal.js';
-import { nightOfStamp } from './clock.js';
+import { journalNight, nightOfStamp } from './clock.js';
+import { config } from '../config.js';
 import { sameFilter } from '../astro/acquisition/devices.js';
 
 export interface Collected {
   /** minutes of integration, all nights */
   totalMin: number;
   libraryMin: number;
-  /** minutes only the journal knows of (not transferred yet) */
+  /** minutes only the journal knows of (tonight's, not transferred yet) */
   journalOnlyMin: number;
   nights: number;
   lastNight: string | null;
@@ -60,24 +64,26 @@ export interface CollectedOptions {
   nights?: number;
   /** the filter wanted for a target key ("auto" or none: every filter counts) */
   filterOf?: (key: string) => string | undefined;
+  /** the maker whose library sessions count (default: this process's telescope); null = every one */
+  device?: 'dwarf' | 'seestar' | null;
+  /** the night in progress (journal night key), the only one the journal counts (default: now's) */
+  tonight?: string;
 }
 
-/** Per target key (rest.targetKey), minutes collected per night from both records, through the filter wanted for it. */
+/** Per target key (rest.targetKey), minutes collected per night: the library's, and tonight's from the journal until it is transferred. */
 export function collected(journal: Pick<Journal, 'recentSessions'> | null, opts: CollectedOptions = {}): Map<string, Collected> {
   const wanted = (key: string) => {
     const f = opts.filterOf?.(key);
     return f && f !== 'auto' ? f : undefined;
   };
+  const device = opts.device === undefined ? config.telescope.driver : opts.device;
+  const tonight = opts.tonight ?? journalNight(Date.now());
   const lib = new Map<string, Map<string, number>>();
-  // the nights the library has the target from, whatever the filter: there it is the record
-  const libNights = new Map<string, Set<string>>();
   for (const c of captureLog()) {
     const night = c.startedAt ? nightOfStamp(c.startedAt) : null;
     if (!night) continue;
+    if (device && c.device && c.device !== device) continue;
     const key = targetKey(c.target);
-    const seen = libNights.get(key) ?? new Set<string>();
-    seen.add(night);
-    libNights.set(key, seen);
     const want = wanted(key);
     if (want && !sameFilter(c.filter, want)) continue;
     const m = lib.get(key) ?? new Map<string, number>();
@@ -86,13 +92,13 @@ export function collected(journal: Pick<Journal, 'recentSessions'> | null, opts:
   }
   const jour = new Map<string, Map<string, number>>();
   for (const s of journal?.recentSessions(opts.nights ?? 3650) ?? []) {
-    const night = s.night;
-    if (!night || !s.stats.integrationS) continue;
+    // an earlier night is in the library, or is not collected any more
+    if (s.night !== tonight || !s.stats.integrationS) continue;
     const key = targetKey(s.target);
     const want = wanted(key);
-    if (want && (s.stats.filter ? !sameFilter(s.stats.filter, want) : libNights.get(key)?.has(night))) continue;
+    if (want && s.stats.filter && !sameFilter(s.stats.filter, want)) continue;
     const m = jour.get(key) ?? new Map<string, number>();
-    m.set(night, (m.get(night) ?? 0) + s.stats.integrationS / 60);
+    m.set(s.night, (m.get(s.night) ?? 0) + s.stats.integrationS / 60);
     jour.set(key, m);
   }
   const out = new Map<string, Collected>();

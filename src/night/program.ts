@@ -4,7 +4,7 @@
  * agent on their request (plan_program), and kept in DATA_DIR/plan/.
  *
  * A program target is a goal, not a booking: the solver works it into whichever nights and hours
- * suit it best, and stops scheduling it once the integration collected (library + journal,
+ * suit it best, and stops scheduling it once the integration collected (the library, plus tonight's journal until transferred,
  * night/progress.ts) reaches the goal, unless the owner asked to keep collecting.
  *
  * The goal is given as hours, or as a signal-to-noise ratio: then `goalMin` is the integration this

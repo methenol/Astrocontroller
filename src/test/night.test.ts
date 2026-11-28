@@ -1006,14 +1006,21 @@ describe('night plan: the target memory', () => {
     addTarget({ name: 'M 42', goalMin: 60, priority: 3, keepCollecting: true }, night);
     const journal = new Journal({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mem-j-')) });
     const yesterday = new Date(Date.parse(`${night}T12:00:00Z`) - 86_400e3).toISOString().slice(0, 10);
-    const s = journal.openSession(yesterday, { target: 'M 42', at: now - 86_400e3 });
-    s.stats.integrationS = 90 * 60;
-    journal.closeSession(yesterday, s, 'done', 'test');
-    const p = await svc(journal, now).plan();
-    const o = p.outlook.find((x) => x.displayName === 'M 42')!;
-    assert.equal(o.status, 'held');
-    assert.match(o.reason, new RegExp(`goal met on ${yesterday}: resting until`));
-    removeTarget('M 42');
+    // what was collected is what the library holds: 90 one-minute subs from yesterday's night
+    const savedLib = config.paths.library;
+    config.paths.library = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-lib-'));
+    const folder = path.join(config.paths.library, `DWARF_RAW_TELE_M 42_EXP_60_GAIN_60_${yesterday}-22-00-00-000`);
+    fs.mkdirSync(folder);
+    for (let i = 0; i < 90; i++) fs.writeFileSync(path.join(folder, `M 42_60s60_Astro_${i}.fits`), '');
+    try {
+      const p = await svc(journal, now).plan();
+      const o = p.outlook.find((x) => x.displayName === 'M 42')!;
+      assert.equal(o.status, 'held');
+      assert.match(o.reason, new RegExp(`goal met on ${yesterday}: resting until`));
+    } finally {
+      config.paths.library = savedLib;
+      removeTarget('M 42');
+    }
   });
 });
 

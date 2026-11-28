@@ -112,14 +112,14 @@ interface NightFile {
  * program (an Astro night does not count towards a Duo-Band goal); a target on "auto", and a
  * filler, counts every filter.
  */
-function programProgress(journal: Journal | null): ReturnType<typeof collected> {
+function programProgress(journal: Journal | null, now: number): ReturnType<typeof collected> {
   const filters = new Map<string, string>();
   for (const t of loadProgram()) {
     const key = targetKey(t.name);
     if (t.filter && t.filter !== 'auto' && !filters.has(key)) filters.set(key, t.filter);
   }
   for (const [key, filter] of panelFilters()) filters.set(key, filter);
-  return collected(journal, { filterOf: (key) => filters.get(key) });
+  return collected(journal, { filterOf: (key) => filters.get(key), tonight: journalNight(now) });
 }
 
 /** The catalog filter of fillers and suggestions (unset fields: the plan settings'). */
@@ -333,7 +333,7 @@ export class PlanService extends SafeEmitter {
     const defaults = planDefaults();
     const moonIllum = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2)).illuminationPercent / 100;
     const glassFilters = defaults.filter ? [defaults.filter] : defaults.filters.length ? defaults.filters : ['none'];
-    const progress = programProgress(this.d.journal);
+    const progress = programProgress(this.d.journal, this.now());
     const list: Candidate[] = [];
     const excluded: NonNullable<SolveInput['excluded']> = [];
     const program = loadProgram();
@@ -404,7 +404,7 @@ export class PlanService extends SafeEmitter {
     const glassFilters = defaults.filter ? [defaults.filter] : defaults.filters.length ? defaults.filters : ['none'];
     const moonIllum = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2)).illuminationPercent / 100;
     // what has integration towards a goal already: the owner's snoozes and "don't suggest again" still win
-    const progress = programProgress(this.d.journal);
+    const progress = programProgress(this.d.journal, this.now());
     const userRests = loadRest().filter((x) => x.role === 'snoozed' || x.role === 'done');
     const inProgram = new Set(loadProgram().map((t) => targetKey(t.name)));
     // the general goal, as minutes or as each target's minutes for the owner's SNR
@@ -811,7 +811,7 @@ export class PlanService extends SafeEmitter {
     const solveMs = Date.now() - t1;
     const facts = await this.facts();
     // what each target has collected: one look at the library for the whole night, not one per block
-    const progress = facts ? programProgress(this.d.journal) : null;
+    const progress = facts ? programProgress(this.d.journal, this.now()) : null;
     for (const b of solved.blocks) if (b.target && !b.past && !b.target.advice) b.target.advice = this.advise(b.target, b, this.lastConditions, facts, progress);
     const site = this.site();
     const moon = sky.moonState(site, new Date((w.start.getTime() + w.end.getTime()) / 2));
@@ -1197,7 +1197,7 @@ export class PlanService extends SafeEmitter {
 
   /** The program with what each target has collected and what tonight's plan gives it. */
   async programView(): Promise<Array<ProgramTarget & { key: string; collectedMin: number; journalOnlyMin: number; nights: number; lastNight: string | null; tonight: PlannedNight['outlook'][number] | null; snr: ProgramSnr | null }>> {
-    const progress = programProgress(this.d.journal);
+    const progress = programProgress(this.d.journal, this.now());
     let plan: PlannedNight | null = null;
     try {
       plan = await this.plan();
@@ -1235,7 +1235,7 @@ export class PlanService extends SafeEmitter {
   async calendar(o: Pick<CalendarOptions, 'filters' | 'programOnly' | 'teleFovWidthArcmin' | 'limit'>): Promise<Awaited<ReturnType<typeof buildCalendar>>> {
     const site = this.site();
     const settings = loadSettings();
-    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal), now: this.now() });
+    return buildCalendar({ ...o, site, settings, horizon: settings.useHorizon ? horizonFor(site) : undefined, efficiency: this.learned(settings).efficiency, progress: programProgress(this.d.journal, this.now()), now: this.now() });
   }
 
   /** The program or the settings changed: solve again shortly. */

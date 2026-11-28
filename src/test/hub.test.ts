@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { proxyRequest, splitPrefixed, type ProxyTarget } from '../hub/proxy.js';
 import { settingProblems } from '../config/settings.js';
 import { Instance, type InstanceStatus } from '../hub/instances.js';
+import { moveOffLibraryRoot, usesLibraryRoot } from '../hub/library-migration.js';
 
 const tmpPaths = (): HubPaths => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-'));
@@ -221,6 +222,38 @@ describe('migration of the single-telescope setup', () => {
     const env = childEnv(p, {}, { paths, port: 18100, tunnelHost: 'seestar-portfwd' });
     assert.equal(env.SEESTAR_RPC_PORT, '4700');
     assert.equal(env.DATA_DIR, '/data');
+  });
+
+  test('its library moves off the shared root into its own folder; the other profiles\' folders stay', () => {
+    const paths = tmpPaths();
+    const root = paths.library;
+    const data = path.join(paths.data);
+    const S = 'DWARF_RAW_TELE_M 31_EXP_60_GAIN_60_2026-10-12-23-35-37-855';
+    for (const d of [S, 'CALI_FRAME/dark/cam_0', '_photos/2026-10-01', 'dwarf-mini/X', 'sam-s-s50-pro/Y']) fs.mkdirSync(path.join(root, d), { recursive: true });
+    fs.writeFileSync(path.join(root, S, 'a.fits'), '');
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(path.join(data, 'jobs.json'), JSON.stringify({ jobs: [{ destination: path.join(root, S), note: root + 'x' }] }));
+    fs.writeFileSync(path.join(data, 'processing.json'), JSON.stringify({ items: [{ outputs: [path.join(root, S, 'processed', 'o.jpg')] }] }));
+    const store = new ProfileStore(paths);
+    const p = store.adopt({ ...legacyProfile({ TELESCOPE_DRIVER: 'dwarf', DATA_DIR: data, LIBRARY_DIR: root }, paths), name: 'Dwarf 3' });
+    assert.ok(usesLibraryRoot(p, paths));
+    const r = moveOffLibraryRoot(p, paths, ['dwarf-mini', 'sam-s-s50-pro'])!;
+    const own = path.join(root, 'dwarf-3');
+    assert.equal(r.to, own, 'named after the profile, not its id');
+    assert.equal(r.moved, 3);
+    assert.deepEqual(fs.readdirSync(root).sort(), ['dwarf-3', 'dwarf-mini', 'sam-s-s50-pro']);
+    assert.ok(fs.existsSync(path.join(own, S, 'a.fits')));
+    assert.ok(fs.existsSync(path.join(own, 'CALI_FRAME', 'dark', 'cam_0')));
+    const jobs = JSON.parse(fs.readFileSync(path.join(data, 'jobs.json'), 'utf8'));
+    assert.equal(jobs.jobs[0].destination, path.join(own, S));
+    assert.equal(jobs.jobs[0].note, root + 'x', 'only paths under the root are repointed');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(data, 'processing.json'), 'utf8')).items[0].outputs[0], path.join(own, S, 'processed', 'o.jpg'));
+    const after = store.setLibraryDir(p.id, r.to);
+    assert.equal(usesLibraryRoot(after, paths), false);
+    assert.equal(moveOffLibraryRoot(after, paths, []), null, 'once only');
+    const env = childEnv(after, { ASTROPHOTO_LIBRARY_PATH: '' }, { paths, port: 18100, tunnelHost: 'x' });
+    assert.equal(env.LIBRARY_DIR, own);
+    assert.equal(env.ASTROPHOTO_LIBRARY_PATH, 'dwarf-3', 'Studio sees the root: the profile\'s sessions are in its folder there');
   });
 });
 
